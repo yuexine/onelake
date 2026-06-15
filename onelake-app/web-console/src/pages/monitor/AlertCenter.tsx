@@ -6,7 +6,7 @@ import { AlertOutlined, BellOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { opsAlerts } from '../../mock';
-import { PageHeader, SectionCard, StateView } from '../../components';
+import { PageHeader, SectionCard, StateView, IntentBadge } from '../../components';
 
 const { Text } = Typography;
 
@@ -63,11 +63,7 @@ export default function AlertCenter() {
           pagination={false}
           columns={[
             { title: '级别', dataIndex: 'level', width: 80, render: (l: string) => (
-              <span style={{
-                padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                background: l === 'P0' ? 'var(--ol-error-soft)' : l === 'P1' ? 'var(--ol-warning-soft)' : 'var(--ol-fill-soft)',
-                color: l === 'P0' ? 'var(--ol-error)' : l === 'P1' ? '#B45309' : 'var(--ol-ink-3)',
-              }}>{l}</span>
+              <IntentBadge intent={l === 'P0' ? 'error' : l === 'P1' ? 'warning' : 'neutral'} solid={l === 'P0'}>{l}</IntentBadge>
             ) },
             { title: '来源', dataIndex: 'source', render: (s: string) => <span className="ol-chip">{s}</span> },
             { title: '告警', dataIndex: 'title' },
@@ -100,11 +96,7 @@ export default function AlertCenter() {
                 <div>
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>级别</Text>
                   <div style={{ marginTop: 4 }}>
-                    <span style={{
-                      padding: '2px 10px', borderRadius: 4, fontSize: 12, fontWeight: 600,
-                      background: current.level === 'P0' ? 'var(--ol-error-soft)' : 'var(--ol-warning-soft)',
-                      color: current.level === 'P0' ? 'var(--ol-error)' : '#B45309',
-                    }}>{current.level}</span>
+                    <IntentBadge size="md" solid={current.level === 'P0'} intent={current.level === 'P0' ? 'error' : 'warning'}>{current.level}</IntentBadge>
                   </div>
                 </div>
                 <div>

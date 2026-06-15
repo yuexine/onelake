@@ -4,7 +4,7 @@
 import { Table, Tag, Space, Button, Input, Select, DatePicker, Typography, Alert } from 'antd';
 import { ExportOutlined, FileSearchOutlined } from '@ant-design/icons';
 import { auditLogs } from '../../mock';
-import { PageHeader, SectionCard, FilterBar, StateView } from '../../components';
+import { PageHeader, SectionCard, FilterBar, StateView, IntentBadge } from '../../components';
 
 const { Text } = Typography;
 
@@ -61,8 +61,8 @@ export default function Audit() {
             ) },
             { title: '操作', dataIndex: 'action', width: 180, render: (a: string, r: any) => (
               <Space size={6}>
-                <Tag color={r.sensitive ? 'error' : 'default'} style={{ margin: 0 }}>{a}</Tag>
-                {r.sensitive && <Tag color="warning" style={{ margin: 0 }}>⚠ 敏感</Tag>}
+                <IntentBadge intent={r.sensitive ? 'error' : 'neutral'}>{a}</IntentBadge>
+                {r.sensitive && <IntentBadge intent="warning" solid>⚠ 敏感</IntentBadge>}
               </Space>
             ) },
             { title: '对象', dataIndex: 'resourceId', render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text> },

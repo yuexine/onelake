@@ -4,7 +4,7 @@
 import { Row, Col, Tag, Space, Button, Input, Typography, Modal, message } from 'antd';
 import { SearchOutlined, AppstoreOutlined, ArrowRightOutlined } from '@ant-design/icons';
 import { useState } from 'react';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, IntentBadge, type Intent } from '../../components';
 
 const { Text } = Typography;
 
@@ -16,10 +16,10 @@ const OPERATORS = [
   { id: 'op-5', category: '脱敏', name: '保格加密 FPE', in: '字段', out: '字段', version: 'v1', scope: '自定义' },
 ];
 
-const CATEGORY_COLOR: Record<string, { bg: string; fg: string }> = {
-  '治理': { bg: 'var(--ol-brand-soft)', fg: 'var(--ol-brand)' },
-  '脱敏': { bg: 'var(--ol-warning-soft)', fg: '#B45309' },
-  '加密': { bg: 'var(--ol-success-soft)', fg: 'var(--ol-success)' },
+const CATEGORY_INTENT: Record<string, Intent> = {
+  '治理': 'brand',
+  '脱敏': 'warning',
+  '加密': 'success',
 };
 
 export default function OperatorMarket() {
@@ -59,7 +59,7 @@ export default function OperatorMarket() {
 
       <Row gutter={[16, 16]}>
         {filtered.map((op) => {
-          const c = CATEGORY_COLOR[op.category] || CATEGORY_COLOR['治理'];
+          const intent = CATEGORY_INTENT[op.category] || 'brand';
           return (
             <Col key={op.id} xs={24} sm={12} md={8} lg={6}>
               <div
@@ -84,10 +84,7 @@ export default function OperatorMarket() {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span style={{
-                    padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                    background: c.bg, color: c.fg,
-                  }}>{op.category}</span>
+                  <IntentBadge intent={intent}>{op.category}</IntentBadge>
                   <Tag style={{ margin: 0, fontSize: 11 }}>{op.version}</Tag>
                 </div>
                 <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 10 }}>{op.name}</div>

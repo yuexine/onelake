@@ -32,10 +32,17 @@ export function NotificationCenter() {
   const navigate = useNavigate();
   const unread = notifications.filter((n) => !n.isRead).length;
 
+  const handleClose = () => {
+    setNotifyOpen(false);
+    if (unread > 0) {
+      markAllRead();
+    }
+  };
+
   return (
     <Drawer
       open={notifyOpen}
-      onClose={() => setNotifyOpen(false)}
+      onClose={handleClose}
       title={<Space><BellOutlined />通知中心{unread > 0 && <Tag color="red">{unread} 未读</Tag>}</Space>}
       width={480}
       extra={

@@ -51,7 +51,7 @@ export default function Tables() {
           { label: '总表数', value: counts.total },
           { label: '敏感资产', value: counts.sensitive },
         ]}
-        actions={<Button type="primary" icon={<PlusOutlined />}>新建表（建模向导）</Button>}
+        actions={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/lakehouse/tables/new')}>新建表（建模向导）</Button>}
       />
 
       <Row gutter={16}>

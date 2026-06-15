@@ -28,6 +28,7 @@ const CollectMonitor = lazy(() => import('./pages/integration/CollectMonitor'));
 
 // 湖仓
 const LakehouseTables = lazy(() => import('./pages/lakehouse/Tables'));
+const TableWizard = lazy(() => import('./pages/lakehouse/TableWizard'));
 const TableDetail = lazy(() => import('./pages/lakehouse/TableDetail'));
 const SqlWorkbench = lazy(() => import('./pages/lakehouse/SqlWorkbench'));
 const OptimizeCenter = lazy(() => import('./pages/lakehouse/OptimizeCenter'));
@@ -107,6 +108,7 @@ export function AppRoutes() {
           {/* 湖仓 */}
           <Route path="/lakehouse" element={<Navigate to="/lakehouse/tables" replace />} />
           <Route path="/lakehouse/tables" element={<LakehouseTables />} />
+          <Route path="/lakehouse/tables/new" element={<TableWizard />} />
           <Route path="/lakehouse/tables/:id" element={<TableDetail />} />
           <Route path="/lakehouse/sql" element={<SqlWorkbench />} />
           <Route path="/lakehouse/optimize" element={<OptimizeCenter />} />

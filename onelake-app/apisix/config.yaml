@@ -1,0 +1,29 @@
+#
+# OneLake APISIX 配置（对应《技术初始化文档》§3.1 + §6.6）
+#
+apisix:
+  node_listen: 9080
+  control:
+    ip: 0.0.0.0
+    port: 9180
+  admin_key:
+    -
+      name: "admin-key"
+      key: "edd1c9f034335f136f87ad84b625c8f1"
+      role: admin
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+
+etcd:
+  host:
+    - "http://127.0.0.1:2379"
+  prefix: "/apisix"
+
+plugin_attr:
+  prometheus:
+    export_addr:
+      ip: "0.0.0.0"
+      port: 9091

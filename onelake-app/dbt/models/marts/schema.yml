@@ -1,0 +1,23 @@
+version: 2
+models:
+  - name: ads_order_gmv_daily
+    description: "每日订单 GMV 应用层指标"
+    columns:
+      - name: stat_date
+        tests: [not_null, unique]
+      - name: gmv
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: order_cnt
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+
+  - name: dwd_order_df
+    description: "订单明细 DWD 宽表"
+    columns:
+      - name: order_id
+        tests: [not_null, unique]

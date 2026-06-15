@@ -1,0 +1,98 @@
+spring:
+  application:
+    name: onelake-app
+  datasource:
+    url: ${JDBC_URL:jdbc:postgresql://localhost:5432/onelake}
+    username: ${JDBC_USER:onelake}
+    password: ${JDBC_PASSWORD:onelake}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 10000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        default_schema: common
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+    show-sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    schemas: common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api
+    locations: >
+      classpath:db/migration/common,
+      classpath:db/migration/integration,
+      classpath:db/migration/orchestration,
+      classpath:db/migration/catalog,
+      classpath:db/migration/modeling,
+      classpath:db/migration/quality,
+      classpath:db/migration/security,
+      classpath:db/migration/dataservice
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_URL:http://localhost:8081}/realms/onelake
+          jwk-set-uri: ${KEYCLOAK_URL:http://localhost:8081}/realms/onelake/protocol/openid-connect/certs
+
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    timeout: 2000ms
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env,loggers
+  endpoint:
+    health:
+      show-details: always
+  health:
+    db:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+
+# 数据面组件端点（控制面只"驱动"它们）
+onelake:
+  webclient:
+    connect-timeout-ms: 3000
+    read-timeout-ms: 15000
+  dataplane:
+    airbyte:
+      base-url: ${AIRBYTE_URL:http://localhost:8000/api/v1}
+    dagster:
+      graphql-url: ${DAGSTER_GRAPHQL_URL:http://localhost:3000/graphql}
+    openmetadata:
+      base-url: ${OPENMETADATA_URL:http://localhost:8585/api/v1}
+      token: ${OM_TOKEN:}
+    apisix-admin:
+      base-url: ${APISIX_ADMIN_URL:http://localhost:9180/apisix/admin}
+      key: ${APISIX_ADMIN_KEY:edd1c9f034335f136f87ad84b625c8f1}
+    postgrest:
+      endpoint: ${POSTGREST_URL:http://postgrest:3000}
+
+logging:
+  level:
+    com.onelake: INFO
+    org.hibernate.SQL: WARN
+    org.springframework: INFO

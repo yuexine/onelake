@@ -1,0 +1,27 @@
+version: 2
+sources:
+  - name: ods
+    schema: ods
+    description: "贴源 ODS 层 - 来自数据源采集的原始数据"
+    tables:
+      - name: orders
+        description: "订单明细源表"
+        columns:
+          - name: order_id
+            description: "订单ID 主键"
+            tests: [not_null, unique]
+          - name: user_id
+            description: "用户ID"
+          - name: amount
+            description: "订单金额"
+          - name: status
+            description: "订单状态 PAID/CANCEL"
+          - name: order_time
+            description: "下单时间"
+      - name: users
+        description: "用户源表"
+        columns:
+          - name: user_id
+            tests: [not_null, unique]
+          - name: phone
+            description: "手机号 (PII L3)"

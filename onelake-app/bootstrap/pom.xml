@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.onelake</groupId>
+        <artifactId>onelake-app</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>bootstrap</artifactId>
+    <name>bootstrap</name>
+    <description>启动模块：Main、聚合配置、Flyway 迁移</description>
+
+    <dependencies>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-common</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-integration</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-orchestration</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-catalog</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-modeling</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-quality</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-security</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-dataservice</artifactId></dependency>
+
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-oauth2-resource-server</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-jpa</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
+        <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId></dependency>
+        <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-core</artifactId></dependency>
+        <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-database-postgresql</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-devtools</artifactId><scope>runtime</scope><optional>true</optional></dependency>
+
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>onelake-app</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-maven-plugin</artifactId>
+                <configuration>
+                    <url>jdbc:postgresql://${env.PG_HOST:localhost}:5432/onelake</url>
+                    <user>${env.PG_USER:onelake}</user>
+                    <password>${env.PG_PASSWORD:onelake}</password>
+                    <schemas>common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api</schemas>
+                    <locations>
+                        classpath:db/migration/common,
+                        classpath:db/migration/integration,
+                        classpath:db/migration/orchestration,
+                        classpath:db/migration/catalog,
+                        classpath:db/migration/modeling,
+                        classpath:db/migration/quality,
+                        classpath:db/migration/security,
+                        classpath:db/migration/dataservice
+                    </locations>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

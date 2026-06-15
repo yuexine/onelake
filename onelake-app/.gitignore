@@ -1,0 +1,42 @@
+# Target
+target/
+build/
+out/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Frontend
+web-console/node_modules/
+web-console/dist/
+web-console/.env.local
+web-console/.env.*.local
+
+# Local env
+.env
+.env.local
+*.local
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+# Test reports
+**/coverage/
+**/surefire-reports/
+**/failsafe-reports/
+
+# DB
+*.db
+*.sqlite
+
+# OS
+Thumbs.db

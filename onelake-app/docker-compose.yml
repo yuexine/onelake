@@ -1,0 +1,188 @@
+# OneLake 数据面底座
+# 严格按照《技术初始化文档》§3.1 与 §6.1 配置
+services:
+  postgres:
+    image: postgres:16
+    container_name: onelake-postgres
+    environment:
+      POSTGRES_DB: onelake
+      POSTGRES_USER: onelake
+      POSTGRES_PASSWORD: onelake
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onelake -d onelake"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: onelake-redis
+    ports: ["6379:6379"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: onelake-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["miniodata:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  hive-metastore-db:
+    image: postgres:16
+    container_name: onelake-hms-db
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive123
+    volumes: ["hmsdbdata:/var/lib/postgresql/data"]
+
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: onelake-hms
+    depends_on: [hive-metastore-db, minio]
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      IS_RESUME: "true"
+    ports: ["9083:9083"]
+    volumes:
+      - ./trino/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+
+  trino:
+    image: trinodb/trino:latest
+    container_name: onelake-trino
+    depends_on: [hive-metastore, minio]
+    ports: ["8080:8080"]
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25
+    container_name: onelake-keycloak
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/onelake
+      KC_DB_USERNAME: onelake
+      KC_DB_PASSWORD: onelake
+    ports: ["8081:8080"]
+    depends_on: [postgres]
+
+  openmetadata-es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: onelake-om-es
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes: ["omesdata:/usr/share/elasticsearch/data"]
+
+  openmetadata-mysql:
+    image: mysql:8.0
+    container_name: onelake-om-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_USER: openmetadata
+      MYSQL_PASSWORD: openmetadata
+      MYSQL_DATABASE: openmetadata_db
+    volumes: ["ommysqldata:/var/lib/mysql"]
+
+  openmetadata:
+    image: openmetadata/server:1.5.6
+    container_name: onelake-openmetadata
+    depends_on: [openmetadata-es, openmetadata-mysql]
+    environment:
+      OPENMETADATA_ELASTICSEARCH_HOST: openmetadata-es
+      OPENMETADATA_ELASTICSEARCH_PORT: "9200"
+      OPENMETADATA_DB_HOST: openmetadata-mysql
+      OPENMETADATA_DB_USER: openmetadata
+      OPENMETADATA_DB_PASSWORD: openmetadata
+      OPENMETADATA_DB_SCHEMA: openmetadata_db
+    ports: ["8585:8585"]
+
+  postgrest:
+    image: postgrest/postgrest:latest
+    container_name: onelake-postgrest
+    environment:
+      PGRST_DB_URI: postgres://onelake:onelake@postgres:5432/onelake
+      PGRST_DB_SCHEMA: dataservice_api
+      PGRST_DB_ANON_ROLE: web_anon
+      PGRST_JWT_SECRET: onelake-dev-secret-change-me
+    ports: ["3001:3000"]
+    depends_on: [postgres]
+
+  apisix:
+    image: apache/apisix:latest
+    container_name: onelake-apisix
+    ports: ["9080:9080", "9180:9180"]
+    volumes:
+      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - apisixdata:/usr/local/apisix:rw
+    depends_on: [postgrest]
+
+  dagster-postgres:
+    image: postgres:16
+    container_name: onelake-dagster-pg
+    environment:
+      POSTGRES_DB: dagster
+      POSTGRES_USER: dagster
+      POSTGRES_PASSWORD: dagster123
+
+  dagster:
+    image: dagster/dagster:latest
+    container_name: onelake-dagster
+    ports: ["3000:3000"]
+    depends_on: [dagster-postgres]
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      DAGSTER_POSTGRES_HOST: dagster-postgres
+      DAGSTER_POSTGRES_USER: dagster
+      DAGSTER_POSTGRES_PASSWORD: dagster123
+      DAGSTER_POSTGRES_DB: dagster
+    volumes: ["dagsterhome:/opt/dagster/dagster_home"]
+
+  airbyte:
+    image: airbyte/airbyte:latest
+    container_name: onelake-airbyte
+    ports: ["8000:8000"]
+    volumes: ["airbytedata:/config"]
+
+  superset:
+    image: apache/superset:latest
+    container_name: onelake-superset
+    ports: ["8088:8088"]
+    environment:
+      SUPERSET_SECRET_KEY: onelake-superset-dev
+    volumes: ["supersetdata:/app/superset_home"]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  hmsdbdata:
+  omesdata:
+  ommysqldata:
+  apisixdata:
+  dagsterhome:
+  airbytedata:
+  supersetdata:

@@ -1,0 +1,30 @@
+# OneLake dbt 工程（对应《技术初始化文档》§4.2）
+name: 'onelake'
+version: '0.1.0'
+config-version: 2
+
+profile: 'onelake'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  onelake:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: dwd
+    marts:
+      +materialized: table
+      +schema: ads
+      +file_format: iceberg

@@ -5,6 +5,7 @@ import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.DatabaseProbeResult;
 import com.onelake.integration.api.vo.ProbeDatabasesVO;
+import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.service.DataSourceService;
@@ -150,6 +151,32 @@ class DataSourceControllerTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.databases[0]").value("orders"))
             .andExpect(jsonPath("$.data.manualAllowed").value(true));
+    }
+
+    @Test
+    void testConfigReturnsWrappedConnectivityResult() throws Exception {
+        TestDataSourceVO vo = new TestDataSourceVO(
+            "MYSQL",
+            Map.of("host", "db.internal", "port", 3306, "dbName", "orders", "username", "reader"),
+            "DIRECT"
+        );
+        ConnectivityResult connectivity = new ConnectivityResult(
+            true,
+            null,
+            "连通",
+            8L,
+            Instant.now(),
+            Map.of("host", "db.internal")
+        );
+        when(service.testConnectivity(vo)).thenReturn(connectivity);
+
+        mockMvc.perform(post("/api/v1/integration/datasources/test-config")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(vo)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.ok").value(true))
+            .andExpect(jsonPath("$.data.rttMillis").value(8));
     }
 
     private DataSourceDTO dto(UUID id, String name) {

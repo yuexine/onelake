@@ -9,6 +9,7 @@ import com.onelake.integration.api.vo.DatabaseProbeResult;
 import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.ProbeDatabasesVO;
+import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.client.discovery.DatabaseDiscoveryClient;
 import com.onelake.integration.client.ConnectivityTester;
@@ -164,6 +165,20 @@ public class DataSourceServiceImpl implements DataSourceService {
         audit.audit("TEST", "datasource", id.toString(),
             Map.of("ok", r.ok(), "errorCode", r.errorCode() == null ? "-" : r.errorCode()));
         return r;
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public ConnectivityResult testConnectivity(TestDataSourceVO vo) {
+        DataSourceType parsedType = configValidator.parseType(vo.type());
+        NetworkMode parsedNetworkMode = configValidator.parseNetworkMode(vo.networkMode());
+        configValidator.validate(parsedType, parsedNetworkMode, vo.config());
+
+        DataSource ds = new DataSource();
+        ds.setType(parsedType);
+        ds.setNetworkMode(parsedNetworkMode);
+        ds.setConfig(com.onelake.common.util.JsonUtil.toJson(vo.config()));
+        return tester.test(ds);
     }
 
     @Override

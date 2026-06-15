@@ -4,6 +4,7 @@ import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.DatabaseProbeResult;
 import com.onelake.integration.api.vo.ProbeDatabasesVO;
+import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 
@@ -23,6 +24,8 @@ public interface DataSourceService {
     List<DataSourceDTO> list(String type, String health, String envLevel, String keyword);
 
     ConnectivityResult testConnectivity(UUID id);
+
+    ConnectivityResult testConnectivity(TestDataSourceVO vo);
 
     DatabaseProbeResult probeDatabases(ProbeDatabasesVO vo);
 }

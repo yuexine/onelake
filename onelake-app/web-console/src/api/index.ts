@@ -33,6 +33,15 @@ export interface SystemContext {
   roles: string[];
 }
 
+export interface ConnectivityTestResult {
+  ok: boolean;
+  rttMillis?: number;
+  errorCode?: string;
+  message?: string;
+  writePrivilegeDetected?: boolean;
+  diagnostics?: Record<string, unknown>;
+}
+
 export const SystemAPI = {
   context: () => unwrap<SystemContext>(http.get('/system/context')),
 
@@ -55,8 +64,13 @@ export const IntegrationAPI = {
     ),
 
   testDatasource: (id: string) =>
-    unwrap<{ ok: boolean; rttMillis?: number; errorCode?: string; message?: string }>(
+    unwrap<ConnectivityTestResult>(
       http.post(`/integration/datasources/${id}/test`),
+    ),
+
+  testDatasourceConfig: (body: unknown) =>
+    unwrap<ConnectivityTestResult>(
+      http.post('/integration/datasources/test-config', body),
     ),
 
   deleteDatasource: (id: string) =>

@@ -211,6 +211,8 @@ export default function DatasourceList() {
   const [systemContext, setSystemContext] = useState<Awaited<ReturnType<typeof SystemAPI.context>>>();
   const [databaseOptions, setDatabaseOptions] = useState<{ label: string; value: string }[]>([]);
   const [databaseProbeLoading, setDatabaseProbeLoading] = useState(false);
+  const [drawerTestLoading, setDrawerTestLoading] = useState(false);
+  const [drawerWritePrivilegeDetected, setDrawerWritePrivilegeDetected] = useState(false);
   const [form] = Form.useForm();
   const selectedType = (Form.useWatch('type', form) || 'MYSQL') as DataSourceFormType;
   const selectedNetworkMode = String(Form.useWatch('networkMode', form) || 'DIRECT');
@@ -226,6 +228,7 @@ export default function DatasourceList() {
       envLevel: 'PROD',
       ...defaultValuesForType('MYSQL'),
     });
+    setDrawerWritePrivilegeDetected(false);
     setDrawerOpen(true);
   };
 
@@ -259,6 +262,36 @@ export default function DatasourceList() {
         message.error(e.message || '库列表探查失败，可手动输入');
       })
       .finally(() => setDatabaseProbeLoading(false));
+  };
+
+  const handleDrawerTest = () => {
+    const requiredConnectionFieldNames = connectionFields(selectedType, selectedNetworkMode)
+      .filter((field) => fieldRequired(field, selectedSshAuthType))
+      .map((field) => field.name);
+    const requiredFieldNames = [
+      'type',
+      'networkMode',
+      ...requiredConnectionFieldNames,
+      ...(databaseFieldVisible ? ['dbName'] : []),
+    ];
+    setDrawerTestLoading(true);
+    form.validateFields(requiredFieldNames)
+      .then((values) => IntegrationAPI.testDatasourceConfig(probePayload({ ...form.getFieldsValue(), ...values })))
+      .then((result) => {
+        if (!result.ok) {
+          throw new Error(result.message || '连接失败');
+        }
+        const writePrivilegeDetected = Boolean(
+          result.writePrivilegeDetected || result.diagnostics?.writePrivilegeDetected,
+        );
+        setDrawerWritePrivilegeDetected(writePrivilegeDetected);
+        message.success(`测连成功${result.rttMillis != null ? ` · ${result.rttMillis}ms` : ''}`);
+      })
+      .catch((e) => {
+        setDrawerWritePrivilegeDetected(false);
+        message.error(e.message || '测连失败，请检查连接信息');
+      })
+      .finally(() => setDrawerTestLoading(false));
   };
 
   useEffect(() => {
@@ -495,7 +528,7 @@ export default function DatasourceList() {
         extra={
           <Space>
             <Button onClick={() => setDrawerOpen(false)}>取消</Button>
-            <Button icon={<ThunderboltOutlined />} onClick={() => message.info('正在测连…')}>测连</Button>
+            <Button icon={<ThunderboltOutlined />} loading={drawerTestLoading} onClick={handleDrawerTest}>测连</Button>
             <Button type="primary" onClick={() => {
               form.validateFields().then((values) => IntegrationAPI.createDatasource(createPayload(values))).then((created) => {
                 setDataSources((rows) => [created, ...rows]);
@@ -515,6 +548,7 @@ export default function DatasourceList() {
               placeholder="选择数据源类型"
               onChange={(type: DataSourceFormType) => {
                 setDatabaseOptions([]);
+                setDrawerWritePrivilegeDetected(false);
                 form.setFieldsValue({ dbName: undefined, ...defaultValuesForType(type) });
               }}
               options={DATA_SOURCE_TYPES.map((t) => ({
@@ -551,7 +585,10 @@ export default function DatasourceList() {
 
           <Form.Item label="网络模式" name="networkMode" rules={[{ required: true }]}>
             <Select
-              onChange={(networkMode) => form.setFieldsValue(defaultValuesForNetworkMode(networkMode))}
+              onChange={(networkMode) => {
+                setDrawerWritePrivilegeDetected(false);
+                form.setFieldsValue(defaultValuesForNetworkMode(networkMode));
+              }}
               options={NETWORK_MODE_OPTIONS}
             />
           </Form.Item>
@@ -618,10 +655,16 @@ export default function DatasourceList() {
           )}
 
           <Alert
-            type="warning" showIcon
+            type={drawerWritePrivilegeDetected ? 'warning' : 'info'} showIcon
             icon={<LockOutlined />}
             style={{ marginTop: 8, borderRadius: 6 }}
-            message={<span style={{ fontSize: 12 }}>检测到写权限账号，建议使用只读账号以避免下游误操作</span>}
+            message={(
+              <span style={{ fontSize: 12 }}>
+                {drawerWritePrivilegeDetected
+                  ? '检测到写权限账号，建议使用只读账号以避免下游误操作'
+                  : '建议使用只读账号接入，避免下游误操作'}
+              </span>
+            )}
           />
         </Form>
       </Drawer>

@@ -9,6 +9,7 @@ import com.onelake.common.util.JsonUtil;
 import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.ProbeDatabasesVO;
+import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.client.ConnectivityTester;
 import com.onelake.integration.client.discovery.DatabaseDiscoveryClient;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mapstruct.factory.Mappers;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.time.Instant;
@@ -387,6 +389,35 @@ class DataSourceServiceImplTest {
         assertThat(ds.getHealth()).isEqualTo(Health.OK);
         assertThat(ds.getLastCheckAt()).isNotNull();
         verify(audit).audit(eq("TEST"), eq("datasource"), eq(id.toString()), any(Map.class));
+    }
+
+    @Test
+    void testConnectivityByConfigValidatesAndRunsWithoutPersistingDatasource() {
+        TestDataSourceVO vo = new TestDataSourceVO(
+            "mysql",
+            Map.of("host", "db.internal", "port", 3306, "dbName", "orders", "username", "reader"),
+            "direct"
+        );
+        ConnectivityResult result = new ConnectivityResult(
+            true,
+            null,
+            "连通",
+            9L,
+            Instant.now(),
+            Map.of("host", "db.internal")
+        );
+        ArgumentCaptor<DataSource> captor = ArgumentCaptor.forClass(DataSource.class);
+        when(tester.test(any(DataSource.class))).thenReturn(result);
+
+        ConnectivityResult actual = service.testConnectivity(vo);
+
+        assertThat(actual.ok()).isTrue();
+        verify(tester).test(captor.capture());
+        assertThat(captor.getValue().getId()).isNull();
+        assertThat(captor.getValue().getType()).isEqualTo(DataSourceType.MYSQL);
+        assertThat(captor.getValue().getNetworkMode()).isEqualTo(NetworkMode.DIRECT);
+        verify(repo, never()).save(any());
+        verify(audit, never()).audit(eq("TEST"), eq("datasource"), any(), any(Map.class));
     }
 
     private DataSource datasource(UUID id) {

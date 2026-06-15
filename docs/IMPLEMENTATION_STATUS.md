@@ -67,9 +67,9 @@
 | 子包 | 类 | 职责 |
 |------|----|------|
 | module-common/api | `SystemContextController` | `/api/v1/system/context`、`/api/v1/system/projects`，提供当前租户和项目选项 |
-| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 测连 + 库列表探查 |
+| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 已保存/未保存配置测连 + 库列表探查 |
 | api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/触发/历史 |
-| api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
+| api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `TestDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
 | service | `DataSourceService` / `SyncTaskService` | 用例编排接口 |
 | service/impl | `DataSourceServiceImpl` / `SyncTaskServiceImpl` | 事务边界 + Outbox + 审计 |
 | service/validation | `DataSourceConfigValidator` | 按 MYSQL/POSTGRES/HIVE/KAFKA/S3 等类型校验连接配置 |

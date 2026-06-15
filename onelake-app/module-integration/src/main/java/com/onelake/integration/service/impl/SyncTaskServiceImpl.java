@@ -46,6 +46,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     private final SyncTaskMapper mapper;
     private final AirbyteSyncDriver airbyte;
     private final AuditLogger audit;
+    private final com.onelake.common.outbox.OutboxPublisher outbox;
 
     @Override
     @Transactional
@@ -64,6 +65,13 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         task.setStatus(TaskStatus.DRAFT);
         taskRepo.save(task);
         audit.auditCreate("sync_task", task.getId(), null);
+        outbox.publish("integration.sync_task.created", task.getId().toString(),
+            java.util.Map.of(
+                "name", task.getName(),
+                "sourceId", task.getSourceId().toString(),
+                "mode", String.valueOf(task.getMode()),
+                "targetTable", task.getTargetTable()
+            ));
         return toDTO(task);
     }
 
@@ -151,6 +159,8 @@ public class SyncTaskServiceImpl implements SyncTaskService {
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
         task.setStatus(TaskStatus.ENABLED);
         audit.audit("ENABLE", "sync_task", id.toString(), null);
+        outbox.publish("integration.sync_task.status_changed", id.toString(),
+            java.util.Map.of("status", "ENABLED", "name", task.getName()));
         return toDTO(task);
     }
 
@@ -161,6 +171,8 @@ public class SyncTaskServiceImpl implements SyncTaskService {
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
         task.setStatus(TaskStatus.PAUSED);
         audit.audit("DISABLE", "sync_task", id.toString(), null);
+        outbox.publish("integration.sync_task.status_changed", id.toString(),
+            java.util.Map.of("status", "PAUSED", "name", task.getName()));
         return toDTO(task);
     }
 
@@ -186,6 +198,12 @@ public class SyncTaskServiceImpl implements SyncTaskService {
 
         audit.audit("TRIGGER", "sync_task", taskId.toString(),
             java.util.Map.of("runId", run.getId().toString(), "externalJobId", jobId));
+        outbox.publish("integration.sync_run.started", run.getId().toString(),
+            java.util.Map.of(
+                "taskId", taskId.toString(),
+                "externalJobId", String.valueOf(jobId),
+                "targetTable", task.getTargetTable()
+            ));
         return run.getId();
     }
 
@@ -195,11 +213,29 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         SyncRun run = runRepo.findById(runId)
             .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
         if (run.getExternalJobId() == null) return;
+        RunStatus previousStatus = run.getStatus();
         try {
             String s = airbyte.getJobStatus(Long.parseLong(run.getExternalJobId()));
             run.setStatus(RunStatus.valueOf(s.toUpperCase()));
             if (run.getStatus() != RunStatus.RUNNING) {
                 run.setFinishedAt(Instant.now());
+            }
+            runRepo.save(run);
+
+            // 状态从未终态转为终态时发事件（catalog / orchestration / security 消费）
+            boolean becameTerminal =
+                (previousStatus == RunStatus.QUEUED || previousStatus == RunStatus.RUNNING)
+                && (run.getStatus() == RunStatus.SUCCEEDED || run.getStatus() == RunStatus.FAILED);
+            if (becameTerminal) {
+                String eventName = run.getStatus() == RunStatus.SUCCEEDED
+                    ? "integration.sync_run.succeeded"
+                    : "integration.sync_run.failed";
+                outbox.publish(eventName, run.getId().toString(),
+                    java.util.Map.of(
+                        "taskId", run.getTaskId().toString(),
+                        "externalJobId", run.getExternalJobId() == null ? "" : run.getExternalJobId(),
+                        "status", String.valueOf(run.getStatus())
+                    ));
             }
         } catch (Exception e) {
             log.warn("reconcile run {} failed: {}", runId, e.getMessage());

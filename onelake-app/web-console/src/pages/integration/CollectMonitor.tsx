@@ -53,8 +53,8 @@ export default function CollectMonitor() {
   };
 
   const failTop = [
-    { task: 'orders_sync', count: 3, lastAt: '02:10', cause: 'AUTH_401 账号密码过期' },
-    { task: 'user_cdc', count: 1, lastAt: '03:20', cause: 'SCHEMA_DDL 破坏性变更' },
+    { taskId: 'st-001', task: 'orders_sync', count: 3, lastAt: '02:10', cause: 'AUTH_401 账号密码过期' },
+    { taskId: 'st-003', task: 'user_cdc', count: 1, lastAt: '03:20', cause: 'SCHEMA_DDL 破坏性变更' },
   ];
 
   return (
@@ -109,7 +109,9 @@ export default function CollectMonitor() {
                 { title: '任务', dataIndex: 'task', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
                 { title: '次数', dataIndex: 'count', align: 'right' as const, render: (c: number) => <span className="mono tnum" style={{ color: 'var(--ol-error)', fontWeight: 600 }}>{c}</span> },
                 { title: '原因', dataIndex: 'cause', render: (c: string) => <span style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{c}</span> },
-                { title: '操作', render: () => <Button type="link" onClick={() => navigate('/integration/sync-tasks')}>下钻</Button> },
+                { title: '操作', render: (_: unknown, r: any) => (
+                  <Button type="link" onClick={() => navigate(`/integration/sync-tasks/${r.taskId}?tab=history&from=monitor&window=${encodeURIComponent(r.lastAt)}`)}>下钻</Button>
+                ) },
               ]}
             />
           </SectionCard>

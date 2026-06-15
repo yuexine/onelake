@@ -430,7 +430,8 @@ export default function DatasourceList() {
             ],
             onClick: ({ key }) => {
               if (key === 'del') handleDelete(r);
-              else message.success(`${key} · ${r.name}`);
+              else if (key === 'copy') message.warning({ content: '复制配置待接入：将预填新建抽屉', duration: 3 });
+              else if (key === 'rotate') message.warning({ content: '密钥轮换待接入：需 KMS rotate API 联动', duration: 3 });
             },
           }}>
             <Button size="small" type="text" icon={<EllipsisOutlined />} />

@@ -170,7 +170,8 @@ export default function SyncTaskList() {
             ],
             onClick: ({ key }) => {
               if (key === 'del') handleDelete(r);
-              else message.success(`${key} · ${r.name}`);
+              else if (key === 'edit') message.warning({ content: '编辑功能待接入：将以编辑模式打开采集向导', duration: 3 });
+              else if (key === 'copy') message.warning({ content: '复制功能待接入：将预填新建向导', duration: 3 });
             },
           }}>
             <Button size="small" type="text" icon={<EllipsisOutlined />} />

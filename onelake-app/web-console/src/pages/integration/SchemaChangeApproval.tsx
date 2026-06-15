@@ -13,7 +13,7 @@ import {
   ApartmentOutlined, ArrowRightOutlined, UserSwitchOutlined,
 } from '@ant-design/icons';
 import {
-  PageHeader, ImpactAnalysis, SectionCard,
+  PageHeader, ImpactAnalysis, SectionCard, StateView,
 } from '../../components';
 import { schemaChangeRequests } from '../../mock';
 
@@ -22,7 +22,20 @@ const { Text } = Typography;
 export default function SchemaChangeApproval() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const req = schemaChangeRequests.find((r) => r.id === id) || schemaChangeRequests[0];
+  const req = schemaChangeRequests.find((r) => r.id === id);
+
+  if (!req) {
+    return (
+      <div className="ol-page">
+        <StateView
+          state="empty"
+          title="审批单不存在或已被处理"
+          description={`未找到 ID 为 ${id} 的 Schema 变更审批单，可能已被其他审批人处理`}
+          cta={<button className="ol-link" onClick={() => navigate('/integration/cdc')}>← 返回 CDC 监控</button>}
+        />
+      </div>
+    );
+  }
 
   const destructive = !req.compatible;
 
@@ -129,7 +142,7 @@ export default function SchemaChangeApproval() {
           {req.bufferStrategy}
         </Text>
         <Space size={8}>
-          <Button icon={<UserSwitchOutlined />} onClick={() => message.info('已通知人工字段映射')}>要求人工字段映射</Button>
+          <Button icon={<UserSwitchOutlined />} onClick={() => message.warning({ content: '人工字段映射流程待接入：将通过审批中心创建字段映射工单', duration: 4 })}>要求人工字段映射</Button>
           <Button danger icon={<CloseOutlined />} onClick={() => { message.success('已驳回 → 保持旧 schema'); navigate('/integration/cdc'); }}>驳回</Button>
           <Button type="primary" icon={<CheckOutlined />} disabled={!destructive} onClick={() => {
             message.success('已通过 → 应用变更 → 通知下游 → 恢复任务');

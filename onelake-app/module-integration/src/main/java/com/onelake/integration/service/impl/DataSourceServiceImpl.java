@@ -104,6 +104,8 @@ public class DataSourceServiceImpl implements DataSourceService {
         }
 
         audit.auditUpdate("datasource", id, Map.of("fields", "patched"));
+        outbox.publish("integration.datasource.updated", id.toString(),
+            Map.of("name", ds.getName(), "type", String.valueOf(ds.getType())));
         return mapper.toDTO(ds);
     }
 
@@ -117,6 +119,8 @@ public class DataSourceServiceImpl implements DataSourceService {
         }
         repo.delete(ds);
         audit.auditDelete("datasource", id);
+        outbox.publish("integration.datasource.deleted", id.toString(),
+            Map.of("name", ds.getName(), "type", String.valueOf(ds.getType())));
     }
 
     @Override
@@ -159,11 +163,19 @@ public class DataSourceServiceImpl implements DataSourceService {
     public ConnectivityResult testConnectivity(UUID id) {
         DataSource ds = repo.findById(id)
             .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+        Health previousHealth = ds.getHealth();
         ConnectivityResult r = tester.test(ds);
         ds.setHealth(r.ok() ? Health.OK : Health.FAIL);
         ds.setLastCheckAt(Instant.now());
         audit.audit("TEST", "datasource", id.toString(),
             Map.of("ok", r.ok(), "errorCode", r.errorCode() == null ? "-" : r.errorCode()));
+        // 健康状态变化时发事件（catalog / monitor 消费）
+        if (previousHealth != ds.getHealth()) {
+            outbox.publish("integration.datasource.health_changed", id.toString(),
+                Map.of("previous", String.valueOf(previousHealth),
+                       "current", String.valueOf(ds.getHealth()),
+                       "ok", r.ok()));
+        }
         return r;
     }
 

@@ -94,11 +94,11 @@ export default function FailureDiagnose() {
 
       <div className="ol-section" style={{ padding: '12px 16px' }}>
         <Space size={8} wrap>
-          <Button type="primary" icon={<ReloadOutlined />} onClick={() => message.success('已重试')}>重试</Button>
-          <Button icon={<StepForwardOutlined />} onClick={() => message.success('从 checkpoint 恢复中')}>从 checkpoint 恢复</Button>
-          <Button onClick={() => message.info('已跳过 12 条坏记录')}>跳过坏记录</Button>
-          <Button danger icon={<PauseCircleOutlined />} onClick={() => message.warning('已暂停管道')}>暂停管道</Button>
-          <Button icon={<BranchesOutlined />} onClick={() => navigate('/catalog/lineage')}>查看血缘影响</Button>
+          <Button type="primary" icon={<ReloadOutlined />} onClick={() => message.warning({ content: '重试功能待接入：后端 sync-tasks/runs/{runId}/retry API 尚未实现', duration: 4 })}>重试</Button>
+          <Button icon={<StepForwardOutlined />} onClick={() => message.warning({ content: '从 checkpoint 恢复待接入：需 Flink CDC savepoint 集成', duration: 4 })}>从 checkpoint 恢复</Button>
+          <Button onClick={() => message.warning({ content: '跳过坏记录待接入：需 Airbyte error-handling 配置', duration: 4 })}>跳过坏记录</Button>
+          <Button danger icon={<PauseCircleOutlined />} onClick={() => message.warning({ content: '管道暂停待接入：需 Airbyte connection cancel API', duration: 4 })}>暂停管道</Button>
+          <Button icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?focus=${encodeURIComponent(task.targetTable)}&from=diagnose&runId=${run.id}`)}>查看血缘影响</Button>
         </Space>
       </div>
     </div>

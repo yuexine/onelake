@@ -3,13 +3,13 @@
  *   Tab: 概览 / 配置 / 运行历史 / 血缘
  *   右侧 sticky 元信息卡 + RTT sparkline
  */
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table, Tag, Space, Button, message, Typography,
 } from 'antd';
 import {
   PauseCircleOutlined, EditOutlined, ReloadOutlined, CloudSyncOutlined,
-  FieldTimeOutlined, NodeIndexOutlined, ApartmentOutlined,
+  FieldTimeOutlined, NodeIndexOutlined, ApartmentOutlined, BranchesOutlined,
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import {
@@ -39,6 +39,9 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 export default function SyncTaskDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [sp] = useSearchParams();
+  const initialTab = sp.get('tab') || 'overview';
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [task, setTask] = useState<SyncTask>(syncTasks.find((t) => t.id === id) || syncTasks[0]);
   const [runs, setRuns] = useState<SyncRun[]>(syncRuns.filter((r) => r.taskId === task.id));
 
@@ -178,18 +181,13 @@ export default function SyncTaskDetail() {
     {
       key: 'lineage', label: '血缘',
       children: (
-        <SectionCard title="上下游血缘" icon={<ApartmentOutlined />}>
-          <Space size={20} style={{ width: '100%', justifyContent: 'center', padding: '24px 0' }}>
-            <div style={{ padding: '8px 14px', background: 'var(--ol-fill-soft)', border: '1px solid var(--ol-line-soft)', borderRadius: 6 }}>
-              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>上游</div>
-              <Text code>{task.sourceName}.{task.targetTable.split('.')[1]}</Text>
-            </div>
-            <div style={{ fontSize: 22, color: 'var(--ol-brand)' }}>→</div>
-            <div style={{ padding: '8px 14px', background: 'var(--ol-brand-soft)', border: '1px solid var(--ol-brand-border)', borderRadius: 6 }}>
-              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>下游</div>
-              <Text code style={{ color: 'var(--ol-brand)' }}>{task.targetTable}</Text>
-            </div>
-          </Space>
+        <SectionCard
+          title="上下游血缘"
+          icon={<ApartmentOutlined />}
+          subtitle={`聚焦 ${task.targetTable}`}
+          extra={<Button size="small" type="link" icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?focus=${encodeURIComponent(task.targetTable)}&from=sync-task`)}>展开整页血缘 →</Button>}
+        >
+          <LineageMiniGraph sourceFqn={`${task.sourceName}.${task.targetTable.split('.')[1]}`} targetFqn={task.targetTable} />
         </SectionCard>
       ),
     },
@@ -199,6 +197,8 @@ export default function SyncTaskDetail() {
     <DetailPageLayout
       icon={<CloudSyncOutlined />}
       title={task.name}
+      activeTab={activeTab}
+      onTabChange={setActiveTab}
       subtitle={<Space size={8}><span className="ol-chip">{task.mode}</span><Text type="secondary" style={{ fontSize: 13 }}>目标 {task.targetTable}</Text></Space>}
       status={<StatusBadge status={task.status} />}
       breadcrumb={[{ path: '/integration/sync-tasks', label: '采集任务' }, { label: task.name }]}
@@ -223,5 +223,46 @@ export default function SyncTaskDetail() {
         </div>
       }
     />
+  );
+}
+
+/**
+ * 简易血缘小图：上游源 → 当前表 → 假设下游（dws/ads）
+ * 真实数据需通过 catalog.lineage API 加载（后续接入）。
+ */
+function LineageMiniGraph({ sourceFqn, targetFqn }: { sourceFqn: string; targetFqn: string }) {
+  const downstream = targetFqn.replace(/^ods\./, 'dws.') + ' (推断)';
+  const nodes = [
+    { fqn: sourceFqn, layer: '源', intent: 'neutral' as const },
+    { fqn: targetFqn, layer: '当前', intent: 'brand' as const, highlight: true },
+    { fqn: downstream, layer: '下游', intent: 'success' as const },
+  ];
+  return (
+    <div style={{ padding: '12px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
+        {nodes.map((n, i) => (
+          <div key={n.fqn} style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div
+              style={{
+                padding: '10px 16px',
+                borderRadius: 8,
+                background: n.highlight ? 'var(--ol-brand-soft)' : 'var(--ol-fill-soft)',
+                border: `1px solid ${n.highlight ? 'var(--ol-brand-border)' : 'var(--ol-line-soft)'}`,
+                minWidth: 180,
+              }}
+            >
+              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)', marginBottom: 4 }}>{n.layer}</div>
+              <Text code style={{ fontSize: 12, color: n.highlight ? 'var(--ol-brand)' : 'var(--ol-ink)' }}>{n.fqn}</Text>
+            </div>
+            {i < nodes.length - 1 && (
+              <div style={{ fontSize: 22, color: 'var(--ol-brand)', lineHeight: 1 }}>→</div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 16, padding: 12, background: 'var(--ol-fill-soft)', borderRadius: 6, fontSize: 12, color: 'var(--ol-ink-3)' }}>
+        💡 仅展示一级上下游；点击右上角"展开整页血缘"查看完整链路、字段级映射与影响分析
+      </div>
+    </div>
   );
 }

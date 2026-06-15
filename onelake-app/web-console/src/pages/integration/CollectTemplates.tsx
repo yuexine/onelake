@@ -44,7 +44,7 @@ export default function CollectTemplates() {
         title="任务模板"
         subtitle={<span className="ol-chip">数据集成 · L1-4</span>}
         description="一键参数化生成多个采集任务，支持批量调度"
-        actions={<Button type="primary" icon={<PlusOutlined />} onClick={() => message.info('新建自定义模板')}>自定义模板</Button>}
+        actions={<Button type="primary" icon={<PlusOutlined />} onClick={() => message.warning({ content: '自定义模板编辑器待接入：可通过 DSL 或导入 YAML 定义', duration: 4 })}>自定义模板</Button>}
       />
 
       <Row gutter={[16, 16]}>
@@ -106,7 +106,7 @@ export default function CollectTemplates() {
         {/* 新建自定义模板卡 */}
         <Col xs={24} sm={12} md={8} lg={6}>
           <div
-            onClick={() => message.info('新建自定义模板')}
+            onClick={() => message.warning({ content: '自定义模板编辑器待接入：可通过 DSL 或导入 YAML 定义', duration: 4 })}
             style={{
               cursor: 'pointer',
               background: 'transparent',

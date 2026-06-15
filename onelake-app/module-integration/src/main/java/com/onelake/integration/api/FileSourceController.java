@@ -3,6 +3,7 @@ package com.onelake.integration.api;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.integration.client.FileCollectorClient;
 import com.onelake.integration.domain.entity.FileSource;
 import com.onelake.integration.repository.FileSourceRepository;
 import lombok.RequiredArgsConstructor;
@@ -18,6 +19,7 @@ import java.util.*;
 public class FileSourceController {
 
     private final FileSourceRepository repo;
+    private final FileCollectorClient fileClient;
 
     @PostMapping
     @PreAuthorize("hasRole('DE')")
@@ -42,5 +44,25 @@ public class FileSourceController {
         UUID tid = TenantContext.getTenantId();
         if (tid == null) throw new BizException(40100, "租户上下文缺失");
         return ApiResponse.ok(repo.findByTenantId(tid));
+    }
+
+    /** 列出文件源下的文件（含大小、ETag、去重标记）。 */
+    @GetMapping("/{id}/files")
+    public ApiResponse<List<Map<String, Object>>> listFiles(@PathVariable UUID id) {
+        FileSource fs = repo.findById(id)
+            .orElseThrow(() -> new BizException(40400, "文件源不存在"));
+        // 从 endpoint 提取 bucket 名（MinIO 模式：endpoint 最后一段或 basePath 第一段）
+        String bucket = extractBucket(fs);
+        String prefix = fs.getBasePath() == null ? "" : fs.getBasePath();
+        return ApiResponse.ok(fileClient.listFiles(bucket, prefix));
+    }
+
+    private String extractBucket(FileSource fs) {
+        // 简单启发：basePath 的第一段是 bucket，如 /onelake/inbound/orders/ → onelake
+        String base = fs.getBasePath();
+        if (base == null || base.isBlank()) return "onelake";
+        String trimmed = base.replaceAll("^/+", "").replaceAll("/+$", "");
+        String[] parts = trimmed.split("/");
+        return parts.length > 0 ? parts[0] : "onelake";
     }
 }

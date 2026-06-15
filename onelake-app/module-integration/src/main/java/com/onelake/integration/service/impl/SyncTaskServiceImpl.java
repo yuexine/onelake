@@ -3,6 +3,8 @@ package com.onelake.integration.service.impl;
 import com.onelake.common.audit.AuditLogger;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
 import com.onelake.integration.api.vo.UpdateSyncTaskVO;
 import com.onelake.integration.domain.entity.DataSource;
@@ -46,7 +48,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     private final SyncTaskMapper mapper;
     private final AirbyteSyncDriver airbyte;
     private final AuditLogger audit;
-    private final com.onelake.common.outbox.OutboxPublisher outbox;
+    private final OutboxPublisher outbox;
 
     @Override
     @Transactional
@@ -65,7 +67,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         task.setStatus(TaskStatus.DRAFT);
         taskRepo.save(task);
         audit.auditCreate("sync_task", task.getId(), null);
-        outbox.publish("integration.sync_task.created", task.getId().toString(),
+        outbox.publish(DomainEvents.INTEGRATION_SYNC_TASK_CREATED, task.getId().toString(),
             java.util.Map.of(
                 "name", task.getName(),
                 "sourceId", task.getSourceId().toString(),
@@ -160,7 +162,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
         task.setStatus(TaskStatus.ENABLED);
         audit.audit("ENABLE", "sync_task", id.toString(), null);
-        outbox.publish("integration.sync_task.status_changed", id.toString(),
+        outbox.publish(DomainEvents.INTEGRATION_SYNC_TASK_STATUS_CHANGED, id.toString(),
             java.util.Map.of("status", "ENABLED", "name", task.getName()));
         return toDTO(task);
     }
@@ -172,7 +174,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
         task.setStatus(TaskStatus.PAUSED);
         audit.audit("DISABLE", "sync_task", id.toString(), null);
-        outbox.publish("integration.sync_task.status_changed", id.toString(),
+        outbox.publish(DomainEvents.INTEGRATION_SYNC_TASK_STATUS_CHANGED, id.toString(),
             java.util.Map.of("status", "PAUSED", "name", task.getName()));
         return toDTO(task);
     }
@@ -199,11 +201,12 @@ public class SyncTaskServiceImpl implements SyncTaskService {
 
         audit.audit("TRIGGER", "sync_task", taskId.toString(),
             java.util.Map.of("runId", run.getId().toString(), "externalJobId", jobId));
-        outbox.publish("integration.sync_run.started", run.getId().toString(),
+        outbox.publish(DomainEvents.INTEGRATION_SYNC_RUN_STARTED, run.getId().toString(),
             java.util.Map.of(
                 "taskId", taskId.toString(),
                 "externalJobId", String.valueOf(jobId),
-                "targetTable", task.getTargetTable()
+                "targetTable", task.getTargetTable(),
+                "tenantId", task.getTenantId().toString()
             ));
         return run.getId();
     }
@@ -229,17 +232,23 @@ public class SyncTaskServiceImpl implements SyncTaskService {
                 && (run.getStatus() == RunStatus.SUCCEEDED || run.getStatus() == RunStatus.FAILED);
             if (becameTerminal) {
                 String eventName = run.getStatus() == RunStatus.SUCCEEDED
-                    ? "integration.sync_run.succeeded"
-                    : "integration.sync_run.failed";
+                    ? DomainEvents.INTEGRATION_TABLE_LOADED
+                    : DomainEvents.INTEGRATION_SYNC_FAILED;
                 // 加载 task 以获取 targetTable + tenantId，供下游消费方定位资产
                 SyncTask taskForEvent = taskRepo.findById(run.getTaskId()).orElse(null);
                 String targetTable = taskForEvent == null ? "" : taskForEvent.getTargetTable();
                 UUID tenantId = taskForEvent == null ? null : taskForEvent.getTenantId();
-                java.util.Map<String, String> payload = new java.util.HashMap<>();
+                java.util.Map<String, Object> payload = new java.util.HashMap<>();
+                payload.put("runId", run.getId().toString());
                 payload.put("taskId", run.getTaskId().toString());
                 payload.put("externalJobId", run.getExternalJobId() == null ? "" : run.getExternalJobId());
                 payload.put("status", String.valueOf(run.getStatus()));
                 payload.put("targetTable", targetTable == null ? "" : targetTable);
+                payload.put("namespace", namespaceOf(targetTable));
+                payload.put("table", tableNameOf(targetTable));
+                payload.put("rowsRead", run.getRowsRead() == null ? 0L : run.getRowsRead());
+                payload.put("rowsSynced", run.getRowsWritten() == null ? 0L : run.getRowsWritten());
+                if (taskForEvent != null) payload.put("sourceId", taskForEvent.getSourceId().toString());
                 if (tenantId != null) payload.put("tenantId", tenantId.toString());
                 outbox.publish(eventName, run.getId().toString(), payload);
             }
@@ -291,5 +300,20 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         Long durationMs = durationMs(run);
         if (durationMs == null || durationMs <= 0 || run.getRowsWritten() == null) return null;
         return run.getRowsWritten() * 1000 / durationMs;
+    }
+
+    private String namespaceOf(String targetTable) {
+        if (targetTable == null || targetTable.isBlank() || !targetTable.contains(".")) {
+            return "";
+        }
+        return targetTable.substring(0, targetTable.lastIndexOf('.'));
+    }
+
+    private String tableNameOf(String targetTable) {
+        if (targetTable == null || targetTable.isBlank()) {
+            return "";
+        }
+        int dot = targetTable.lastIndexOf('.');
+        return dot >= 0 ? targetTable.substring(dot + 1) : targetTable;
     }
 }

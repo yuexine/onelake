@@ -3,6 +3,8 @@ package com.onelake.integration.service.impl;
 import com.onelake.common.audit.AuditLogger;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
 import com.onelake.integration.api.vo.UpdateSyncTaskVO;
@@ -53,6 +55,7 @@ class SyncTaskServiceImplTest {
     private DataSourceRepository dsRepo;
     private AirbyteSyncDriver airbyte;
     private AuditLogger audit;
+    private OutboxPublisher outbox;
     private SyncTaskServiceImpl service;
 
     @BeforeEach
@@ -63,8 +66,9 @@ class SyncTaskServiceImplTest {
         dsRepo = mock(DataSourceRepository.class);
         airbyte = mock(AirbyteSyncDriver.class);
         audit = mock(AuditLogger.class);
+        outbox = mock(OutboxPublisher.class);
         SyncTaskMapper mapper = Mappers.getMapper(SyncTaskMapper.class);
-        service = new SyncTaskServiceImpl(taskRepo, runRepo, dsRepo, mapper, airbyte, audit);
+        service = new SyncTaskServiceImpl(taskRepo, runRepo, dsRepo, mapper, airbyte, audit, outbox);
     }
 
     @AfterEach
@@ -101,6 +105,7 @@ class SyncTaskServiceImplTest {
         assertThat(dto.status()).isEqualTo("DRAFT");
         assertThat(dto.mode()).isEqualTo("CDC");
         verify(audit).auditCreate("sync_task", dto.id(), null);
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_TASK_CREATED), eq(dto.id().toString()), any(Map.class));
     }
 
     @Test
@@ -256,6 +261,7 @@ class SyncTaskServiceImplTest {
         assertThat(runId).isNotNull();
         verify(runRepo).save(any(SyncRun.class));
         verify(audit).audit(eq("TRIGGER"), eq("sync_task"), eq(taskId.toString()), any(Map.class));
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_RUN_STARTED), eq(runId.toString()), any(Map.class));
     }
 
     @Test
@@ -273,6 +279,7 @@ class SyncTaskServiceImplTest {
 
         assertThat(run.getStatus()).isEqualTo(RunStatus.SUCCEEDED);
         assertThat(run.getFinishedAt()).isNotNull();
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_TABLE_LOADED), eq(runId.toString()), any(Map.class));
 
         when(airbyte.getJobStatus(987L)).thenThrow(new RuntimeException("airbyte down"));
         service.reconcile(runId);

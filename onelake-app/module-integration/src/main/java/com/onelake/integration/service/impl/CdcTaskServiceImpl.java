@@ -3,6 +3,7 @@ package com.onelake.integration.service.impl;
 import com.onelake.common.audit.AuditLogger;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.integration.domain.entity.CdcTask;
 import com.onelake.integration.domain.entity.DataSource;
@@ -41,6 +42,7 @@ public class CdcTaskServiceImpl implements CdcTaskService {
     private final DataSourceRepository dsRepo;
     private final AuditLogger audit;
     private final OutboxPublisher outbox;
+    private final com.onelake.integration.client.FlinkCdcClient flink;
 
     @Override
     @Transactional
@@ -59,7 +61,7 @@ public class CdcTaskServiceImpl implements CdcTaskService {
         task.setCreatedAt(Instant.now());
         repo.save(task);
         audit.auditCreate("cdc_task", task.getId(), Map.of("table", tableName));
-        outbox.publish("integration.cdc_task.created", task.getId().toString(),
+        outbox.publish(DomainEvents.INTEGRATION_CDC_TASK_CREATED, task.getId().toString(),
             Map.of("tenantId", tenantId.toString(), "table", tableName, "topic", task.getTopicName()));
         return task;
     }
@@ -93,12 +95,32 @@ public class CdcTaskServiceImpl implements CdcTaskService {
     @Transactional
     public CdcTask start(UUID id) {
         CdcTask task = get(id);
-        // TODO: 调 Flink REST API 提交 FlinkCDC SQL Job
+        DataSource ds = dsRepo.findById(task.getSourceId())
+            .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+
+        // 解析 DataSource config JSON 获取连接参数
+        com.fasterxml.jackson.databind.JsonNode cfg;
+        try {
+            cfg = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(ds.getConfig() == null ? "{}" : ds.getConfig());
+        } catch (Exception e) {
+            throw new BizException(50010, "数据源 config 解析失败");
+        }
+        String host = cfg.path("host").asText("localhost");
+        int port = cfg.path("port").asInt(3306);
+        String user = cfg.path("username").asText("root");
+        String pwd = cfg.path("password").asText("");
+        String db = cfg.path("dbName").asText("");
+
+        // 提交 FlinkCDC Job
+        String flinkJobId = flink.submitCdcJob(host, port, user, pwd, db,
+            task.getTableName(), task.getTopicName());
         task.setStatus(CdcTask.CdcStatus.RUNNING);
         task.setStartedAt(Instant.now());
-        task.setCheckpoint("binlog.000001:0"); // stub
-        audit.audit("START", "cdc_task", id.toString(), Map.of("table", task.getTableName()));
-        log.info("CDC task {} started (stub — Flink JobManager not wired)", task.getTableName());
+        task.setCheckpoint(flinkJobId); // checkpoint 字段暂存 Flink job ID
+        audit.audit("START", "cdc_task", id.toString(), Map.of(
+            "table", task.getTableName(), "flinkJobId", flinkJobId));
+        log.info("CDC task {} started, flinkJobId={}", task.getTableName(), flinkJobId);
         return task;
     }
 
@@ -106,10 +128,15 @@ public class CdcTaskServiceImpl implements CdcTaskService {
     @Transactional
     public CdcTask pause(UUID id) {
         CdcTask task = get(id);
-        // TODO: 调 Flink REST API cancel + savepoint
+        String flinkJobId = task.getCheckpoint();
+        boolean cancelled = false;
+        if (flinkJobId != null && !flinkJobId.isBlank()) {
+            cancelled = flink.cancelJob(flinkJobId);
+        }
         task.setStatus(CdcTask.CdcStatus.PAUSED);
-        audit.audit("PAUSE", "cdc_task", id.toString(), Map.of("checkpoint", task.getCheckpoint()));
-        log.info("CDC task {} paused (stub)", task.getTableName());
+        audit.audit("PAUSE", "cdc_task", id.toString(),
+            Map.of("flinkJobId", flinkJobId == null ? "" : flinkJobId, "cancelled", cancelled));
+        log.info("CDC task {} paused (cancelled={})", task.getTableName(), cancelled);
         return task;
     }
 
@@ -117,12 +144,16 @@ public class CdcTaskServiceImpl implements CdcTaskService {
     @Transactional(readOnly = true)
     public CdcStatusDTO status(UUID id) {
         CdcTask task = get(id);
-        // TODO: 调 Flink REST API 获取真实位点/延迟/背压
+        String flinkJobId = task.getCheckpoint();
+        Map<String, Object> jobDetail = null;
+        if (flinkJobId != null && !flinkJobId.startsWith("flink-stub")) {
+            jobDetail = flink.getJobDetail(flinkJobId);
+        }
         return CdcStatusDTO.builder()
-            .checkpoint(task.getCheckpoint())
+            .checkpoint(flinkJobId)
             .status(task.getStatus().name())
-            .lagMs(1200)   // stub
-            .backpressure(false)
+            .lagMs(1200)   // TODO: 从 Flink metrics 获取真实延迟
+            .backpressure(jobDetail != null && Boolean.TRUE.equals(jobDetail.get("backPressure")))
             .build();
     }
 }

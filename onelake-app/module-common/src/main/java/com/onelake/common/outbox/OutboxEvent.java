@@ -29,6 +29,10 @@ public class OutboxEvent {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    private UUID tenantId;
+
+    private String aggregateType;
+
     private String eventType;
 
     private String aggregateId;
@@ -40,9 +44,13 @@ public class OutboxEvent {
     @Enumerated(EnumType.STRING)
     private Status status = Status.PENDING;
 
+    private int retryCount = 0;
+
     private Instant occurredAt = Instant.now();
 
+    private Instant publishedAt;
+
     public enum Status {
-        PENDING, SENT, FAILED
+        PENDING, PUBLISHED, DEAD
     }
 }

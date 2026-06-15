@@ -2,11 +2,14 @@ package com.onelake.catalog.event;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import java.util.Set;
 
 /**
  * 消费 integration.datasource.deleted 事件。
@@ -25,8 +28,8 @@ public class DatasourceDeletedEventHandler implements DomainEventHandler {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
-    public boolean supports(String eventType) {
-        return "integration.datasource.deleted".equals(eventType);
+    public Set<String> eventTypes() {
+        return Set.of(DomainEvents.INTEGRATION_DATASOURCE_DELETED);
     }
 
     @Override

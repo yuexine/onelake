@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.onelake.catalog.domain.entity.Asset;
 import com.onelake.catalog.repository.AssetRepository;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
 import lombok.RequiredArgsConstructor;
@@ -13,10 +14,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * 消费 integration.sync_run.* 事件，刷新 catalog 资产的 syncedAt 时间戳。
+ * 消费 integration.table.loaded / integration.sync.failed 事件，刷新 catalog 资产的 syncedAt 时间戳。
  *
  * <p>设计意图（CLAUDE.md §3 旅程一）：
  * <ul>
@@ -41,9 +43,8 @@ public class SyncRunEventHandler implements DomainEventHandler {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
-    public boolean supports(String eventType) {
-        return "integration.sync_run.succeeded".equals(eventType)
-            || "integration.sync_run.failed".equals(eventType);
+    public Set<String> eventTypes() {
+        return Set.of(DomainEvents.INTEGRATION_TABLE_LOADED, DomainEvents.INTEGRATION_SYNC_FAILED);
     }
 
     @Override
@@ -73,12 +74,13 @@ public class SyncRunEventHandler implements DomainEventHandler {
                 return;
             }
             Asset a = found.get();
-            if ("SUCCEEDED".equalsIgnoreCase(status)) {
+            if (DomainEvents.INTEGRATION_TABLE_LOADED.equals(event.getEventType())
+                || "SUCCEEDED".equalsIgnoreCase(status)) {
                 a.setSyncedAt(Instant.now());
                 assetRepo.save(a);
-                log.info("SyncRunEventHandler: asset {} syncedAt refreshed after sync_run.succeeded", targetTable);
+                log.info("SyncRunEventHandler: asset {} syncedAt refreshed after table.loaded", targetTable);
             } else {
-                log.info("SyncRunEventHandler: sync_run.failed for {} — asset untouched, monitor will alert", targetTable);
+                log.info("SyncRunEventHandler: sync.failed for {} — asset untouched, monitor will alert", targetTable);
             }
         } catch (Exception e) {
             log.error("SyncRunEventHandler failed for event {}: {}", event.getId(), e.getMessage(), e);

@@ -1,9 +1,11 @@
 package com.onelake.common.outbox;
 
+import com.onelake.common.context.TenantContext;
 import com.onelake.common.util.JsonUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.Map;
 
 /**
@@ -19,14 +21,24 @@ public class OutboxPublisher {
     public void publish(String type, String aggregateId, Object payload) {
         OutboxEvent e = new OutboxEvent();
         e.setEventType(type);
+        e.setTenantId(TenantContext.getTenantId());
+        e.setAggregateType(aggregateTypeOf(type));
         e.setAggregateId(aggregateId);
         e.setPayload(JsonUtil.toJson(payload));
         e.setStatus(OutboxEvent.Status.PENDING);
-        e.setOccurredAt(java.time.Instant.now());
+        e.setOccurredAt(Instant.now());
         repo.save(e);
     }
 
     public void publish(String type, String aggregateId, Map<String, Object> payload) {
         publish(type, aggregateId, (Object) payload);
+    }
+
+    static String aggregateTypeOf(String eventType) {
+        if (eventType == null || eventType.isBlank()) {
+            return "unknown";
+        }
+        int dot = eventType.indexOf('.');
+        return dot > 0 ? eventType.substring(0, dot) : eventType;
     }
 }

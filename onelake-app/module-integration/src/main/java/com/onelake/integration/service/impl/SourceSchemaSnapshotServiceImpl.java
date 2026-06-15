@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.onelake.common.audit.AuditLogger;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.integration.domain.entity.SourceSchemaSnapshot;
 import com.onelake.integration.dto.SourceSchemaSnapshotDTO;
 import com.onelake.integration.repository.SourceSchemaSnapshotRepository;
@@ -20,6 +22,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -39,6 +42,7 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
 
     private final SourceSchemaSnapshotRepository repo;
     private final AuditLogger audit;
+    private final OutboxPublisher outbox;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
@@ -70,6 +74,7 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
         audit.audit("SCHEMA_SNAPSHOT_CAPTURED", "source_schema_snapshot",
                 saved.getId() == null ? null : saved.getId().toString(),
                 "Captured snapshot for " + objectName);
+        last.ifPresent(previous -> publishDriftIfChanged(sourceId, objectName, previous, saved));
         return toDto(saved);
     }
 
@@ -179,6 +184,25 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
             log.warn("diffColumns failed, returning empty changes", e);
         }
         return changes;
+    }
+
+    private void publishDriftIfChanged(
+            UUID sourceId,
+            String objectName,
+            SourceSchemaSnapshot previous,
+            SourceSchemaSnapshot current
+    ) {
+        if (previous.getChecksum().equals(current.getChecksum())) {
+            return;
+        }
+        List<ColumnChange> changes = diffColumns(previous.getColumns(), current.getColumns());
+        outbox.publish(DomainEvents.INTEGRATION_SCHEMA_DRIFT, current.getId().toString(), Map.of(
+            "sourceId", sourceId.toString(),
+            "object", objectName,
+            "previousChecksum", previous.getChecksum(),
+            "currentChecksum", current.getChecksum(),
+            "changes", changes
+        ));
     }
 
     private java.util.Map<String, String> columnsToMap(JsonNode arr) {

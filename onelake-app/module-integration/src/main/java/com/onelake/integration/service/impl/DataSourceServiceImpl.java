@@ -3,6 +3,7 @@ package com.onelake.integration.service.impl;
 import com.onelake.common.audit.AuditLogger;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.system.repository.ProjectRepository;
 import com.onelake.integration.api.vo.DatabaseProbeResult;
@@ -72,7 +73,7 @@ public class DataSourceServiceImpl implements DataSourceService {
         ds.setHealth(Health.UNKNOWN);
         repo.save(ds);
 
-        outbox.publish("integration.datasource.created", ds.getId().toString(),
+        outbox.publish(DomainEvents.INTEGRATION_DATASOURCE_CREATED, ds.getId().toString(),
             Map.of("type", ds.getType(), "name", ds.getName()));
         audit.auditCreate("datasource", ds.getId(),
             Map.of("name", ds.getName(), "type", ds.getType()));
@@ -104,7 +105,7 @@ public class DataSourceServiceImpl implements DataSourceService {
         }
 
         audit.auditUpdate("datasource", id, Map.of("fields", "patched"));
-        outbox.publish("integration.datasource.updated", id.toString(),
+        outbox.publish(DomainEvents.INTEGRATION_DATASOURCE_UPDATED, id.toString(),
             Map.of("name", ds.getName(), "type", String.valueOf(ds.getType())));
         return mapper.toDTO(ds);
     }
@@ -119,7 +120,7 @@ public class DataSourceServiceImpl implements DataSourceService {
         }
         repo.delete(ds);
         audit.auditDelete("datasource", id);
-        outbox.publish("integration.datasource.deleted", id.toString(),
+        outbox.publish(DomainEvents.INTEGRATION_DATASOURCE_DELETED, id.toString(),
             Map.of("name", ds.getName(), "type", String.valueOf(ds.getType())));
     }
 
@@ -171,7 +172,7 @@ public class DataSourceServiceImpl implements DataSourceService {
             Map.of("ok", r.ok(), "errorCode", r.errorCode() == null ? "-" : r.errorCode()));
         // 健康状态变化时发事件（catalog / monitor 消费）
         if (previousHealth != ds.getHealth()) {
-            outbox.publish("integration.datasource.health_changed", id.toString(),
+            outbox.publish(DomainEvents.INTEGRATION_DATASOURCE_HEALTH_CHANGED, id.toString(),
                 Map.of("previous", String.valueOf(previousHealth),
                        "current", String.valueOf(ds.getHealth()),
                        "ok", r.ok()));

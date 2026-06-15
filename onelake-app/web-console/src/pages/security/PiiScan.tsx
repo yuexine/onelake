@@ -5,6 +5,8 @@ import { Table, Tag, Space, Button, message, Modal, Typography } from 'antd';
 import { ScanOutlined, ReloadOutlined, CheckCircleOutlined, LockOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { piiScan } from '../../mock';
+import { SecurityAPI } from '../../api';
+import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 import { ClassificationBadge, PageHeader, SectionCard, StateView, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
@@ -13,12 +15,16 @@ export default function PiiScan() {
   const { run, isLoading } = useAsyncAction();
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const { data: piiData } = useApiWithFallback(
+    () => SecurityAPI.listPiiScan() as Promise<any[]>,
+    piiScan,
+  );
 
   const counts = {
-    total: piiScan.length,
-    high: piiScan.filter((p) => p.confidence > 0.9).length,
-    pending: piiScan.filter((p) => p.status !== 'confirmed').length,
-    confirmed: piiScan.filter((p) => p.status === 'confirmed').length,
+    total: piiData.length,
+    high: piiData.filter((p) => p.confidence > 0.9).length,
+    pending: piiData.filter((p) => p.status !== 'confirmed').length,
+    confirmed: piiData.filter((p) => p.status === 'confirmed').length,
   };
 
   return (
@@ -43,7 +49,7 @@ export default function PiiScan() {
       <SectionCard title="识别结果" icon={<ScanOutlined />} flatBody>
         <Table
           rowKey="fqn"
-          dataSource={piiScan}
+          dataSource={piiData}
           locale={{
             emptyText: (
               <StateView

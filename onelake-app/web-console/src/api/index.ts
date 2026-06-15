@@ -105,6 +105,32 @@ export const IntegrationAPI = {
 
   listRuns: (taskId: string, page = 0, size = 20) =>
     unwrap<PageResult<SyncRun>>(http.get(`/integration/sync-tasks/${taskId}/runs`, { params: { page, size } })),
+
+  // CDC
+  listCdcTasks: () =>
+    unwrap<unknown[]>(http.get('/integration/cdc-tasks')),
+  getCdcStatus: (id: string) =>
+    unwrap<Record<string, unknown>>(http.get(`/integration/cdc-tasks/${id}/status`)),
+  startCdcTask: (id: string) =>
+    unwrap<unknown>(http.post(`/integration/cdc-tasks/${id}/start`)),
+  stopCdcTask: (id: string) =>
+    unwrap<unknown>(http.post(`/integration/cdc-tasks/${id}/stop`)),
+
+  // 文件采集
+  listFileSources: () =>
+    unwrap<unknown[]>(http.get('/integration/file-sources')),
+
+  // 监控
+  healthSummary: (hours = 24) =>
+    unwrap<Record<string, unknown>>(http.get('/integration/monitor/health-summary', { params: { hours } })),
+  failTop: (hours = 24, limit = 10) =>
+    unwrap<Record<string, unknown>[]>(http.get('/integration/monitor/fail-top', { params: { hours, limit } })),
+
+  // Schema 快照
+  captureSnapshot: (sourceId: string, objectName: string) =>
+    unwrap<unknown>(http.post(`/integration/datasources/${sourceId}/schema-snapshots`, null, { params: { objectName } })),
+  listSnapshots: (sourceId: string) =>
+    unwrap<unknown[]>(http.get(`/integration/datasources/${sourceId}/schema-snapshots`)),
 };
 
 export const OrchestrationAPI = {
@@ -134,6 +160,13 @@ export const QualityAPI = {
 };
 
 export const SecurityAPI = {
+  listPiiScan: () =>
+    unwrap<unknown[]>(http.get('/security/pii-scan')),
+  listPiiPending: () =>
+    unwrap<unknown[]>(http.get('/security/pii-scan/pending')),
+  confirmPii: (recordIds: string[]) =>
+    unwrap<void>(http.post('/security/pii-scan/confirm', recordIds)),
+
   myGrants: () => http.get('/security/grants/me'),
   pendingApprovals: () => http.get('/security/approvals/pending'),
   applyAccess: (assetFqn: string, payload: Record<string, unknown>) =>

@@ -14,11 +14,27 @@ import {
   PageHeader, SectionCard, StatCard,
 } from '../../components';
 import { syncTasks } from '../../mock';
+import { IntegrationAPI } from '../../api';
+import { useApiObject } from '../../hooks/useApiWithFallback';
 
 const { Text } = Typography;
 
+const FALLBACK_HEALTH = { successRate: 98, running: 12, failed: 3, avgDurationMs: 42000, total: 156, succeeded: 153, windowHours: 24 };
+const FALLBACK_FAILTOP = [
+  { taskId: 'st-001', task: 'orders_sync', count: 3, lastAt: '02:10', cause: 'AUTH_401 账号密码过期' },
+  { taskId: 'st-003', task: 'user_cdc', count: 1, lastAt: '03:20', cause: 'SCHEMA_DDL 破坏性变更' },
+];
+
 export default function CollectMonitor() {
   const navigate = useNavigate();
+  const { data: health } = useApiObject(
+    () => IntegrationAPI.healthSummary(24),
+    FALLBACK_HEALTH,
+  );
+  const { data: failTop } = useApiObject(
+    async () => { const r = await IntegrationAPI.failTop(24, 10); return r || FALLBACK_FAILTOP; },
+    FALLBACK_FAILTOP,
+  );
 
   const lineOption = {
     tooltip: { trigger: 'axis' as const },
@@ -52,11 +68,6 @@ export default function CollectMonitor() {
     ],
   };
 
-  const failTop = [
-    { taskId: 'st-001', task: 'orders_sync', count: 3, lastAt: '02:10', cause: 'AUTH_401 账号密码过期' },
-    { taskId: 'st-003', task: 'user_cdc', count: 1, lastAt: '03:20', cause: 'SCHEMA_DDL 破坏性变更' },
-  ];
-
   return (
     <div className="ol-page">
       <PageHeader
@@ -74,10 +85,10 @@ export default function CollectMonitor() {
       />
 
       <div className="ol-grid-stats">
-        <StatCard icon={<CheckCircleOutlined />} intent="success" label="成功率" value={98} suffix="%" spark={[97, 98, 96, 98, 99, 98, 98, 98]} />
-        <StatCard icon={<ReloadOutlined />} intent="info" label="运行中" value={12} suffix="个" spark={[8, 9, 10, 11, 12, 11, 12, 12]} />
-        <StatCard icon={<WarningOutlined />} intent="error" label="失败" value={3} suffix="个" delta={{ value: '+2', direction: 'up', good: 'down' }} />
-        <StatCard icon={<FieldTimeOutlined />} intent="brand" label="平均时延" value={42} suffix="s" delta={{ value: '-8s', direction: 'down', good: 'down' }} />
+        <StatCard icon={<CheckCircleOutlined />} intent="success" label="成功率" value={Number(health.successRate ?? 98)} suffix="%" spark={[97, 98, 96, 98, 99, 98, 98, 98]} />
+        <StatCard icon={<ReloadOutlined />} intent="info" label="运行中" value={Number(health.running ?? 12)} suffix="个" spark={[8, 9, 10, 11, 12, 11, 12, 12]} />
+        <StatCard icon={<WarningOutlined />} intent="error" label="失败" value={Number(health.failed ?? 3)} suffix="个" />
+        <StatCard icon={<FieldTimeOutlined />} intent="brand" label="平均时延" value={Math.round(Number(health.avgDurationMs ?? 42000) / 1000)} suffix="s" />
       </div>
 
       <Row gutter={16} align="stretch">

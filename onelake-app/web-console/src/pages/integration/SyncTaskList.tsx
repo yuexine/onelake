@@ -1,7 +1,7 @@
 /**
  * 采集任务列表（对应原型 §4.2.1 / §8.2.4 升级版）。
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table, Space, Button, Input, Select, Tooltip, message,
@@ -12,7 +12,9 @@ import {
   EllipsisOutlined, PauseCircleOutlined, DeleteOutlined, CopyOutlined,
   CloudSyncOutlined, DatabaseOutlined, FileTextOutlined, HourglassOutlined,
 } from '@ant-design/icons';
-import { syncTasks } from '../../mock';
+import { syncTasks as mockSyncTasks } from '../../mock';
+import type { SyncTask } from '../../types';
+import { IntegrationAPI } from '../../api';
 import {
   PageHeader, FilterBar, SectionCard, Toolbar, StatusBadge, StateView,
   IntentBadge, useAsyncAction, modeColor,
@@ -33,31 +35,59 @@ export default function SyncTaskList() {
   const [mode, setMode] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
+  const [syncTasks, setSyncTasks] = useState<SyncTask[]>(mockSyncTasks);
+
+  const loadSyncTasks = () => {
+    IntegrationAPI.listSyncTasks()
+      .then(setSyncTasks)
+      .catch((e) => message.error(e.message || '采集任务加载失败'));
+  };
+
+  useEffect(() => {
+    loadSyncTasks();
+  }, []);
 
   const rows = useMemo(() => syncTasks.filter((t) =>
     (!mode || t.mode === mode) &&
     (!status || t.status === status) &&
     (!keyword || t.name.toLowerCase().includes(keyword.toLowerCase()) || t.targetTable.includes(keyword)),
-  ), [mode, status, keyword]);
+  ), [syncTasks, mode, status, keyword]);
 
   const counts = useMemo(() => ({
     total: syncTasks.length,
     enabled: syncTasks.filter((t) => t.status === 'ENABLED').length,
     draft: syncTasks.filter((t) => t.status === 'DRAFT').length,
     cdc: syncTasks.filter((t) => t.mode === 'CDC').length,
-  }), []);
+  }), [syncTasks]);
 
   const { run, isLoading } = useAsyncAction();
 
   const handleTrigger = (id: string, name: string) => {
     run(`trigger-${id}`, async () => {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      return { runId: 'mock-' + Date.now() };
+      return IntegrationAPI.triggerSyncTask(id);
     }, {
       successMsg: `已触发 ${name} · runId 已生成`,
       errorMsg: `触发失败，请检查任务状态`,
       duration: 2.5,
     });
+  };
+
+  const handleDisable = (r: SyncTask) => {
+    IntegrationAPI.disableSyncTask(r.id)
+      .then((next) => {
+        setSyncTasks((rows) => rows.map((item) => item.id === next.id ? next : item));
+        message.success('已暂停');
+      })
+      .catch((e) => message.error(e.message || '暂停失败'));
+  };
+
+  const handleDelete = (r: SyncTask) => {
+    IntegrationAPI.deleteSyncTask(r.id)
+      .then(() => {
+        setSyncTasks((rows) => rows.filter((item) => item.id !== r.id));
+        message.success(`已删除 ${r.name}`);
+      })
+      .catch((e) => message.error(e.message || '删除失败'));
   };
 
   const columns = [
@@ -128,7 +158,7 @@ export default function SyncTaskList() {
             />
           </Tooltip>
           <Tooltip title="暂停">
-            <Button size="small" type="text" icon={<PauseCircleOutlined />} onClick={() => message.success('已暂停')} />
+            <Button size="small" type="text" icon={<PauseCircleOutlined />} onClick={() => handleDisable(r)} />
           </Tooltip>
           <Button size="small" type="link" onClick={() => navigate(`/integration/sync-tasks/${r.id}`)}>详情</Button>
           <Dropdown trigger={['click']} menu={{
@@ -138,7 +168,10 @@ export default function SyncTaskList() {
               { type: 'divider' as const },
               { key: 'del', icon: <DeleteOutlined />, label: '删除', danger: true },
             ],
-            onClick: ({ key }) => message.success(`${key} · ${r.name}`),
+            onClick: ({ key }) => {
+              if (key === 'del') handleDelete(r);
+              else message.success(`${key} · ${r.name}`);
+            },
           }}>
             <Button size="small" type="text" icon={<EllipsisOutlined />} />
           </Dropdown>
@@ -162,7 +195,7 @@ export default function SyncTaskList() {
         ]}
         actions={
           <>
-            <Button icon={<ReloadOutlined />} onClick={() => message.success('已刷新')}>刷新</Button>
+            <Button icon={<ReloadOutlined />} onClick={loadSyncTasks}>刷新</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/integration/sync-tasks/new')}>新建采集任务</Button>
           </>
         }

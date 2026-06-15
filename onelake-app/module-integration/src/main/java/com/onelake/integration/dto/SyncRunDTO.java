@@ -11,6 +11,10 @@ public record SyncRunDTO(
     Long rowsRead,
     Long rowsWritten,
     String errorCode,
+    String errorMsg,
+    String checkpoint,
+    Long durationMs,
+    Long throughputRows,
     Instant startedAt,
     Instant finishedAt
 ) {}

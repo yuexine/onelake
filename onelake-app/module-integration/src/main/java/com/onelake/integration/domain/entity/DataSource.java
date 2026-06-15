@@ -14,6 +14,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -45,6 +46,7 @@ public class DataSource {
     private DataSourceType type;
 
     @Column(columnDefinition = "jsonb", nullable = false)
+    @ColumnTransformer(write = "?::jsonb")
     private String config;           // host/port/db 等非敏感配置
 
     private String secretRef;        // 指向 security.secret 的密文引用

@@ -75,11 +75,16 @@ const RbacMatrix = lazy(() => import('./pages/system/Rbac'));
 const ApprovalCenter = lazy(() => import('./pages/system/Approvals'));
 const AuditLogs = lazy(() => import('./pages/system/Audit'));
 const Channels = lazy(() => import('./pages/system/Channels'));
+const AuthCallback = lazy(() => import('./pages/auth/AuthCallback'));
+const AuthLogin = lazy(() => import('./pages/auth/AuthCallback').then((module) => ({ default: module.AuthLogin })));
 
 export function AppRoutes() {
   return (
     <Suspense fallback={<Fallback />}>
       <Routes>
+        <Route path="/sso/login" element={<AuthLogin />} />
+        <Route path="/sso/callback" element={<AuthCallback />} />
+
         {/* App 作为 layout route，渲染 Sider/TopBar/全局任务条，Outlet 输出业务页面 */}
         <Route element={<App />}>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />

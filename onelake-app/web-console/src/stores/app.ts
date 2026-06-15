@@ -8,6 +8,7 @@ import type { RunningTask } from '../components';
 
 interface AppState {
   user: typeof currentUser;
+  setUser: (user: typeof currentUser) => void;
   tenant: Tenant;
   tenants: Tenant[];
   switchTenant: (id: string) => void;
@@ -24,6 +25,7 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   user: currentUser,
+  setUser: (user) => set({ user }),
   tenant: tenants[0],
   tenants,
   switchTenant: (id) => {

@@ -11,10 +11,13 @@ import {
   PauseCircleOutlined, EditOutlined, ReloadOutlined, CloudSyncOutlined,
   FieldTimeOutlined, NodeIndexOutlined, ApartmentOutlined,
 } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
 import {
   DetailPageLayout, StatusBadge, SectionCard, StatCard, ClassificationBadge,
 } from '../../components';
 import { syncTasks, syncRuns } from '../../mock';
+import type { SyncRun, SyncTask } from '../../types';
+import { IntegrationAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -36,8 +39,41 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 export default function SyncTaskDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const task = syncTasks.find((t) => t.id === id) || syncTasks[0];
-  const runs = syncRuns.filter((r) => r.taskId === task.id);
+  const [task, setTask] = useState<SyncTask>(syncTasks.find((t) => t.id === id) || syncTasks[0]);
+  const [runs, setRuns] = useState<SyncRun[]>(syncRuns.filter((r) => r.taskId === task.id));
+
+  const loadTask = () => {
+    if (!id) return;
+    IntegrationAPI.getSyncTask(id)
+      .then((next) => {
+        setTask(next);
+        return IntegrationAPI.listRuns(next.id);
+      })
+      .then((page) => setRuns(page.content || []))
+      .catch((e) => message.error(e.message || '任务详情加载失败'));
+  };
+
+  useEffect(() => {
+    loadTask();
+  }, [id]);
+
+  const handleTrigger = () => {
+    IntegrationAPI.triggerSyncTask(task.id)
+      .then(() => {
+        message.success('已触发运行');
+        loadTask();
+      })
+      .catch((e) => message.error(e.message || '触发运行失败'));
+  };
+
+  const handleDisable = () => {
+    IntegrationAPI.disableSyncTask(task.id)
+      .then((next) => {
+        setTask(next);
+        message.success('已暂停');
+      })
+      .catch((e) => message.error(e.message || '暂停失败'));
+  };
 
   const successRate = runs.length > 0
     ? Math.round(runs.filter((r) => r.status === 'SUCCEEDED').length / runs.length * 100)
@@ -168,8 +204,8 @@ export default function SyncTaskDetail() {
       breadcrumb={[{ path: '/integration/sync-tasks', label: '采集任务' }, { label: task.name }]}
       tabs={tabs}
       actions={[
-        <Button key="run" type="primary" icon={<ReloadOutlined />} onClick={() => message.success('已触发运行')}>触发运行</Button>,
-        <Button key="pause" icon={<PauseCircleOutlined />}>暂停</Button>,
+        <Button key="run" type="primary" icon={<ReloadOutlined />} onClick={handleTrigger}>触发运行</Button>,
+        <Button key="pause" icon={<PauseCircleOutlined />} onClick={handleDisable}>暂停</Button>,
         <Button key="edit" icon={<EditOutlined />}>编辑</Button>,
       ]}
       meta={[

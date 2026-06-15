@@ -8,6 +8,6 @@ import java.util.UUID;
 
 public interface MaskingPolicyRepository extends JpaRepository<MaskingPolicy, UUID> {
     List<MaskingPolicy> findByTenantId(UUID tenantId);
-    List<MaskingPolicy> findByTargetFqn(UUID tenantId, String fqn);
+    List<MaskingPolicy> findByTenantIdAndTargetFqn(UUID tenantId, String fqn);
     List<MaskingPolicy> findByTargetFqnOrderByPriorityDesc(String fqn);
 }

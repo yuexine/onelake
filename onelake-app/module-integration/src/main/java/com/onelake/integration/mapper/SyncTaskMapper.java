@@ -9,6 +9,9 @@ import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 
+import java.util.List;
+import java.util.Map;
+
 @Mapper(componentModel = "spring")
 public interface SyncTaskMapper {
 
@@ -17,13 +20,31 @@ public interface SyncTaskMapper {
     @Mapping(target = "status", expression = "java(com.onelake.integration.domain.enums.TaskStatus.DRAFT)")
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "tenantId", ignore = true)
-    @Mapping(target = "airbyteConnectionId", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
     SyncTask toEntity(CreateSyncTaskVO vo);
 
-    @Mapping(target = "mode", source = "mode", qualifiedByName = "fromMode")
-    @Mapping(target = "status", source = "status", qualifiedByName = "fromStatus")
-    SyncTaskDTO toDTO(SyncTask entity);
+    default SyncTaskDTO toDTO(SyncTask entity) {
+        return toDTO(entity, null);
+    }
+
+    default SyncTaskDTO toDTO(SyncTask entity, String sourceName) {
+        if (entity == null) return null;
+        return new SyncTaskDTO(
+            entity.getId(),
+            entity.getSourceId(),
+            sourceName,
+            entity.getName(),
+            fromMode(entity.getMode()),
+            entity.getTargetTable(),
+            fieldMapping(entity.getFieldMapping()),
+            entity.getScheduleCron(),
+            entity.getRateLimit(),
+            entity.getDirtyThreshold(),
+            fromStatus(entity.getStatus()),
+            entity.getAirbyteConnectionId(),
+            entity.getCreatedAt()
+        );
+    }
 
     @Named("toMode")
     default SyncMode toMode(String m) {
@@ -38,5 +59,19 @@ public interface SyncTaskMapper {
     @Named("fromStatus")
     default String fromStatus(TaskStatus s) {
         return s == null ? null : s.name();
+    }
+
+    @SuppressWarnings("unchecked")
+    default List<Map<String, Object>> fieldMapping(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return com.onelake.common.util.JsonUtil.mapper().readValue(
+                json,
+                com.onelake.common.util.JsonUtil.mapper().getTypeFactory()
+                    .constructCollectionType(List.class, Map.class)
+            );
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 }

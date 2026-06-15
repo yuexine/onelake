@@ -13,12 +13,14 @@ import {
   DatabaseOutlined, SafetyCertificateOutlined, ClockCircleOutlined,
   ApiOutlined, HistoryOutlined, KeyOutlined, ReloadOutlined,
 } from '@ant-design/icons';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   DetailPageLayout, DangerConfirm, StatusBadge, EntityTypeIcon,
   SectionCard, StatCard,
 } from '../../components';
 import { dataSources, syncTasks } from '../../mock';
+import type { DataSource, SyncTask } from '../../types';
+import { IntegrationAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -40,9 +42,45 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 export default function DatasourceDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const ds = dataSources.find((d) => d.id === id) || dataSources[0];
+  const [ds, setDs] = useState<DataSource>(dataSources.find((d) => d.id === id) || dataSources[0]);
+  const [usingTasks, setUsingTasks] = useState<SyncTask[]>(syncTasks.filter((t) => t.sourceId === ds.id));
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const usingTasks = syncTasks.filter((t) => t.sourceId === ds.id);
+
+  useEffect(() => {
+    if (!id) return;
+    IntegrationAPI.getDatasource(id)
+      .then((next) => {
+        setDs(next);
+        return IntegrationAPI.listSyncTasksBySource(next.id);
+      })
+      .then(setUsingTasks)
+      .catch((e) => message.error(e.message || '连接详情加载失败'));
+  }, [id]);
+
+  const handleTest = () => {
+    IntegrationAPI.testDatasource(ds.id)
+      .then((result) => {
+        setDs((current) => ({
+          ...current,
+          health: result.ok ? 'OK' : 'FAIL',
+          rttMs: result.rttMillis,
+          lastCheckAt: new Date().toISOString(),
+        }));
+        if (result.ok) message.success(`已测连 (RTT ${result.rttMillis ?? '-'}ms)`);
+        else message.error(result.message || '连接失败');
+      })
+      .catch((e) => message.error(e.message || '测连失败'));
+  };
+
+  const handleDelete = () => {
+    IntegrationAPI.deleteDatasource(ds.id)
+      .then(() => {
+        setConfirmOpen(false);
+        message.success('已删除');
+        navigate('/integration/datasources');
+      })
+      .catch((e) => message.error(e.message || '删除失败'));
+  };
 
   const tabs = [
     {
@@ -171,7 +209,7 @@ export default function DatasourceDetail() {
         breadcrumb={[{ path: '/integration/datasources', label: '连接管理' }, { label: ds.name }]}
         tabs={tabs}
         actions={[
-          <Button key="test" icon={<ThunderboltOutlined />} onClick={() => message.success(`已测连 (RTT ${ds.rttMs}ms)`)}>测连</Button>,
+          <Button key="test" icon={<ThunderboltOutlined />} onClick={handleTest}>测连</Button>,
           <Button key="edit" icon={<EditOutlined />}>编辑</Button>,
           <Button key="new-task" type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/integration/sync-tasks/new?sourceId=${ds.id}`)}>基于此连接建采集</Button>,
           <Button key="del" danger icon={<DeleteOutlined />} onClick={() => setConfirmOpen(true)}>删除</Button>,
@@ -202,7 +240,7 @@ export default function DatasourceDetail() {
         ]}
         impactLevel={usingTasks.length > 0 ? 'HIGH' : 'LOW'}
         onCancel={() => setConfirmOpen(false)}
-        onConfirm={() => { setConfirmOpen(false); message.success('已删除（mock）'); navigate('/integration/datasources'); }}
+        onConfirm={handleDelete}
       />
     </>
   );

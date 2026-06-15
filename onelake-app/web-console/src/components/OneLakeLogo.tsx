@@ -88,7 +88,20 @@ export function OneLakeLogo({ collapsed = false, size = 34, className, style }: 
       <OneLakeMark size={size} />
       {!collapsed && (
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ol-ink)', lineHeight: 1.2 }} className="ol-truncate">
+          <div
+            style={{
+              color: 'var(--ol-ink)',
+              fontFamily: '"Avenir Next", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+              fontFeatureSettings: '"kern" 1',
+              fontKerning: 'normal',
+              fontSize: '1rem',
+              fontWeight: 700,
+              letterSpacing: 0,
+              lineHeight: 1.15,
+              whiteSpace: 'nowrap',
+            }}
+            className="ol-truncate"
+          >
             OneLake数据中台
           </div>
         </div>

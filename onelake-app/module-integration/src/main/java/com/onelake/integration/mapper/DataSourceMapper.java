@@ -6,6 +6,7 @@ import com.onelake.integration.domain.enums.DataSourceType;
 import com.onelake.integration.domain.enums.EnvLevel;
 import com.onelake.integration.domain.enums.NetworkMode;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
@@ -28,6 +29,11 @@ public interface DataSourceMapper {
     @Mapping(target = "health", source = "health", qualifiedByName = "fromHealth")
     @Mapping(target = "networkMode", source = "networkMode", qualifiedByName = "fromNetworkMode")
     @Mapping(target = "envLevel", source = "envLevel", qualifiedByName = "fromEnvLevel")
+    @Mapping(target = "host", expression = "java(configText(entity, \"host\"))")
+    @Mapping(target = "port", expression = "java(configInt(entity, \"port\"))")
+    @Mapping(target = "dbName", expression = "java(configText(entity, \"dbName\", \"database\"))")
+    @Mapping(target = "username", expression = "java(configText(entity, \"username\"))")
+    @Mapping(target = "rttMs", ignore = true)
     DataSourceDTO toDTO(DataSource entity);
 
     @Named("toType")
@@ -63,5 +69,32 @@ public interface DataSourceMapper {
     @Named("fromHealth")
     default String fromHealth(com.onelake.integration.domain.enums.Health h) {
         return h == null ? null : h.name();
+    }
+
+    default String configText(DataSource entity, String key) {
+        return configText(entity, key, null);
+    }
+
+    default String configText(DataSource entity, String key, String fallbackKey) {
+        JsonNode cfg = parseConfig(entity);
+        if (cfg == null) return null;
+        String value = cfg.path(key).asText(null);
+        if ((value == null || value.isBlank()) && fallbackKey != null) {
+            value = cfg.path(fallbackKey).asText(null);
+        }
+        return value;
+    }
+
+    default Integer configInt(DataSource entity, String key) {
+        JsonNode cfg = parseConfig(entity);
+        if (cfg == null || !cfg.hasNonNull(key)) return null;
+        return cfg.path(key).asInt();
+    }
+
+    default JsonNode parseConfig(DataSource entity) {
+        if (entity == null || entity.getConfig() == null || entity.getConfig().isBlank()) {
+            return null;
+        }
+        return com.onelake.common.util.JsonUtil.parse(entity.getConfig());
     }
 }

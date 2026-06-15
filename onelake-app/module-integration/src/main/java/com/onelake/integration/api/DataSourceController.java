@@ -3,6 +3,8 @@ package com.onelake.integration.api;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
+import com.onelake.integration.api.vo.DatabaseProbeResult;
+import com.onelake.integration.api.vo.ProbeDatabasesVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.service.DataSourceService;
@@ -52,8 +54,11 @@ public class DataSourceController {
     }
 
     @GetMapping
-    public ApiResponse<List<DataSourceDTO>> list(@RequestParam(required = false) String type) {
-        return ApiResponse.ok(service.list(type));
+    public ApiResponse<List<DataSourceDTO>> list(@RequestParam(required = false) String type,
+                                                 @RequestParam(required = false) String health,
+                                                 @RequestParam(required = false) String envLevel,
+                                                 @RequestParam(required = false) String keyword) {
+        return ApiResponse.ok(service.list(type, health, envLevel, keyword));
     }
 
     @DeleteMapping("/{id}")
@@ -67,5 +72,11 @@ public class DataSourceController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<ConnectivityResult> test(@PathVariable UUID id) {
         return ApiResponse.ok(service.testConnectivity(id));
+    }
+
+    @PostMapping("/probe-databases")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<DatabaseProbeResult> probeDatabases(@Valid @RequestBody ProbeDatabasesVO vo) {
+        return ApiResponse.ok(service.probeDatabases(vo));
     }
 }

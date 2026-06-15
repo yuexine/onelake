@@ -2,6 +2,7 @@
 -- 启用 pgcrypto（uuid 主键）+ 创建 web_anon 角色（PostgREST 使用）
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE SCHEMA IF NOT EXISTS dataservice_api;
 
 DO $$
 BEGIN

@@ -15,12 +15,14 @@ import {
   InboxOutlined, HourglassOutlined, CloudSyncOutlined, FileTextOutlined,
 } from '@ant-design/icons';
 import { useState } from 'react';
+import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ClassificationBadge, SectionCard, EntityTypeIcon,
 } from '../../components';
-import { dataSources } from '../../mock';
-import type { FieldMapping } from '../../types';
+import { dataSources as mockDataSources } from '../../mock';
+import type { DataSource, FieldMapping } from '../../types';
+import { IntegrationAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -47,9 +49,41 @@ export default function SyncTaskWizard() {
   const [mode, setMode] = useState('INCREMENTAL');
   const [tables, setTables] = useState<string[]>(['ods.orders']);
   const [mapping] = useState<FieldMapping[]>(sampleMapping);
+  const [dataSources, setDataSources] = useState<DataSource[]>(mockDataSources);
 
-  const sourceId = sp.get('sourceId') || dataSources[0].id;
-  const source = dataSources.find((d) => d.id === sourceId)!;
+  const [sourceId, setSourceId] = useState(sp.get('sourceId') || mockDataSources[0].id);
+  const source = dataSources.find((d) => d.id === sourceId) || dataSources[0] || mockDataSources[0];
+
+  useEffect(() => {
+    IntegrationAPI.listDatasources()
+      .then((rows) => {
+        setDataSources(rows);
+        if (!rows.some((d) => d.id === sourceId) && rows[0]) {
+          setSourceId(rows[0].id);
+        }
+      })
+      .catch((e) => message.error(e.message || '连接列表加载失败'));
+  }, []);
+
+  const publishTask = () => {
+    const targetTable = tables[0] || 'ods.untitled';
+    IntegrationAPI.createSyncTask({
+      sourceId,
+      name: `${targetTable.split('.').pop()}_${mode.toLowerCase()}`,
+      mode,
+      targetTable,
+      fieldMapping: mapping,
+      scheduleCron: mode === 'CDC' ? '' : '0 2 * * *',
+      rateLimit: 2500,
+      dirtyThreshold: 0,
+    })
+      .then((created) => IntegrationAPI.enableSyncTask(created.id))
+      .then(() => {
+        message.success('采集任务已创建');
+        navigate('/integration/sync-tasks');
+      })
+      .catch((e) => message.error(e.message || '采集任务创建失败'));
+  };
 
   const steps = [
     { title: '选源与模式',   icon: <DatabaseOutlined /> },
@@ -101,7 +135,7 @@ export default function SyncTaskWizard() {
           {step === 0 && (
             <Form layout="vertical" requiredMark="optional">
               <Form.Item label="源连接" required>
-                <Select defaultValue={source.id} options={dataSources.map((d) => ({
+                <Select value={source.id} onChange={setSourceId} options={dataSources.map((d) => ({
                   label: <Space size={8}><EntityTypeIcon kind={d.type} size={20} /> {d.name} <Text type="secondary" style={{ fontSize: 11 }}>{d.host}</Text></Space>,
                   value: d.id,
                 }))} />
@@ -279,10 +313,7 @@ export default function SyncTaskWizard() {
             {step === 3 && (
               <>
                 <Button icon={<PlayCircleOutlined />} onClick={() => message.success('已试跑，预览采样 100 行')}>试跑</Button>
-                <Button type="primary" icon={<CheckOutlined />} onClick={() => {
-                  message.success('采集任务已创建');
-                  navigate('/integration/sync-tasks');
-                }}>发布</Button>
+                <Button type="primary" icon={<CheckOutlined />} onClick={publishTask}>发布</Button>
               </>
             )}
           </Space>

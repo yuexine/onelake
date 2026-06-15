@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearAuth, getValidAccessToken, startLogin } from '../auth/oidc';
 
 /**
  * 全局 axios 客户端：附带 JWT、错误处理、统一 ApiResponse 解包。
@@ -9,8 +10,8 @@ export const http = axios.create({
   timeout: 15_000,
 });
 
-http.interceptors.request.use((config) => {
-  const token = localStorage.getItem('onelake.access_token');
+http.interceptors.request.use(async (config) => {
+  const token = await getValidAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -30,8 +31,8 @@ http.interceptors.response.use(
   },
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('onelake.access_token');
-      window.location.href = '/auth/login';
+      clearAuth();
+      void startLogin(`${window.location.pathname}${window.location.search}${window.location.hash}`);
     }
     return Promise.reject(error);
   },

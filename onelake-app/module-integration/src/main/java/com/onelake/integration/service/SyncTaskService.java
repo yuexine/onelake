@@ -1,6 +1,7 @@
 package com.onelake.integration.service;
 
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
+import com.onelake.integration.api.vo.UpdateSyncTaskVO;
 import com.onelake.integration.dto.SyncRunDTO;
 import com.onelake.integration.dto.SyncTaskDTO;
 import org.springframework.data.domain.Page;
@@ -15,7 +16,17 @@ public interface SyncTaskService {
 
     SyncTaskDTO get(UUID id);
 
+    List<SyncTaskDTO> list(UUID sourceId, String mode, String status, String keyword);
+
     List<SyncTaskDTO> listBySource(UUID sourceId);
+
+    SyncTaskDTO update(UUID id, UpdateSyncTaskVO vo);
+
+    void delete(UUID id);
+
+    SyncTaskDTO enable(UUID id);
+
+    SyncTaskDTO disable(UUID id);
 
     UUID trigger(UUID taskId);
 

@@ -2,6 +2,7 @@ package com.onelake.integration.api;
 
 import com.onelake.common.api.ApiResponse;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
+import com.onelake.integration.api.vo.UpdateSyncTaskVO;
 import com.onelake.integration.dto.SyncRunDTO;
 import com.onelake.integration.dto.SyncTaskDTO;
 import com.onelake.integration.service.SyncTaskService;
@@ -34,14 +35,55 @@ public class SyncTaskController {
         return ApiResponse.ok(service.get(id));
     }
 
+    @GetMapping
+    public ApiResponse<List<SyncTaskDTO>> list(@RequestParam(required = false) UUID sourceId,
+                                               @RequestParam(required = false) String mode,
+                                               @RequestParam(required = false) String status,
+                                               @RequestParam(required = false) String keyword) {
+        return ApiResponse.ok(service.list(sourceId, mode, status, keyword));
+    }
+
     @GetMapping("/by-source/{sourceId}")
     public ApiResponse<List<SyncTaskDTO>> listBySource(@PathVariable UUID sourceId) {
         return ApiResponse.ok(service.listBySource(sourceId));
     }
 
+    @PutMapping("/{id}")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncTaskDTO> update(@PathVariable UUID id,
+                                           @RequestBody UpdateSyncTaskVO vo) {
+        return ApiResponse.ok(service.update(id, vo));
+    }
+
+    @DeleteMapping("/{id}")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<Void> delete(@PathVariable UUID id) {
+        service.delete(id);
+        return ApiResponse.ok();
+    }
+
+    @PostMapping("/{id}/enable")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncTaskDTO> enable(@PathVariable UUID id) {
+        return ApiResponse.ok(service.enable(id));
+    }
+
+    @PostMapping("/{id}/disable")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncTaskDTO> disable(@PathVariable UUID id) {
+        return ApiResponse.ok(service.disable(id));
+    }
+
     @PostMapping("/{id}/run")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<java.util.Map<String, Object>> run(@PathVariable UUID id) {
+        UUID runId = service.trigger(id);
+        return ApiResponse.ok(java.util.Map.of("runId", runId));
+    }
+
+    @PostMapping("/{id}/trigger")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<java.util.Map<String, Object>> trigger(@PathVariable UUID id) {
         UUID runId = service.trigger(id);
         return ApiResponse.ok(java.util.Map.of("runId", runId));
     }

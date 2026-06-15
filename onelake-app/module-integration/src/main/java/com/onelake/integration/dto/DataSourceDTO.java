@@ -8,9 +8,15 @@ import java.util.UUID;
  */
 public record DataSourceDTO(
     UUID id,
+    UUID tenantId,
     String name,
     String type,
+    String host,
+    Integer port,
+    String dbName,
+    String username,
     String health,
+    Long rttMs,
     UUID projectId,
     String networkMode,
     String envLevel,

@@ -5,27 +5,30 @@
  * + 主内容区 (面包屑 + 页面 + 右侧抽屉)
  * + 底部全局任务条
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button } from 'antd';
 import {
-  AppstoreOutlined, DatabaseOutlined, ClusterOutlined, SearchOutlined,
+  ClusterOutlined, SearchOutlined,
   SafetyOutlined, LockOutlined, CloudOutlined, DashboardOutlined,
-  ControlOutlined, BellOutlined, QuestionCircleOutlined,
+  BellOutlined, QuestionCircleOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined, DownOutlined, UserOutlined,
+  CloudSyncOutlined, NodeIndexOutlined, FileSearchOutlined, MonitorOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from './stores/app';
 import { GlobalSearch } from './components/GlobalSearch';
 import { NotificationCenter } from './components/NotificationCenter';
 import { OneLakeLogo } from './components/OneLakeLogo';
 import { TaskProgressBar, TaskProgressTrigger } from './components/TaskProgressBar';
+import { getAuthUser, logout } from './auth/oidc';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
 const NAV: import('antd').MenuProps['items'] = [
   { key: '/dashboard', icon: <DashboardOutlined />, label: '工作台' },
-  { key: '/integration', icon: <DatabaseOutlined />, label: '数据集成',
+  { key: '/integration', icon: <CloudSyncOutlined />, label: '数据集成',
     children: [
       { key: '/integration/datasources', label: '连接管理' },
       { key: '/integration/sync-tasks', label: '采集任务' },
@@ -42,7 +45,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/lakehouse/optimize', label: '存储优化' },
     ],
   },
-  { key: '/orchestration', icon: <AppstoreOutlined />, label: '数据开发 · 编排',
+  { key: '/orchestration', icon: <NodeIndexOutlined />, label: '数据开发 · 编排',
     children: [
       { key: '/orchestration/pipelines', label: '流水线' },
       { key: '/orchestration/operators', label: '算子市场' },
@@ -56,7 +59,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/quality/gate', label: '门禁失败' },
     ],
   },
-  { key: '/catalog', icon: <SearchOutlined />, label: '数据目录与血缘',
+  { key: '/catalog', icon: <FileSearchOutlined />, label: '数据目录与血缘',
     children: [
       { key: '/catalog/search', label: '搜索浏览' },
       { key: '/catalog/glossary', label: '业务术语表' },
@@ -79,7 +82,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/dataservice/subscriptions', label: '订阅与计量' },
     ],
   },
-  { key: '/monitor', icon: <ControlOutlined />, label: '运营与监控',
+  { key: '/monitor', icon: <MonitorOutlined />, label: '运营与监控',
     children: [
       { key: '/monitor/overview', label: '总览大盘' },
       { key: '/monitor/alerts', label: '告警中心' },
@@ -87,7 +90,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/monitor/sla', label: 'SLA 看板' },
     ],
   },
-  { key: '/system', icon: <ControlOutlined />, label: '系统管理',
+  { key: '/system', icon: <SettingOutlined />, label: '系统管理',
     children: [
       { key: '/system/tenants', label: '租户/项目' },
       { key: '/system/rbac', label: 'RBAC 权限' },
@@ -98,13 +101,41 @@ const NAV: import('antd').MenuProps['items'] = [
   },
 ];
 
+const ROLE_LABELS: Record<string, string> = {
+  ADMIN: 'ADMIN',
+  DE: 'DE',
+  OPS: 'OPS',
+  SEC: 'SEC',
+  CONSUMER: 'CONSUMER',
+};
+
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [taskBarCollapsed, setTaskBarCollapsed] = useState(true);
-  const { user, tenant, tenants, tasks, notifications, setSearchOpen, setNotifyOpen } = useAppStore();
+  const { user, tenant, tenants, tasks, notifications, setSearchOpen, setNotifyOpen, setUser } = useAppStore();
   const navigate = useNavigate();
   const location = useLocation();
   const unread = notifications.filter((n) => !n.isRead).length;
+  const visibleRoles = user.roles.slice(0, 3);
+  const hiddenRoleCount = Math.max(user.roles.length - visibleRoles.length, 0);
+
+  useEffect(() => {
+    const authUser = getAuthUser();
+    if (authUser) {
+      const current = useAppStore.getState().user;
+      const roles = authUser.roles.length > 0 ? authUser.roles : current.roles;
+      if (current.username === authUser.username && current.roles.join('/') === roles.join('/')) {
+        return;
+      }
+      setUser({
+        id: authUser.id,
+        name: authUser.name,
+        username: authUser.username,
+        roles,
+        tenant: current.tenant,
+      });
+    }
+  }, [setUser]);
 
   // 当前选中菜单（最长前缀匹配）
   const selectedKeys = (() => {
@@ -251,16 +282,92 @@ export default function App() {
                   { type: 'divider' as const },
                   { key: 'logout', label: '退出登录' },
                 ],
+                onClick: ({ key }) => {
+                  if (key === 'logout') logout();
+                },
               }}
             >
-              <Space size={8} style={{ cursor: 'pointer', padding: '2px 8px 2px 2px', borderRadius: 20, transition: 'background var(--ol-dur-fast)' }}
+              <Space
+                size={10}
+                title={`${user.name} · ${user.roles.join('/')}`}
+                style={{
+                  cursor: 'pointer',
+                  padding: '4px 10px 4px 4px',
+                  borderRadius: 22,
+                  transition: 'background var(--ol-dur-fast)',
+                  maxWidth: 260,
+                  minWidth: 0,
+                  lineHeight: 1,
+                }}
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--ol-fill)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >
-                <Avatar size={30} icon={<UserOutlined />} style={{ background: 'var(--ol-brand-gradient)' }} />
-                <div style={{ lineHeight: 1.1 }}>
-                  <div style={{ fontSize: 13, color: 'var(--ol-ink)', fontWeight: 500 }}>{user.name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{user.roles.join('/')}</div>
+                <Avatar size={32} icon={<UserOutlined />} style={{ background: 'var(--ol-brand-gradient)', flexShrink: 0 }} />
+                <div style={{ minWidth: 0, lineHeight: 1.1 }}>
+                  <div
+                    style={{
+                      maxWidth: 190,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontSize: 13,
+                      color: 'var(--ol-ink)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {user.name}
+                  </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      marginTop: 4,
+                      maxWidth: 190,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {visibleRoles.map((role) => (
+                      <span
+                        key={role}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          height: 18,
+                          padding: '0 6px',
+                          borderRadius: 5,
+                          background: 'var(--ol-brand-soft)',
+                          color: 'var(--ol-brand)',
+                          fontSize: 10,
+                          fontWeight: 600,
+                          lineHeight: '18px',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {ROLE_LABELS[role] || role}
+                      </span>
+                    ))}
+                    {hiddenRoleCount > 0 && (
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          height: 18,
+                          padding: '0 6px',
+                          borderRadius: 5,
+                          background: 'var(--ol-fill)',
+                          color: 'var(--ol-ink-3)',
+                          border: '1px solid var(--ol-line-soft)',
+                          fontSize: 10,
+                          fontWeight: 600,
+                          lineHeight: '16px',
+                          flexShrink: 0,
+                        }}
+                      >
+                        +{hiddenRoleCount}
+                      </span>
+                    )}
+                </div>
                 </div>
               </Space>
             </Dropdown>

@@ -66,15 +66,18 @@
 
 | 子包 | 类 | 职责 |
 |------|----|------|
-| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 测连 |
+| module-common/api | `SystemContextController` | `/api/v1/system/context`、`/api/v1/system/projects`，提供当前租户和项目选项 |
+| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 测连 + 库列表探查 |
 | api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/触发/历史 |
-| api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
+| api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
 | service | `DataSourceService` / `SyncTaskService` | 用例编排接口 |
 | service/impl | `DataSourceServiceImpl` / `SyncTaskServiceImpl` | 事务边界 + Outbox + 审计 |
+| service/validation | `DataSourceConfigValidator` | 按 MYSQL/POSTGRES/HIVE/KAFKA/S3 等类型校验连接配置 |
 | domain/entity | `DataSource` / `SyncTask` / `SyncRun` / `SourceSchemaSnapshot` | JPA 实体 |
 | domain/enums | 7 个枚举（Health / SyncMode / DataSourceType / NetworkMode / EnvLevel / TaskStatus / RunStatus） | |
 | repository | 4 个 JPA Repository | |
 | client | `ConnectivityTester` | TCP + JDBC 双探活（NET/AUTH/DRV 分类） |
+| client/discovery | `DatabaseDiscoveryClient` | 根据连接信息探查 MySQL/PostgreSQL 可选库名，支持前端下拉或手动输入 |
 | client | `AirbyteSyncDriver` | Airbyte `/connections/sync` + `/jobs/get` |
 | mapper | `DataSourceMapper` / `SyncTaskMapper` | MapStruct |
 | dto | `DataSourceDTO` / `SyncTaskDTO` / `SyncRunDTO` | 对外 DTO（不暴露 config 中的密码） |

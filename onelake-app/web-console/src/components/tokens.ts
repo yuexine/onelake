@@ -196,7 +196,59 @@ export const tokens = {
 };
 
 /* ------------------------------------------------------------------ */
-/* 10. antd 主题配置（注入到 ConfigProvider）                           */
+/* 11. 业务语义色板（跨页面共享，避免硬编码 hex）                       */
+/* ------------------------------------------------------------------ */
+
+export type Intent = 'brand' | 'info' | 'success' | 'warning' | 'error' | 'neutral' | 'violet';
+
+export interface IntentMeta {
+  fg: string;
+  bg: string;
+  border: string;
+}
+
+export const intentMeta: Record<Intent, IntentMeta> = {
+  brand:   { fg: '#0F4FD8',  bg: '#E8F0FF', border: '#B7D2FF' },
+  info:    { fg: '#0369A1',  bg: '#E0F2FE', border: '#7DD3FC' },
+  success: { fg: '#15803D',  bg: '#DCFCE7', border: '#86EFAC' },
+  warning: { fg: '#B45309',  bg: '#FEF3C7', border: '#FCD34D' },
+  error:   { fg: '#B91C1C',  bg: '#FEE2E2', border: '#FCA5A5' },
+  neutral: { fg: '#475569',  bg: '#F1F5F9', border: '#CBD5E1' },
+  violet:  { fg: '#6D28D9',  bg: '#EDE9FE', border: '#C4B5FD' },
+};
+
+/** 数据资产分层色（ODS / DWD / DWS / ADS） */
+export const layerColor: Record<string, Intent> = {
+  ODS: 'brand',
+  DWD: 'info',
+  DWS: 'warning',
+  ADS: 'success',
+};
+
+/** 环境色（PROD / TEST / DEV） */
+export const envColor: Record<string, Intent> = {
+  PROD: 'error',
+  TEST: 'warning',
+  DEV:  'neutral',
+};
+
+/** 风险等级色 */
+export const riskColor: Record<string, Intent> = {
+  HIGH:   'error',
+  MEDIUM: 'warning',
+  LOW:    'success',
+};
+
+/** 采集模式色 */
+export const modeColor: Record<string, Intent> = {
+  FULL:        'neutral',
+  INCREMENTAL: 'brand',
+  CDC:         'info',
+  FILE:        'warning',
+};
+
+/* ------------------------------------------------------------------ */
+/* 12. antd 主题配置（注入到 ConfigProvider）                           */
 /* ------------------------------------------------------------------ */
 
 export const antdTheme: ThemeConfig = {

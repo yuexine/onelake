@@ -17,6 +17,7 @@ import {
 import { useAppStore } from './stores/app';
 import { GlobalSearch } from './components/GlobalSearch';
 import { NotificationCenter } from './components/NotificationCenter';
+import { OneLakeLogo } from './components/OneLakeLogo';
 import { TaskProgressBar, TaskProgressTrigger } from './components/TaskProgressBar';
 
 const { Header, Sider, Content } = Layout;
@@ -149,26 +150,7 @@ export default function App() {
             height: 56,
           }}
         >
-          <div
-            style={{
-              width: 32, height: 32, borderRadius: 8,
-              background: 'var(--ol-brand-gradient)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontWeight: 700, fontSize: 13,
-              boxShadow: '0 4px 10px rgba(15, 79, 216, 0.28)',
-              flexShrink: 0,
-            }}
-          >
-            OL
-          </div>
-          {!collapsed && (
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)', lineHeight: 1.2 }} className="ol-truncate">
-                OneLake
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)', lineHeight: 1.2 }}>数据平台控制台</div>
-            </div>
-          )}
+          <OneLakeLogo collapsed={collapsed} size={34} />
         </div>
         <Menu
           mode="inline"

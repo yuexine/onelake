@@ -14,16 +14,17 @@ import {
 } from '@ant-design/icons';
 import { syncTasks } from '../../mock';
 import {
-  PageHeader, FilterBar, SectionCard, Toolbar, StatusBadge,
+  PageHeader, FilterBar, SectionCard, Toolbar, StatusBadge, StateView,
+  IntentBadge, useAsyncAction, modeColor,
 } from '../../components';
 
 const { Text } = Typography;
 
-const MODE_META: Record<string, { icon: React.ReactNode; bg: string; fg: string; label: string }> = {
-  FULL:       { icon: <DatabaseOutlined />,   bg: 'var(--ol-fill-soft)', fg: 'var(--ol-ink-2)', label: '全量' },
-  INCREMENTAL:{ icon: <HourglassOutlined />,  bg: 'var(--ol-brand-soft)', fg: 'var(--ol-brand)', label: '增量' },
-  CDC:        { icon: <CloudSyncOutlined />,  bg: 'var(--ol-info-soft)',  fg: '#0369A1', label: 'CDC' },
-  FILE:       { icon: <FileTextOutlined />,   bg: '#FEF3C7',              fg: '#B45309', label: '文件' },
+const MODE_META: Record<string, { icon: React.ReactNode; label: string }> = {
+  FULL:        { icon: <DatabaseOutlined />,   label: '全量' },
+  INCREMENTAL: { icon: <HourglassOutlined />,  label: '增量' },
+  CDC:         { icon: <CloudSyncOutlined />,  label: 'CDC' },
+  FILE:        { icon: <FileTextOutlined />,   label: '文件' },
 };
 
 export default function SyncTaskList() {
@@ -32,7 +33,6 @@ export default function SyncTaskList() {
   const [mode, setMode] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
-  const [runningId, setRunningId] = useState<string | null>(null);
 
   const rows = useMemo(() => syncTasks.filter((t) =>
     (!mode || t.mode === mode) &&
@@ -47,15 +47,17 @@ export default function SyncTaskList() {
     cdc: syncTasks.filter((t) => t.mode === 'CDC').length,
   }), []);
 
+  const { run, isLoading } = useAsyncAction();
+
   const handleTrigger = (id: string, name: string) => {
-    setRunningId(id);
-    setTimeout(() => {
-      setRunningId(null);
-      message.success({
-        content: `已触发 ${name} · runId=mock`,
-        icon: <PlayCircleOutlined style={{ color: 'var(--ol-brand)' }} />,
-      });
-    }, 800);
+    run(`trigger-${id}`, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      return { runId: 'mock-' + Date.now() };
+    }, {
+      successMsg: `已触发 ${name} · runId 已生成`,
+      errorMsg: `触发失败，请检查任务状态`,
+      duration: 2.5,
+    });
   };
 
   const columns = [
@@ -65,11 +67,14 @@ export default function SyncTaskList() {
         <Space size={10}>
           {(() => {
             const m = MODE_META[r.mode] ?? MODE_META.FULL;
+            const intent = modeColor[r.mode] || 'neutral';
             return (
               <div style={{
                 width: 30, height: 30, borderRadius: 7, display: 'inline-flex',
                 alignItems: 'center', justifyContent: 'center',
-                background: m.bg, color: m.fg, fontSize: 14,
+                background: `var(--ol-${intent === 'neutral' ? 'fill' : intent === 'brand' ? 'brand' : intent === 'info' ? 'info' : intent === 'warning' ? 'warning' : 'fill'}-soft)`,
+                color: intent === 'neutral' ? 'var(--ol-ink-3)' : intent === 'brand' ? 'var(--ol-brand)' : intent === 'info' ? '#0369A1' : '#B45309',
+                fontSize: 14,
               }}>{m.icon}</div>
             );
           })()}
@@ -92,13 +97,9 @@ export default function SyncTaskList() {
       render: (m: string) => {
         const meta = MODE_META[m] ?? MODE_META.FULL;
         return (
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-            background: meta.bg, color: meta.fg,
-          }}>
+          <IntentBadge intent={modeColor[m] || 'neutral'} size="md">
             {meta.icon} {meta.label}
-          </span>
+          </IntentBadge>
         );
       },
     },
@@ -122,7 +123,7 @@ export default function SyncTaskList() {
             <Button
               size="small" type="text"
               icon={<PlayCircleOutlined style={{ color: 'var(--ol-success)' }} />}
-              loading={runningId === r.id}
+              loading={isLoading(`trigger-${r.id}`)}
               onClick={() => handleTrigger(r.id, r.name)}
             />
           </Tooltip>
@@ -195,6 +196,16 @@ export default function SyncTaskList() {
         </div>
         <Table
           rowKey="id" columns={columns} dataSource={rows}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无采集任务"
+                description="从模板生成或新建任务，将源数据接入 ODS 层"
+                cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/integration/sync-tasks/new')}>新建采集任务</Button>}
+              />
+            ),
+          }}
           pagination={{ pageSize: 20, showTotal: (t) => <span className="ol-quiet" style={{ fontSize: 12 }}>共 {t} 条</span> }}
           rowSelection={{ selectedRowKeys: selectedKeys, onChange: setSelectedKeys }}
           size="middle" scroll={{ x: 1000 }}

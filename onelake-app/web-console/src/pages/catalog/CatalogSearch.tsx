@@ -6,7 +6,7 @@ import { SearchOutlined, FireOutlined, AppstoreOutlined, StarOutlined } from '@a
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { lakehouseAssets, searchHot } from '../../mock';
-import { ClassificationBadge, PageHeader, SectionCard } from '../../components';
+import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../components';
 import type { Asset } from '../../types';
 
 const { Text } = Typography;
@@ -116,6 +116,13 @@ export default function CatalogSearch() {
 
         <Col xs={24} lg={19}>
           <SectionCard title={`搜索结果 (${filtered.length})`} icon={<SearchOutlined />} flatBody>
+            {filtered.length === 0 ? (
+              <StateView
+                state="empty"
+                title="没有找到匹配的资产"
+                description="尝试调整关键字、分层、密级或负责人筛选"
+              />
+            ) : (
             <List
               dataSource={filtered}
               renderItem={(a) => (
@@ -146,6 +153,7 @@ export default function CatalogSearch() {
                 </List.Item>
               )}
             />
+            )}
           </SectionCard>
         </Col>
       </Row>

@@ -18,17 +18,11 @@ import {
 import { dataSources } from '../../mock';
 import type { DataSource } from '../../types';
 import {
-  PageHeader, FilterBar, SectionCard, Toolbar, StatusBadge,
-  EntityTypeIcon,
+  PageHeader, FilterBar, SectionCard, Toolbar, StatusBadge, StateView,
+  EntityTypeIcon, IntentBadge, useAsyncAction, envColor,
 } from '../../components';
 
 const { Text } = Typography;
-
-const ENV_COLOR: Record<string, { bg: string; fg: string }> = {
-  PROD: { bg: 'var(--ol-error-soft)', fg: 'var(--ol-error)' },
-  TEST: { bg: 'var(--ol-warning-soft)', fg: '#B45309' },
-  DEV:  { bg: 'var(--ol-fill-soft)', fg: 'var(--ol-ink-3)' },
-};
 
 export default function DatasourceList() {
   const navigate = useNavigate();
@@ -38,7 +32,6 @@ export default function DatasourceList() {
   const [filterEnv, setFilterEnv] = useState<string>();
   const [keyword, setKeyword] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
-  const [testingId, setTestingId] = useState<string | null>(null);
   const [form] = Form.useForm();
 
   const filtered = useMemo(() => dataSources.filter((r) =>
@@ -55,15 +48,18 @@ export default function DatasourceList() {
     prod: dataSources.filter((d) => d.envLevel === 'PROD').length,
   }), []);
 
+  const { run, isLoading } = useAsyncAction();
+
   const handleTest = (r: DataSource) => {
-    setTestingId(r.id);
-    setTimeout(() => {
-      setTestingId(null);
-      message.success({
-        content: `${r.name} 连通成功 · RTT ${r.rttMs}ms`,
-        icon: <ThunderboltOutlined style={{ color: '#16A34A' }} />,
-      });
-    }, 700);
+    run(`test-${r.id}`, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      if (r.health !== 'OK') throw new Error('连接失败');
+      return r;
+    }, {
+      successMsg: `${r.name} 连通成功 · RTT ${r.rttMs}ms`,
+      errorMsg: `${r.name} 连接失败，请检查账号密码或网络`,
+      duration: 2.5,
+    });
   };
 
   const columns = [
@@ -93,20 +89,7 @@ export default function DatasourceList() {
     },
     {
       title: '环境', dataIndex: 'envLevel', width: 84,
-      render: (e: string) => {
-        const c = ENV_COLOR[e] || ENV_COLOR.DEV;
-        return (
-          <span
-            style={{
-              display: 'inline-flex', padding: '1px 8px', borderRadius: 4,
-              fontSize: 11, fontWeight: 600, lineHeight: '18px',
-              background: c.bg, color: c.fg,
-            }}
-          >
-            {e}
-          </span>
-        );
-      },
+      render: (e: string) => <IntentBadge intent={envColor[e] || 'neutral'}>{e}</IntentBadge>,
     },
     {
       title: '状态', dataIndex: 'health', width: 150,
@@ -116,7 +99,7 @@ export default function DatasourceList() {
             status={h === 'OK' ? 'SUCCEEDED' : h === 'FAIL' ? 'FAILED' : 'PENDING'}
             label={h === 'OK' ? '连通' : h === 'FAIL' ? '异常' : '未知'}
           />
-          {testingId === r.id ? (
+          {isLoading(`test-${r.id}`) ? (
             <ReloadOutlined spin style={{ color: 'var(--ol-brand)', fontSize: 12 }} />
           ) : (
             r.rttMs != null && (
@@ -148,7 +131,7 @@ export default function DatasourceList() {
             <Button
               size="small" type="text"
               icon={<ThunderboltOutlined />}
-              loading={testingId === r.id}
+              loading={isLoading(`test-${r.id}`)}
               onClick={() => handleTest(r)}
             />
           </Tooltip>
@@ -235,6 +218,16 @@ export default function DatasourceList() {
           rowKey="id"
           columns={columns}
           dataSource={filtered}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无连接"
+                description="尝试调整筛选条件，或新建第一个数据源连接"
+                cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawerOpen(true)}>新建连接</Button>}
+              />
+            ),
+          }}
           pagination={{
             pageSize: 20, showSizeChanger: true,
             showTotal: (t) => <span className="ol-quiet" style={{ fontSize: 12 }}>共 {t} 条</span>,

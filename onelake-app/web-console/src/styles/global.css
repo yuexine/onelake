@@ -367,6 +367,66 @@ body {
   animation: ol-shimmer 1.4s ease infinite;
 }
 
+/* -- Focus ring（键盘可访问性） ------------------------------------- */
+
+/* 鼠标点击时不显示焦点环，键盘 Tab 时显示 */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--ol-brand);
+  outline-offset: 2px;
+  border-radius: var(--ol-radius-sm);
+}
+
+/* antd 按钮和链接的键盘焦点更明显 */
+.ant-btn:focus-visible,
+.ant-input:focus-visible,
+.ant-select-selector:focus-visible,
+.ant-tabs-tab:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--ol-brand);
+  outline-offset: 2px;
+}
+
+/* 表格行键盘选中高亮 */
+.ant-table-tbody > tr:focus-within > td {
+  background: var(--ol-brand-soft) !important;
+}
+
+/* 通知红点动画 */
+.ol-pulse-dot {
+  animation: ol-pulse-soft 1.6s var(--ol-ease) infinite;
+}
+
+/* Tree 选中节点视觉反馈 */
+.ant-tree .ant-tree-node-selected {
+  background: var(--ol-brand-soft) !important;
+  color: var(--ol-brand) !important;
+  font-weight: 500;
+}
+
+/* Drawer / Modal 滚动条 */
+.ant-drawer-body::-webkit-scrollbar,
+.ant-modal-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+/* Tabs 切换淡入 */
+.ant-tabs-tabpane {
+  animation: ol-fade-in var(--ol-dur-base) var(--ol-ease-out);
+}
+
+/* 全屏遮罩（用于操作进行中） */
+.ol-overlay-loading {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
 /* Responsive utility */
 @media (max-width: 1280px) {
   .ol-page { gap: var(--ol-space-md); }

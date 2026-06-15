@@ -5,7 +5,7 @@ import { Table, Tag, Space, Button, Modal, Form, Input, Select, message, Typogra
 import { PlusOutlined, BellOutlined, SendOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { channels } from '../../mock';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, StateView, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
@@ -18,6 +18,7 @@ const TYPE_COLOR: Record<string, { bg: string; fg: string }> = {
 
 export default function Channels() {
   const [open, setOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   return (
     <div className="ol-page">
@@ -61,7 +62,13 @@ export default function Channels() {
             ) },
             { title: '操作', width: 180, render: (_: unknown, r: any) => (
               <Space>
-                <Button size="small" type="link" icon={<SendOutlined />} onClick={() => message.success(`已向 ${r.type} 发送测试消息`)}>
+                <Button size="small" type="link" icon={<SendOutlined />}
+                  loading={isLoading(`test-${r.id}`)}
+                  onClick={() => run(`test-${r.id}`, async () => {
+                    await new Promise((resolve) => setTimeout(resolve, 600));
+                    return r.type;
+                  }, { successMsg: `已向 ${r.type} 发送测试消息，请到对应渠道查收`, duration: 3 })}
+                >
                   测试发送
                 </Button>
                 <Button size="small" type="link">编辑</Button>

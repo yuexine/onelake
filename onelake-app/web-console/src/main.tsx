@@ -5,7 +5,7 @@ import zhCN from 'antd/locale/zh_CN';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 import { AppRoutes } from './routes';
-import { antdTheme } from './components/tokens';
+import { antdTheme, ErrorBoundary } from './components';
 import 'dayjs/locale/zh-cn';
 import './styles/global.css';
 
@@ -21,14 +21,16 @@ const queryClient = new QueryClient({
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN} theme={antdTheme}>
-      <AntdApp>
-        <QueryClientProvider client={queryClient}>
-          <BrowserRouter>
-            <AppRoutes />
-          </BrowserRouter>
-        </QueryClientProvider>
-      </AntdApp>
-    </ConfigProvider>
+    <ErrorBoundary>
+      <ConfigProvider locale={zhCN} theme={antdTheme}>
+        <AntdApp>
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter>
+              <AppRoutes />
+            </BrowserRouter>
+          </QueryClientProvider>
+        </AntdApp>
+      </ConfigProvider>
+    </ErrorBoundary>
   </React.StrictMode>,
 );

@@ -6,7 +6,7 @@ import { AlertOutlined, BellOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { opsAlerts } from '../../mock';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, StateView } from '../../components';
 
 const { Text } = Typography;
 
@@ -56,6 +56,9 @@ export default function AlertCenter() {
         <Table
           rowKey="id"
           dataSource={activeTab === 'all' ? alerts : alerts.filter((a) => a.level === activeTab)}
+          locale={{
+            emptyText: <StateView state="empty" title={activeTab === 'all' ? '暂无告警' : `${activeTab} 告警已清零`} description="系统运行正常，无需关注" />,
+          }}
           size="middle"
           pagination={false}
           columns={[

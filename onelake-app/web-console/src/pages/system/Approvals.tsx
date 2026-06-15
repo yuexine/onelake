@@ -7,20 +7,15 @@ import { AuditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
 import { approvals } from '../../mock';
-import { StatusBadge, ImpactAnalysis, PageHeader, SectionCard } from '../../components';
+import { StatusBadge, ImpactAnalysis, PageHeader, SectionCard, StateView, useAsyncAction, IntentBadge, riskColor } from '../../components';
 
 const { Text } = Typography;
-
-const RISK_COLOR: Record<string, { bg: string; fg: string }> = {
-  HIGH:   { bg: 'var(--ol-error-soft)',   fg: 'var(--ol-error)' },
-  MEDIUM: { bg: 'var(--ol-warning-soft)', fg: '#B45309' },
-  LOW:    { bg: 'var(--ol-success-soft)', fg: 'var(--ol-success)' },
-};
 
 export default function Approvals() {
   const { id } = useParams();
   const [drawerId, setDrawerId] = useState<string | undefined>(id);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const { run, isLoading } = useAsyncAction();
 
   const current = approvals.find((a) => a.id === drawerId);
 
@@ -40,12 +35,27 @@ export default function Approvals() {
         description="访问 / 订阅 / 发布 / 下线 / Schema 变更 / 豁免 / 升额 七类审批"
         actions={
           <>
-            <Button disabled={selectedRowKeys.length === 0} icon={<CheckOutlined />}
-              onClick={() => message.success(`已批量通过 ${selectedRowKeys.length} 项`)}>
+            <Button
+              disabled={selectedRowKeys.length === 0}
+              loading={isLoading('batch-approve')}
+              icon={<CheckOutlined />}
+              onClick={() => run('batch-approve', async () => {
+                await new Promise((r) => setTimeout(r, 600));
+                setSelectedRowKeys([]);
+              }, { successMsg: `已批量通过 ${selectedRowKeys.length} 项审批`, duration: 2.5 })}
+            >
               批量通过
             </Button>
-            <Button disabled={selectedRowKeys.length === 0} danger icon={<CloseOutlined />}
-              onClick={() => message.success(`已批量驳回 ${selectedRowKeys.length} 项`)}>
+            <Button
+              disabled={selectedRowKeys.length === 0}
+              danger
+              loading={isLoading('batch-reject')}
+              icon={<CloseOutlined />}
+              onClick={() => run('batch-reject', async () => {
+                await new Promise((r) => setTimeout(r, 600));
+                setSelectedRowKeys([]);
+              }, { successMsg: `已批量驳回 ${selectedRowKeys.length} 项审批`, duration: 2.5 })}
+            >
               批量驳回
             </Button>
           </>
@@ -60,6 +70,9 @@ export default function Approvals() {
                 rowKey="id"
                 rowSelection={{ selectedRowKeys, onChange: (k) => setSelectedRowKeys(k as string[]) }}
                 dataSource={approvals.filter((a) => a.status === 'PENDING')}
+                locale={{
+                  emptyText: <StateView state="empty" title="暂无待审批" description="所有申请都已处理完毕，工作愉快！" />,
+                }}
                 size="middle"
                 pagination={false}
                 columns={[
@@ -73,15 +86,9 @@ export default function Approvals() {
                   { title: '原因', dataIndex: 'reason', ellipsis: true, render: (r?: string) => (
                     <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{r || '-'}</span>
                   ) },
-                  { title: '风险', dataIndex: 'riskLevel', width: 90, render: (l: string) => {
-                    const c = RISK_COLOR[l] || RISK_COLOR.LOW;
-                    return (
-                      <span style={{
-                        padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                        background: c.bg, color: c.fg,
-                      }}>{l}</span>
-                    );
-                  } },
+                  { title: '风险', dataIndex: 'riskLevel', width: 90, render: (l: string) => (
+                    <IntentBadge intent={riskColor[l] || 'success'}>{l}</IntentBadge>
+                  ) },
                   { title: '状态', dataIndex: 'status', width: 100, render: (s: string) => <StatusBadge status={s} /> },
                   { title: '时间', dataIndex: 'createdAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{t}</span> },
                   { title: '操作', width: 90, render: (_: unknown, r: any) => (
@@ -146,11 +153,7 @@ export default function Approvals() {
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>风险等级 / 影响</Text>
                   <div style={{ marginTop: 4 }}>
                     <Space split={<span className="ol-divider-v" />} wrap>
-                      <span style={{
-                        padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                        background: (RISK_COLOR[current.riskLevel || 'LOW'] || RISK_COLOR.LOW).bg,
-                        color: (RISK_COLOR[current.riskLevel || 'LOW'] || RISK_COLOR.LOW).fg,
-                      }}>{current.riskLevel}</span>
+                      <IntentBadge intent={riskColor[current.riskLevel || 'LOW']}>{current.riskLevel}</IntentBadge>
                       <Text style={{ fontSize: 12 }}>
                         {current.impactSummary?.assets ?? 0} 资产 · {current.impactSummary?.apis ?? 0} API · {current.impactSummary?.subscribers ?? 0} 订阅方
                       </Text>

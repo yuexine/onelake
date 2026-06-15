@@ -70,7 +70,8 @@ public class SyncTaskServiceImpl implements SyncTaskService {
                 "name", task.getName(),
                 "sourceId", task.getSourceId().toString(),
                 "mode", String.valueOf(task.getMode()),
-                "targetTable", task.getTargetTable()
+                "targetTable", task.getTargetTable() == null ? "" : task.getTargetTable(),
+                "tenantId", tenantId.toString()
             ));
         return toDTO(task);
     }
@@ -230,12 +231,17 @@ public class SyncTaskServiceImpl implements SyncTaskService {
                 String eventName = run.getStatus() == RunStatus.SUCCEEDED
                     ? "integration.sync_run.succeeded"
                     : "integration.sync_run.failed";
-                outbox.publish(eventName, run.getId().toString(),
-                    java.util.Map.of(
-                        "taskId", run.getTaskId().toString(),
-                        "externalJobId", run.getExternalJobId() == null ? "" : run.getExternalJobId(),
-                        "status", String.valueOf(run.getStatus())
-                    ));
+                // 加载 task 以获取 targetTable + tenantId，供下游消费方定位资产
+                SyncTask taskForEvent = taskRepo.findById(run.getTaskId()).orElse(null);
+                String targetTable = taskForEvent == null ? "" : taskForEvent.getTargetTable();
+                UUID tenantId = taskForEvent == null ? null : taskForEvent.getTenantId();
+                java.util.Map<String, String> payload = new java.util.HashMap<>();
+                payload.put("taskId", run.getTaskId().toString());
+                payload.put("externalJobId", run.getExternalJobId() == null ? "" : run.getExternalJobId());
+                payload.put("status", String.valueOf(run.getStatus()));
+                payload.put("targetTable", targetTable == null ? "" : targetTable);
+                if (tenantId != null) payload.put("tenantId", tenantId.toString());
+                outbox.publish(eventName, run.getId().toString(), payload);
             }
         } catch (Exception e) {
             log.warn("reconcile run {} failed: {}", runId, e.getMessage());

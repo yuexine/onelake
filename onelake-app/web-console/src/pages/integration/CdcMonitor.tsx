@@ -10,12 +10,13 @@ import {
   PauseCircleOutlined, ReloadOutlined, CloudSyncOutlined, FieldTimeOutlined,
   ApartmentOutlined, FileTextOutlined, ApiOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   PageHeader, StatusBadge, SectionCard, EntityTypeIcon, useAsyncAction, DangerConfirm,
 } from '../../components';
 import { schemaChangeRequests } from '../../mock';
+import { IntegrationAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -38,17 +39,31 @@ export default function CdcMonitor() {
   const navigate = useNavigate();
   const { run, isLoading } = useAsyncAction();
   const [rebuildOpen, setRebuildOpen] = useState(false);
+  const [cdcTask, setCdcTask] = useState<any>(null);
+  const [cdcStatus, setCdcStatus] = useState<any>(null);
+
+  useEffect(() => {
+    IntegrationAPI.listCdcTasks()
+      .then((tasks: any[]) => {
+        if (tasks && tasks.length > 0) {
+          setCdcTask(tasks[0]);
+          return IntegrationAPI.getCdcStatus(tasks[0].id);
+        }
+      })
+      .then((status: any) => { if (status) setCdcStatus(status); })
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="ol-page">
       <PageHeader
         icon={<CloudSyncOutlined />}
         title="CDC 实时监控"
-        subtitle={<Space size={8}><EntityTypeIcon kind="MYSQL" size={20} /><span className="ol-chip">mysql_orders_cdc</span></Space>}
+        subtitle={<Space size={8}><EntityTypeIcon kind="MYSQL" size={20} /><span className="ol-chip">{cdcTask?.sourceName || 'mysql_orders_cdc'}</span></Space>}
         description="Binlog 订阅 · 初始快照 + 增量衔接 · 位点原子持久化 · 两阶段 Exactly-Once"
         meta={[
-          { label: '当前位点', value: <Text code style={{ fontSize: 12 }}>binlog.000128 : 4456</Text> },
-          { label: '状态', value: <StatusBadge status="RUNNING" label="运行中" /> },
+          { label: '当前位点', value: <Text code style={{ fontSize: 12 }}>{cdcStatus?.checkpoint || cdcTask?.checkpoint || 'binlog.000128 : 4456'}</Text> },
+          { label: '状态', value: <StatusBadge status={cdcTask?.status || 'RUNNING'} label={cdcTask?.status === 'PAUSED' ? '已暂停' : '运行中'} /> },
         ]}
         actions={
           <>
@@ -74,7 +89,7 @@ export default function CdcMonitor() {
       <SectionCard
         title="延迟曲线（近 1 小时）"
         icon={<FieldTimeOutlined />}
-        subtitle="平均 1.2s · P99 5.6s · 背压正常"
+        subtitle={`平均 ${cdcStatus?.lagMs ? (cdcStatus.lagMs / 1000).toFixed(1) : '1.2'}s · P99 5.6s · 背压${cdcStatus?.backpressure ? '压力较高' : '正常'}`}
       >
         <Sparkline data={[3, 2, 1, 2, 1, 1, 1, 2, 3, 4, 5, 6, 4, 3, 2, 1, 1, 1, 1, 2, 3, 5, 6, 5, 4, 3, 2, 1, 1, 1]} color="var(--ol-info)" />
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 11, color: 'var(--ol-ink-3)' }}>

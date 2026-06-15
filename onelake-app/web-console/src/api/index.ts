@@ -42,6 +42,14 @@ export interface ConnectivityTestResult {
   diagnostics?: Record<string, unknown>;
 }
 
+export interface DiscoveredColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+  primaryKey: boolean;
+  ordinalPosition: number;
+}
+
 export const SystemAPI = {
   context: () => unwrap<SystemContext>(http.get('/system/context')),
 
@@ -61,6 +69,17 @@ export const IntegrationAPI = {
   probeDatabases: (body: unknown) =>
     unwrap<{ databases: string[]; manualAllowed: boolean; message?: string }>(
       http.post('/integration/datasources/probe-databases', body),
+    ),
+
+  listDatasourceSchemas: (id: string) =>
+    unwrap<string[]>(http.get(`/integration/datasources/${id}/schemas`)),
+
+  listDatasourceTables: (id: string, schema?: string) =>
+    unwrap<string[]>(http.get(`/integration/datasources/${id}/tables`, { params: { schema } })),
+
+  describeDatasourceTable: (id: string, objectName: string) =>
+    unwrap<DiscoveredColumn[]>(
+      http.get(`/integration/datasources/${id}/tables/${encodeURIComponent(objectName)}/columns`),
     ),
 
   testDatasource: (id: string) =>
@@ -119,6 +138,8 @@ export const IntegrationAPI = {
   // 文件采集
   listFileSources: () =>
     unwrap<unknown[]>(http.get('/integration/file-sources')),
+  listFileSourceFiles: (id: string) =>
+    unwrap<unknown[]>(http.get(`/integration/file-sources/${id}/files`)),
 
   // 监控
   healthSummary: (hours = 24) =>

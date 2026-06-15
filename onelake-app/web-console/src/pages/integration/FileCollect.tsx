@@ -9,11 +9,12 @@ import {
   FileTextOutlined, SettingOutlined, CloudServerOutlined, CheckCircleOutlined,
   WarningOutlined, StopOutlined, ReloadOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   PageHeader, SectionCard,
 } from '../../components';
 import { fileWatchList } from '../../mock';
+import { IntegrationAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -37,6 +38,20 @@ function splitFileName(filename: string) {
 
 export default function FileCollect() {
   const [activeTab, setActiveTab] = useState<'list' | 'config'>('list');
+  const [files, setFiles] = useState(fileWatchList);
+
+  useEffect(() => {
+    IntegrationAPI.listFileSources()
+      .then((sources: any[]) => {
+        if (sources && sources.length > 0) {
+          return IntegrationAPI.listFileSourceFiles(sources[0].id);
+        }
+      })
+      .then((data: any) => {
+        if (data && Array.isArray(data) && data.length > 0) setFiles(data);
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="ol-page">
@@ -82,7 +97,7 @@ export default function FileCollect() {
           <Table
             size="middle"
             rowKey="id"
-            dataSource={fileWatchList}
+            dataSource={files as any}
             pagination={false}
             columns={[
               { title: '文件名', dataIndex: 'filename', width: 420, render: (f: string) => {

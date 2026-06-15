@@ -1,5 +1,5 @@
 /**
- * 全局布局（对应原型 §1.2）：
+ * 全局布局（对应原型 §1.2 升级版）：
  *   顶栏 TopBar (Logo / 全局搜索 ⌘K / 租户切换 / 通知 / 帮助 / 头像)
  * + 左侧 SideNav (10 菜单可折叠)
  * + 主内容区 (面包屑 + 页面 + 右侧抽屉)
@@ -7,7 +7,7 @@
  */
 import { useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button, Tag } from 'antd';
+import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button } from 'antd';
 import {
   AppstoreOutlined, DatabaseOutlined, ClusterOutlined, SearchOutlined,
   SafetyOutlined, LockOutlined, CloudOutlined, DashboardOutlined,
@@ -17,14 +17,14 @@ import {
 import { useAppStore } from './stores/app';
 import { GlobalSearch } from './components/GlobalSearch';
 import { NotificationCenter } from './components/NotificationCenter';
-import { TaskProgressBar } from './components/TaskProgressBar';
+import { TaskProgressBar, TaskProgressTrigger } from './components/TaskProgressBar';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
 const NAV: import('antd').MenuProps['items'] = [
-  { key: '/dashboard', icon: <DashboardOutlined />, label: '① 工作台' },
-  { key: '/integration', icon: <DatabaseOutlined />, label: '② 数据集成',
+  { key: '/dashboard', icon: <DashboardOutlined />, label: '工作台' },
+  { key: '/integration', icon: <DatabaseOutlined />, label: '数据集成',
     children: [
       { key: '/integration/datasources', label: '连接管理' },
       { key: '/integration/sync-tasks', label: '采集任务' },
@@ -34,35 +34,35 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/integration/monitor', label: '采集监控' },
     ],
   },
-  { key: '/lakehouse', icon: <ClusterOutlined />, label: '③ 湖仓与建模',
+  { key: '/lakehouse', icon: <ClusterOutlined />, label: '湖仓与建模',
     children: [
       { key: '/lakehouse/tables', label: '分层表浏览' },
       { key: '/lakehouse/sql', label: 'SQL 工作台' },
       { key: '/lakehouse/optimize', label: '存储优化' },
     ],
   },
-  { key: '/orchestration', icon: <AppstoreOutlined />, label: '④ 数据开发 · 编排',
+  { key: '/orchestration', icon: <AppstoreOutlined />, label: '数据开发 · 编排',
     children: [
       { key: '/orchestration/pipelines', label: '流水线' },
       { key: '/orchestration/operators', label: '算子市场' },
       { key: '/orchestration/runs', label: '运行实例' },
     ],
   },
-  { key: '/quality', icon: <SafetyOutlined />, label: '⑤ 数据质量',
+  { key: '/quality', icon: <SafetyOutlined />, label: '数据质量',
     children: [
       { key: '/quality/rules', label: '规则配置' },
       { key: '/quality/results', label: '稽核结果' },
       { key: '/quality/gate', label: '门禁失败' },
     ],
   },
-  { key: '/catalog', icon: <SearchOutlined />, label: '⑥ 数据目录与血缘',
+  { key: '/catalog', icon: <SearchOutlined />, label: '数据目录与血缘',
     children: [
       { key: '/catalog/search', label: '搜索浏览' },
       { key: '/catalog/glossary', label: '业务术语表' },
       { key: '/catalog/lineage', label: '血缘图' },
     ],
   },
-  { key: '/security', icon: <LockOutlined />, label: '⑦ 资产与安全',
+  { key: '/security', icon: <LockOutlined />, label: '资产与安全',
     children: [
       { key: '/security/map', label: '资产地图' },
       { key: '/security/pii', label: 'PII 识别' },
@@ -70,7 +70,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/security/kms', label: '加密与密钥' },
     ],
   },
-  { key: '/dataservice', icon: <CloudOutlined />, label: '⑧ 数据服务 DaaS',
+  { key: '/dataservice', icon: <CloudOutlined />, label: '数据服务 DaaS',
     children: [
       { key: '/dataservice/apis', label: 'API 市场' },
       { key: '/dataservice/appkeys', label: '我的凭据' },
@@ -78,7 +78,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/dataservice/subscriptions', label: '订阅与计量' },
     ],
   },
-  { key: '/monitor', icon: <ControlOutlined />, label: '⑨ 运营与监控',
+  { key: '/monitor', icon: <ControlOutlined />, label: '运营与监控',
     children: [
       { key: '/monitor/overview', label: '总览大盘' },
       { key: '/monitor/alerts', label: '告警中心' },
@@ -86,7 +86,7 @@ const NAV: import('antd').MenuProps['items'] = [
       { key: '/monitor/sla', label: 'SLA 看板' },
     ],
   },
-  { key: '/system', icon: <ControlOutlined />, label: '⑩ 系统管理',
+  { key: '/system', icon: <ControlOutlined />, label: '系统管理',
     children: [
       { key: '/system/tenants', label: '租户/项目' },
       { key: '/system/rbac', label: 'RBAC 权限' },
@@ -99,7 +99,8 @@ const NAV: import('antd').MenuProps['items'] = [
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
-  const { user, tenant, tenants, switchTenant, tasks, notifications, setSearchOpen, setNotifyOpen } = useAppStore();
+  const [taskBarCollapsed, setTaskBarCollapsed] = useState(true);
+  const { user, tenant, tenants, tasks, notifications, setSearchOpen, setNotifyOpen } = useAppStore();
   const navigate = useNavigate();
   const location = useLocation();
   const unread = notifications.filter((n) => !n.isRead).length;
@@ -116,78 +117,191 @@ export default function App() {
     return candidates.length > 0 ? [candidates[candidates.length - 1]] : ['/dashboard'];
   })();
 
+  // 顶层菜单（含子菜单时展开根 key）
+  const root = '/' + (location.pathname.split('/')[1] || 'dashboard');
+  const openKeys = NAV?.filter((n) => n && typeof n === 'object' && 'key' in n && (n.key as string) === root).map((n) => (n as { key: string }).key);
+
   return (
     <Layout hasSider style={{ minHeight: '100vh', flexDirection: 'row' }}>
-      <Sider trigger={null} collapsible collapsed={collapsed} width={232} theme="light"
-        style={{ boxShadow: '2px 0 8px rgba(0,0,0,0.04)', overflow: 'auto', height: '100vh', position: 'sticky', top: 0, left: 0, flexShrink: 0 }}>
-        <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 28, height: 28, borderRadius: 6, background: 'linear-gradient(135deg, #1677ff 0%, #69b1ff 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 700 }}>OL</div>
-          {!collapsed && <Title level={5} style={{ margin: 0 }}>数据平台</Title>}
+      <Sider
+        trigger={null}
+        collapsible
+        collapsed={collapsed}
+        width={232}
+        collapsedWidth={64}
+        theme="light"
+        style={{
+          boxShadow: 'var(--ol-shadow-e2)',
+          borderRight: '1px solid var(--ol-line-soft)',
+          overflow: 'auto',
+          height: '100vh',
+          position: 'sticky',
+          top: 0, left: 0,
+          flexShrink: 0,
+          zIndex: 11,
+        }}
+      >
+        <div
+          style={{
+            padding: '14px 16px',
+            display: 'flex', alignItems: 'center', gap: 10,
+            borderBottom: '1px solid var(--ol-line-soft)',
+            height: 56,
+          }}
+        >
+          <div
+            style={{
+              width: 32, height: 32, borderRadius: 8,
+              background: 'var(--ol-brand-gradient)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#fff', fontWeight: 700, fontSize: 13,
+              boxShadow: '0 4px 10px rgba(15, 79, 216, 0.28)',
+              flexShrink: 0,
+            }}
+          >
+            OL
+          </div>
+          {!collapsed && (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)', lineHeight: 1.2 }} className="ol-truncate">
+                OneLake
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)', lineHeight: 1.2 }}>数据平台控制台</div>
+            </div>
+          )}
         </div>
         <Menu
           mode="inline"
           selectedKeys={selectedKeys}
-          defaultOpenKeys={['/integration', '/lakehouse', '/orchestration', '/quality', '/catalog', '/security', '/dataservice', '/monitor', '/system']}
-          style={{ borderRight: 'none' }}
+          openKeys={collapsed ? [] : undefined}
+          style={{ borderRight: 'none', padding: '8px 6px' }}
           items={NAV}
           onClick={({ key }) => navigate(key)}
         />
       </Sider>
 
       <Layout style={{ flex: 1, minWidth: 0, flexDirection: 'column' }}>
-        <Header style={{ background: '#fff', padding: '0 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f0f0f0' }}>
-          <Space>
-            <Button type="text" onClick={() => setCollapsed(!collapsed)} icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} />
+        <Header
+          style={{
+            background: '#fff',
+            padding: '0 20px',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            borderBottom: '1px solid var(--ol-line-soft)',
+            boxShadow: '0 1px 0 rgba(15,23,42,.02)',
+            position: 'sticky', top: 0, zIndex: 10,
+            height: 56, lineHeight: '56px',
+          }}
+        >
+          <Space size={8}>
+            <Button
+              type="text"
+              onClick={() => setCollapsed(!collapsed)}
+              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              style={{ color: 'var(--ol-ink-2)' }}
+            />
             <Tooltip title="全局搜索 (⌘K)">
-              <Button type="default" icon={<SearchOutlined />} onClick={() => setSearchOpen(true)}>
-                搜索资产 / 任务 / API…
+              <Button
+                onClick={() => setSearchOpen(true)}
+                style={{
+                  height: 34, padding: '0 12px',
+                  background: 'var(--ol-fill)', border: '1px solid var(--ol-line-soft)',
+                  color: 'var(--ol-ink-3)', fontSize: 13, borderRadius: 6,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}
+              >
+                <SearchOutlined />
+                <span>搜索资产 / 任务 / API…</span>
+                <span className="ol-kbd" style={{ marginLeft: 16 }}>⌘K</span>
               </Button>
             </Tooltip>
           </Space>
-          <Space size={16}>
-            <Dropdown menu={{
-              items: tenants.map((t) => ({ key: t.id, label: <span><Tag color="blue">{t.code}</Tag>{t.name}</span> })),
-              onClick: ({ key }) => switchTenant(key),
-            }}>
-              <Space style={{ cursor: 'pointer' }}>
-                <Tag color="blue">{tenant.code}</Tag>
-                <span>{tenant.name}</span>
-                <DownOutlined />
+
+          <Space size={14}>
+            <Dropdown
+              menu={{
+                items: tenants.map((t) => ({
+                  key: t.id,
+                  label: (
+                    <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                      <span className="ol-chip" style={{ background: 'var(--ol-brand-soft)', color: 'var(--ol-brand)', border: 'none' }}>
+                        {t.code}
+                      </span>
+                      <span style={{ color: 'var(--ol-ink)' }}>{t.name}</span>
+                    </span>
+                  ),
+                })),
+                onClick: ({ key }) => useAppStore.getState().switchTenant(key),
+              }}
+            >
+              <Space size={6} style={{ cursor: 'pointer', padding: '4px 10px', borderRadius: 6, background: 'var(--ol-fill)' }}>
+                <span className="ol-chip" style={{ background: 'var(--ol-brand-soft)', color: 'var(--ol-brand)', border: 'none' }}>
+                  {tenant.code}
+                </span>
+                <span style={{ fontSize: 13, color: 'var(--ol-ink)' }}>{tenant.name}</span>
+                <DownOutlined style={{ fontSize: 10, color: 'var(--ol-ink-3)' }} />
               </Space>
             </Dropdown>
-            <Tooltip title="帮助"><Button type="text" icon={<QuestionCircleOutlined />} /></Tooltip>
+
+            {taskBarCollapsed && (
+              <TaskProgressTrigger tasks={tasks} onClick={() => setTaskBarCollapsed(false)} />
+            )}
+
+            <Tooltip title="帮助">
+              <Button type="text" icon={<QuestionCircleOutlined />} style={{ color: 'var(--ol-ink-3)' }} />
+            </Tooltip>
+
             <Tooltip title="通知中心">
-              <Badge count={unread} size="small">
-                <Button type="text" icon={<BellOutlined />} onClick={() => setNotifyOpen(true)} />
+              <Badge count={unread} size="small" offset={[-2, 2]}>
+                <Button
+                  type="text"
+                  icon={<BellOutlined />}
+                  onClick={() => setNotifyOpen(true)}
+                  style={{ color: 'var(--ol-ink-2)' }}
+                />
               </Badge>
             </Tooltip>
-            <Dropdown menu={{
-              items: [
-                { key: 'profile', label: '个人资料' },
-                { key: 'tokens', label: '访问令牌' },
-                { type: 'divider' as const },
-                { key: 'logout', label: '退出登录' },
-              ],
-            }}>
-              <Space style={{ cursor: 'pointer' }}>
-                <Avatar icon={<UserOutlined />} style={{ background: '#1677ff' }} />
-                <div>
-                  <div style={{ lineHeight: 1.2 }}>{user.name}</div>
-                  <div style={{ lineHeight: 1.2, fontSize: 11, color: '#8c8c8c' }}>{user.roles.join('/')}</div>
+
+            <Dropdown
+              menu={{
+                items: [
+                  { key: 'profile', label: '个人资料' },
+                  { key: 'tokens', label: '访问令牌' },
+                  { type: 'divider' as const },
+                  { key: 'logout', label: '退出登录' },
+                ],
+              }}
+            >
+              <Space size={8} style={{ cursor: 'pointer', padding: '2px 8px 2px 2px', borderRadius: 20, transition: 'background var(--ol-dur-fast)' }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--ol-fill)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Avatar size={30} icon={<UserOutlined />} style={{ background: 'var(--ol-brand-gradient)' }} />
+                <div style={{ lineHeight: 1.1 }}>
+                  <div style={{ fontSize: 13, color: 'var(--ol-ink)', fontWeight: 500 }}>{user.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{user.roles.join('/')}</div>
                 </div>
               </Space>
             </Dropdown>
           </Space>
         </Header>
 
-        <Content style={{ padding: 20, paddingBottom: 60 }}>
+        <Content style={{ padding: 20, paddingBottom: taskBarCollapsed ? 60 : 196, background: 'var(--ol-fill)' }}>
           <Outlet />
         </Content>
 
-        {/* 底部全局任务条（对应 §1.2 / §8.x） */}
-        <div style={{ position: 'fixed', bottom: 16, left: collapsed ? 96 : 248, right: 24, zIndex: 100 }}>
-          <TaskProgressBar tasks={tasks} />
-        </div>
+        {/* 底部全局任务条 */}
+        {!taskBarCollapsed && (
+          <div
+            style={{
+              position: 'fixed', bottom: 16,
+              left: collapsed ? 80 : 248, right: 24,
+              zIndex: 100,
+              transition: 'left var(--ol-dur-base) var(--ol-ease)',
+            }}
+          >
+            <TaskProgressBar tasks={tasks} onCollapse={() => setTaskBarCollapsed(true)} />
+          </div>
+        )}
       </Layout>
 
       <GlobalSearch />

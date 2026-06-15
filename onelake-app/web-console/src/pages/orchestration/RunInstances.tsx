@@ -1,9 +1,12 @@
 /**
- * 运行实例（对应原型 §4.4.1 列表 + 8.2.4 运行历史样式）。
+ * 运行实例（对应原型 §4.4.1 升级版）。
  */
-import { Card, Table, Tag, Space, Button, message } from 'antd';
+import { Table, Tag, Space, Button, message, Typography } from 'antd';
+import { ReloadOutlined, FieldTimeOutlined, PlayCircleOutlined, HistoryOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { StatusBadge } from '../../components';
+import { StatusBadge, PageHeader, SectionCard } from '../../components';
+
+const { Text } = Typography;
 
 const runs = [
   { id: 'jr-1', dag: 'order_pipeline', runId: 'dag-9381', trigger: 'CRON', status: 'SUCCESS', startedAt: '2026-06-14 02:00:01', finishedAt: '2026-06-14 02:04:32', by: 'system' },
@@ -13,19 +16,54 @@ const runs = [
 
 export default function RunInstances() {
   const navigate = useNavigate();
+
+  const counts = {
+    total: runs.length,
+    success: runs.filter((r) => r.status === 'SUCCESS').length,
+    failed: runs.filter((r) => r.status === 'FAILED').length,
+    cron: runs.filter((r) => r.trigger === 'CRON').length,
+  };
+
   return (
-    <Card title="数据开发 / 运行实例">
-      <Table rowKey="id" dataSource={runs} size="middle"
-        columns={[
-          { title: 'Run ID', dataIndex: 'runId', render: (v: string) => <a>{v}</a> },
-          { title: '流水线', dataIndex: 'dag' },
-          { title: '触发方式', dataIndex: 'trigger', render: (t: string) => <Tag color={t === 'CRON' ? 'blue' : 'default'}>{t}</Tag> },
-          { title: '状态', dataIndex: 'status', render: (s: string) => <StatusBadge status={s} /> },
-          { title: '开始', dataIndex: 'startedAt' },
-          { title: '结束', dataIndex: 'finishedAt' },
-          { title: '触发人', dataIndex: 'by' },
-          { title: '操作', render: () => <Space><Button size="small" type="link" onClick={() => navigate('/integration/sync-tasks/st-001')}>日志</Button><Button size="small" type="link" onClick={() => message.success('已重试')}>重试</Button></Space> },
-        ]} />
-    </Card>
+    <div className="ol-page">
+      <PageHeader
+        icon={<HistoryOutlined />}
+        title="运行实例"
+        subtitle={<span className="ol-chip">编排 · L4</span>}
+        description="查看所有流水线运行历史，含触发方式、耗时、责任人"
+      />
+
+      <SectionCard title="运行历史" icon={<HistoryOutlined />} flatBody>
+        <Table
+          rowKey="id"
+          dataSource={runs}
+          size="middle"
+          pagination={false}
+          columns={[
+            { title: 'Run ID', dataIndex: 'runId', render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text> },
+            { title: '流水线', dataIndex: 'dag', render: (d: string) => <Text code style={{ fontSize: 12 }}>{d}</Text> },
+            { title: '触发方式', dataIndex: 'trigger', width: 110, render: (t: string) => (
+              <span style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+                background: t === 'CRON' ? 'var(--ol-brand-soft)' : 'var(--ol-fill-soft)',
+                color: t === 'CRON' ? 'var(--ol-brand)' : 'var(--ol-ink-2)',
+              }}>{t}</span>
+            ) },
+            { title: '状态', dataIndex: 'status', width: 110, render: (s: string) => <StatusBadge status={s} /> },
+            { title: '开始', dataIndex: 'startedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{t}</span> },
+            { title: '结束', dataIndex: 'finishedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{t}</span> },
+            { title: '触发人', dataIndex: 'by', width: 100, render: (b: string) => (
+              <span style={{ fontSize: 12, color: b === 'system' ? 'var(--ol-ink-3)' : 'var(--ol-ink)' }}>{b}</span>
+            ) },
+            { title: '操作', width: 140, render: () => (
+              <Space>
+                <Button size="small" type="link" onClick={() => navigate('/integration/sync-tasks/st-001')}>日志</Button>
+                <Button size="small" type="link" onClick={() => message.success('已重试')}>重试</Button>
+              </Space>
+            ) },
+          ]}
+        />
+      </SectionCard>
+    </div>
   );
 }

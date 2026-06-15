@@ -3,10 +3,11 @@
  * Tab: 概览 / Schema / 血缘 / 质量 / 访问·订阅 / 变更历史
  */
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Table, Tag, Space, Button, Typography, Descriptions, message } from 'antd';
+import { Table, Tag, Space, Button, Typography, message } from 'antd';
+import { DatabaseOutlined, BranchesOutlined, SafetyOutlined, AppstoreOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { lakehouseAssets, metadataChanges, accessGrants } from '../../mock';
-import { DetailPageLayout, ClassificationBadge, StatusBadge } from '../../components';
+import { DetailPageLayout, ClassificationBadge, StatusBadge, SectionCard } from '../../components';
 import { AccessApplyDrawer } from './_AccessApplyDrawer';
 
 const { Text } = Typography;
@@ -20,79 +21,121 @@ export default function AssetDetail() {
 
   const tabs = [
     { key: 'overview', label: '概览', children: (
-      <Card type="inner" title="样例数据（按权限脱敏）">
-        <Table size="small" pagination={false}
+      <SectionCard title="样例数据（按权限脱敏）" icon={<DatabaseOutlined />} flatBody>
+        <Table size="middle" pagination={false}
           dataSource={[
             { key: 1, order_id: 1001, phone: '138****8888', amount: 99.0 },
             { key: 2, order_id: 1002, phone: '139****1234', amount: 158.5 },
           ]}
           columns={[
-            { title: 'order_id', dataIndex: 'order_id' },
-            { title: 'phone', dataIndex: 'phone', render: (v: string) => <Space>{v}<Tag color="orange">无权 → 打码</Tag></Space> },
+            { title: 'order_id', dataIndex: 'order_id', render: (v: number) => <Text code>{v}</Text> },
+            { title: 'phone', dataIndex: 'phone', render: (v: string) => (
+              <Space>
+                <Text code style={{ fontSize: 12 }}>{v}</Text>
+                <Tag color="warning" style={{ margin: 0 }}>无权 → 打码</Tag>
+              </Space>
+            ) },
             { title: 'amount', dataIndex: 'amount' },
           ]} />
-        <div style={{ marginTop: 8 }}><Button type="link" onClick={() => setApplyOpen(true)}>申请访问</Button></div>
-      </Card>
+        <div style={{ padding: 12, background: 'var(--ol-fill-soft)', borderTop: '1px solid var(--ol-line-soft)' }}>
+          <Button type="link" onClick={() => setApplyOpen(true)}>申请访问完整数据 →</Button>
+        </div>
+      </SectionCard>
     ) },
     { key: 'schema', label: 'Schema', children: (
-      <Table size="small" rowKey="name" dataSource={asset.columns} pagination={false}
-        columns={[
-          { title: '字段', dataIndex: 'name' },
-          { title: '类型', dataIndex: 'type' },
-          { title: '描述', dataIndex: 'description' },
-          { title: '密级', dataIndex: 'classification', render: (c: string) => c ? <ClassificationBadge level={c as any} /> : null },
-          { title: '枚举分布', render: () => <Text type="secondary">1000+ 唯一值</Text> },
-        ]} />
+      <SectionCard title="字段定义" icon={<DatabaseOutlined />} flatBody>
+        <Table size="middle" rowKey="name" dataSource={asset.columns} pagination={false}
+          columns={[
+            { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
+            { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
+            { title: '描述', dataIndex: 'description' },
+            { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+            { title: '枚举分布', render: () => <Text type="secondary" style={{ fontSize: 12 }}>1000+ 唯一值</Text> },
+          ]} />
+      </SectionCard>
     ) },
     { key: 'lineage', label: '血缘', children: (
-      <Card type="inner">
-        <Space direction="vertical">
-          <Text>上游：mysql.orders → <Text code>{asset.fqn}</Text></Text>
-          <Text>下游：<Text code>{asset.fqn}</Text> → ads.ads_sales_df → API:/api/order</Text>
+      <SectionCard title="上下游血缘" icon={<BranchesOutlined />}>
+        <Space direction="vertical" size={8}>
+          <Text>上游：<Text code>mysql.orders</Text> → <Text code>{asset.fqn}</Text></Text>
+          <Text>下游：<Text code>{asset.fqn}</Text> → <Text code>ads.ads_sales_df</Text> → API <Text code>/api/order</Text></Text>
           <Button type="link" onClick={() => navigate('/catalog/lineage')}>展开整页血缘 →</Button>
         </Space>
-      </Card>
+      </SectionCard>
     ) },
     { key: 'quality', label: '质量', children: (
-      <Card type="inner"><Space><Tag color="success">质量分 {asset.qualityScore}</Tag><Button type="link" onClick={() => navigate('/quality/results')}>查看稽核结果</Button></Space></Card>
+      <SectionCard title="质量评分" icon={<SafetyOutlined />}>
+        <Space>
+          <Tag color="success" style={{ padding: '4px 10px' }}>质量分 {asset.qualityScore}</Tag>
+          <Button type="link" onClick={() => navigate('/quality/results')}>查看稽核结果 →</Button>
+        </Space>
+      </SectionCard>
     ) },
-    { key: 'access', label: '访问·订阅', children: (
-      <Card type="inner">
-        <Descriptions column={1} size="small" bordered>
-          <Descriptions.Item label="我的授权状态">
-            {myGrant ? <Space><StatusBadge status={myGrant.status === 'ACTIVE' ? 'ACTIVE' : 'EXPIRED'} />{myGrant.expiresAt && <Text>剩余 {Math.ceil((+new Date(myGrant.expiresAt) - Date.now()) / 86400000)} 天</Text>}<Button size="small">续期</Button></Space>
-              : <Space><Tag>未授权</Tag><Button type="primary" size="small" onClick={() => setApplyOpen(true)}>申请访问</Button></Space>}
-          </Descriptions.Item>
-          <Descriptions.Item label="字段授权">
-            {asset.columns.map((c: any) => <Tag key={c.name} color={(myGrant?.columns || []).includes(c.name) || !myGrant ? 'success' : 'default'}>{c.name}</Tag>)}
-          </Descriptions.Item>
-          <Descriptions.Item label="凭据"><Button type="link" onClick={() => navigate('/dataservice/appkeys')}>查看我的凭据</Button></Descriptions.Item>
-        </Descriptions>
-      </Card>
+    { key: 'access', label: '访问 · 订阅', children: (
+      <SectionCard title="我的访问授权" icon={<AppstoreOutlined />}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>授权状态</Text>
+            <div style={{ marginTop: 4 }}>
+              {myGrant ? (
+                <Space>
+                  <StatusBadge status={myGrant.status === 'ACTIVE' ? 'ACTIVE' : 'EXPIRED'} />
+                  {myGrant.expiresAt && <Text style={{ fontSize: 12 }}>剩余 {Math.ceil((+new Date(myGrant.expiresAt) - Date.now()) / 86400000)} 天</Text>}
+                  <Button size="small">续期</Button>
+                </Space>
+              ) : (
+                <Space>
+                  <Tag>未授权</Tag>
+                  <Button type="primary" size="small" onClick={() => setApplyOpen(true)}>申请访问</Button>
+                </Space>
+              )}
+            </div>
+          </div>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>字段授权</Text>
+            <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {asset.columns.map((c: any) => (
+                <Tag key={c.name} color={(myGrant?.columns || []).includes(c.name) || !myGrant ? 'success' : 'default'}>{c.name}</Tag>
+              ))}
+            </div>
+          </div>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>凭据</Text>
+            <div style={{ marginTop: 4 }}>
+              <Button type="link" onClick={() => navigate('/dataservice/appkeys')}>查看我的凭据 →</Button>
+            </div>
+          </div>
+        </Space>
+      </SectionCard>
     ) },
     { key: 'changes', label: '变更历史', children: (
-      <Card type="inner">
-        <Table size="small" rowKey="version" dataSource={metadataChanges}
+      <SectionCard title="元数据变更" icon={<AppstoreOutlined />} flatBody>
+        <Table size="middle" rowKey="version" dataSource={metadataChanges}
           columns={[
-            { title: '版本', dataIndex: 'version', render: (v: number) => <Tag color="blue">v{v}</Tag> },
-            { title: '时间', dataIndex: 'time' },
+            { title: '版本', dataIndex: 'version', render: (v: number) => <Tag color="blue" style={{ margin: 0 }}>v{v}</Tag> },
+            { title: '时间', dataIndex: 'time', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{t}</span> },
             { title: '操作人', dataIndex: 'author' },
-            { title: '来源', dataIndex: 'source' },
+            { title: '来源', dataIndex: 'source', render: (s: string) => <span className="ol-chip">{s}</span> },
             { title: 'Diff', dataIndex: 'diff', render: (diff: any[]) => diff.length === 0 ? <Text type="secondary">无变更</Text> : (
-              <Space direction="vertical">
-                {diff.map((d, i) => <Tag key={i} color={d.kind === 'add' ? 'success' : d.kind === 'remove' ? 'error' : 'warning'}>{d.kind === 'add' ? '+' : d.kind === 'remove' ? '-' : '~'} {d.field} {d.type || `${d.from}→${d.to}`}</Tag>)}
+              <Space direction="vertical" size={4}>
+                {diff.map((d, i) => (
+                  <Tag key={i} color={d.kind === 'add' ? 'success' : d.kind === 'remove' ? 'error' : 'warning'} style={{ margin: 0 }}>
+                    {d.kind === 'add' ? '+' : d.kind === 'remove' ? '-' : '~'} {d.field} {d.type || `${d.from}→${d.to}`}
+                  </Tag>
+                ))}
               </Space>
             ) },
           ]} />
-      </Card>
+      </SectionCard>
     ) },
   ];
 
   return (
     <>
       <DetailPageLayout
+        icon={<DatabaseOutlined />}
         title={asset.fqn}
-        subtitle={<Space><Tag color="blue">{asset.layer}</Tag>{asset.description} · 更新：每日</Space>}
+        subtitle={<Space size={8}><Tag color="blue">{asset.layer}</Tag><Text type="secondary" style={{ fontSize: 13 }}>{asset.description} · 每日更新</Text></Space>}
         status={<ClassificationBadge level={asset.classification} />}
         breadcrumb={[{ path: '/catalog/search', label: '数据目录' }, { label: asset.fqn }]}
         tabs={tabs}

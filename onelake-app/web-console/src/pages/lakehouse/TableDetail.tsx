@@ -3,11 +3,11 @@
  * Tab: Schema / 快照 / 优化 / 血缘 / 权限
  */
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Table, Tag, Space, Button, Typography, Timeline, Descriptions, message, Popconfirm } from 'antd';
-import { ArrowRightOutlined, BranchesOutlined } from '@ant-design/icons';
+import { Table, Tag, Space, Button, Typography, Timeline, message } from 'antd';
+import { ArrowRightOutlined, BranchesOutlined, TableOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { lakehouseAssets, tableSnapshots } from '../../mock';
-import { DetailPageLayout, ClassificationBadge, DangerConfirm, ImpactAnalysis } from '../../components';
+import { DetailPageLayout, ClassificationBadge, DangerConfirm, SectionCard } from '../../components';
 
 const { Text } = Typography;
 
@@ -20,55 +20,87 @@ export default function TableDetail() {
 
   const tabs = [
     { key: 'schema', label: 'Schema', children: (
-      <Table size="small" rowKey="name" dataSource={asset.columns} pagination={false}
-        columns={[
-          { title: '字段', dataIndex: 'name' },
-          { title: '类型', dataIndex: 'type' },
-          { title: '描述', dataIndex: 'description' },
-          { title: '密级', dataIndex: 'classification', render: (c: string) => c ? <ClassificationBadge level={c as any} /> : null },
-          { title: '血缘', dataIndex: 'upstreamFqn', render: (u?: string) => u ? <Space><ArrowRightOutlined /><Text code>{u}</Text></Space> : null },
-        ]} />
+      <SectionCard title="字段定义" icon={<TableOutlined />} subtitle={`${asset.columns.length} 列`} flatBody>
+        <Table size="middle" rowKey="name" dataSource={asset.columns} pagination={false}
+          columns={[
+            { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
+            { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
+            { title: '描述', dataIndex: 'description' },
+            { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+            { title: '血缘', dataIndex: 'upstreamFqn', render: (u?: string) => u ? <Space><ArrowRightOutlined style={{ color: 'var(--ol-ink-4)' }} /><Text code style={{ fontSize: 12 }}>{u}</Text></Space> : '-' },
+          ]} />
+      </SectionCard>
     ) },
     { key: 'snapshot', label: '快照', children: (
-      <>
+      <SectionCard title="快照管理" icon={<TableOutlined />}>
         <Timeline mode="left" items={tableSnapshots.map((s, i) => ({
           color: s.current ? 'blue' : 'gray',
           dot: s.current ? '★' : undefined,
-          children: <Space><Text>{s.snapshotId}</Text><Text type="secondary">{s.time}</Text><Text>{s.rows.toLocaleString()} 行</Text>{i > 0 && <Button type="link" onClick={() => setConfirmRollback(s.snapshotId)}>回滚到此</Button>}</Space>,
+          children: <Space>
+            <Text code>{s.snapshotId}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{s.time}</Text>
+            <Text style={{ fontSize: 12 }}>{s.rows.toLocaleString()} 行</Text>
+            {i > 0 && <Button type="link" onClick={() => setConfirmRollback(s.snapshotId)}>回滚到此</Button>}
+          </Space>,
         }))} />
-        <Space><Button>清理过期快照</Button><Button>清理孤儿文件</Button></Space>
-      </>
+        <Space style={{ marginTop: 12 }}>
+          <Button>清理过期快照</Button>
+          <Button>清理孤儿文件</Button>
+        </Space>
+      </SectionCard>
     ) },
     { key: 'optimize', label: '优化', children: (
-      <Descriptions column={1} bordered size="small">
-        <Descriptions.Item label="分区策略"><Tag>隐藏分区 days(created_at)</Tag></Descriptions.Item>
-        <Descriptions.Item label="小文件"><Tag color="warning">1200 个 (建议优化)</Tag> <Button size="small" type="primary" onClick={() => message.success('已触发 Compaction（进入全局任务条）')}>立即 Compaction</Button></Descriptions.Item>
-        <Descriptions.Item label="冷热分层">热分区 30 天 → S3 Standard；冷分区下沉 Glacier</Descriptions.Item>
-        <Descriptions.Item label="压缩">Parquet + ZSTD</Descriptions.Item>
-      </Descriptions>
+      <SectionCard title="存储与优化" icon={<TableOutlined />}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>分区策略</Text>
+            <div style={{ marginTop: 4 }}><Tag>隐藏分区 days(created_at)</Tag></div>
+          </div>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>小文件</Text>
+            <div style={{ marginTop: 4 }}>
+              <Space>
+                <Tag color="warning">1200 个（建议优化）</Tag>
+                <Button size="small" type="primary" onClick={() => message.success('已触发 Compaction（进入全局任务条）')}>立即 Compaction</Button>
+              </Space>
+            </div>
+          </div>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>冷热分层</Text>
+            <div style={{ marginTop: 4, fontSize: 13 }}>热分区 30 天 → S3 Standard；冷分区下沉 Glacier</div>
+          </div>
+          <div>
+            <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>压缩</Text>
+            <div style={{ marginTop: 4 }}><Tag color="processing">Parquet + ZSTD</Tag></div>
+          </div>
+        </Space>
+      </SectionCard>
     ) },
     { key: 'lineage', label: '血缘', children: (
-      <Card type="inner">
+      <SectionCard title="上下游血缘" icon={<BranchesOutlined />}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Text>上游：mysql.orders → <Text code>{asset.fqn}</Text></Text>
-          <Text>下游：<Text code>{asset.fqn}</Text> → dws.dws_user_order → ads.ads_sales_df</Text>
+          <Text>上游：<Text code>mysql.orders</Text> → <Text code>{asset.fqn}</Text></Text>
+          <Text>下游：<Text code>{asset.fqn}</Text> → <Text code>dws.dws_user_order</Text> → <Text code>ads.ads_sales_df</Text></Text>
           <Button icon={<BranchesOutlined />} onClick={() => navigate('/catalog/lineage')}>展开整页血缘</Button>
         </Space>
-      </Card>
+      </SectionCard>
     ) },
     { key: 'permission', label: '权限', children: (
-      <Card type="inner"><Space direction="vertical">
-        <Text>18 个用户/订阅方有访问权</Text>
-        <Button type="primary">配置权限</Button>
-      </Space></Card>
+      <SectionCard title="访问权限" icon={<TableOutlined />}>
+        <Space direction="vertical">
+          <Text>18 个用户 / 订阅方有访问权</Text>
+          <Button type="primary">配置权限</Button>
+        </Space>
+      </SectionCard>
     ) },
   ];
 
   return (
     <>
       <DetailPageLayout
+        icon={<TableOutlined />}
         title={asset.fqn}
-        subtitle={<Space><Tag color="blue">{asset.layer}</Tag>{asset.description}</Space>}
+        subtitle={<Space size={8}><Tag color="blue">{asset.layer}</Tag><Text type="secondary" style={{ fontSize: 13 }}>{asset.description}</Text></Space>}
         status={<ClassificationBadge level={asset.classification} />}
         breadcrumb={[{ path: '/lakehouse/tables', label: '分层浏览' }, { label: asset.fqn }]}
         tabs={tabs}

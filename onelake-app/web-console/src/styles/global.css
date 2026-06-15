@@ -1,0 +1,382 @@
+/**
+ * 全局样式（v2 · 升级版）
+ * 设计令牌注入为 CSS 变量；定义动画、工具类、自定义滚动条、表格密度等。
+ */
+
+:root {
+  /* -- Brand & neutrals ------------------------------------------------ */
+  --ol-brand: #0F4FD8;
+  --ol-brand-hover: #1E62F0;
+  --ol-brand-active: #0A3FB0;
+  --ol-brand-soft: #E8F0FF;
+  --ol-brand-border: #B7D2FF;
+  --ol-brand-gradient: linear-gradient(135deg, #0F4FD8 0%, #4A85FF 100%);
+
+  --ol-ink: #0F172A;
+  --ol-ink-2: #334155;
+  --ol-ink-3: #64748B;
+  --ol-ink-4: #94A3B8;
+  --ol-line: #E2E8F0;
+  --ol-line-soft: #EEF2F7;
+  --ol-fill: #F5F7FA;
+  --ol-fill-soft: #FAFBFC;
+  --ol-card: #FFFFFF;
+
+  --ol-success: #16A34A;
+  --ol-success-soft: #DCFCE7;
+  --ol-warning: #F59E0B;
+  --ol-warning-soft: #FEF3C7;
+  --ol-error: #DC2626;
+  --ol-error-soft: #FEE2E2;
+  --ol-info: #0EA5E9;
+  --ol-info-soft: #E0F2FE;
+
+  /* -- Space / radius / motion --------------------------------------- */
+  --ol-space-xs: 4px;
+  --ol-space-sm: 8px;
+  --ol-space-md: 12px;
+  --ol-space-lg: 16px;
+  --ol-space-xl: 24px;
+  --ol-space-xxl: 32px;
+
+  --ol-radius-sm: 4px;
+  --ol-radius-md: 6px;
+  --ol-radius-lg: 8px;
+  --ol-radius-xl: 12px;
+  --ol-radius-pill: 999px;
+
+  --ol-shadow-e1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.02);
+  --ol-shadow-e2: 0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --ol-shadow-e3: 0 12px 32px rgba(15, 23, 42, 0.10), 0 4px 8px rgba(15, 23, 42, 0.06);
+  --ol-shadow-e4: 0 24px 56px rgba(15, 23, 42, 0.14), 0 8px 16px rgba(15, 23, 42, 0.08);
+  --ol-shadow-focus: 0 0 0 3px rgba(15, 79, 216, 0.16);
+
+  --ol-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ol-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ol-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ol-dur-fast: 120ms;
+  --ol-dur-base: 200ms;
+  --ol-dur-slow: 320ms;
+}
+
+/* -- Reset & base ---------------------------------------------------- */
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ol-fill);
+  color: var(--ol-ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numeric / metric tabular alignment */
+.tnum, .ant-statistic-content, .ant-table-tbody td[data-align="right"] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Mono font for SQL/code/IDs */
+.mono, code, kbd, pre, samp {
+  font-family: 'SFMono-Regular', 'JetBrains Mono', 'Menlo', 'Consolas',
+    'Liberation Mono', monospace !important;
+}
+
+/* Selection */
+::selection {
+  background: rgba(15, 79, 216, 0.18);
+  color: var(--ol-ink);
+}
+
+/* -- Custom scrollbar ------------------------------------------------ */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.32);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.18) transparent;
+}
+
+/* -- Antd overrides for crisper look --------------------------------- */
+
+.ant-card {
+  border-color: var(--ol-line-soft);
+  transition: box-shadow var(--ol-dur-base) var(--ol-ease),
+              border-color var(--ol-dur-base) var(--ol-ease),
+              transform var(--ol-dur-base) var(--ol-ease);
+}
+.ant-card-hoverable:hover {
+  box-shadow: var(--ol-shadow-e2);
+  border-color: var(--ol-line);
+  transform: translateY(-1px);
+}
+
+.ant-table-wrapper {
+  border-radius: var(--ol-radius-md);
+}
+.ant-table {
+  background: transparent;
+}
+.ant-table-thead > tr > th {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ol-ink-3) !important;
+}
+.ant-table-tbody > tr > td {
+  transition: background var(--ol-dur-fast) var(--ol-ease);
+}
+.ant-table-tbody > tr {
+  transition: background var(--ol-dur-fast) var(--ol-ease);
+}
+.ant-table-tbody > tr:hover > td {
+  background: var(--ol-fill-soft) !important;
+}
+
+.ant-tabs-tab {
+  font-weight: 500;
+  transition: color var(--ol-dur-fast) var(--ol-ease);
+}
+.ant-tabs-tab:hover { color: var(--ol-ink) !important; }
+.ant-tabs-ink-bar {
+  height: 3px !important;
+  border-radius: 3px;
+  background: var(--ol-brand-gradient) !important;
+}
+
+.ant-btn {
+  transition: all var(--ol-dur-fast) var(--ol-ease);
+}
+.ant-btn-primary:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(15, 79, 216, 0.28);
+}
+.ant-btn-primary:not(:disabled):active {
+  transform: translateY(0);
+}
+.ant-btn-default:not(:disabled):hover {
+  border-color: var(--ol-brand-border);
+  color: var(--ol-brand);
+}
+
+.ant-input-affix-wrapper,
+.ant-input,
+.ant-select .ant-select-selector,
+.ant-picker {
+  transition: border-color var(--ol-dur-fast) var(--ol-ease),
+              box-shadow var(--ol-dur-fast) var(--ol-ease);
+}
+.ant-input-affix-wrapper:hover,
+.ant-input:hover,
+.ant-select:hover .ant-select-selector,
+.ant-picker:hover {
+  border-color: var(--ol-brand-border) !important;
+}
+.ant-input-affix-wrapper-focused,
+.ant-input:focus,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused {
+  border-color: var(--ol-brand) !important;
+}
+
+/* Drawer animation refinement */
+.ant-drawer-content-wrapper {
+  transition: transform var(--ol-dur-slow) var(--ol-ease-out) !important;
+}
+
+/* -- Layout polish --------------------------------------------------- */
+
+.ant-layout {
+  background: var(--ol-fill) !important;
+}
+
+/* -- Page transitions ------------------------------------------------ */
+
+.route-fade-enter {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.route-fade-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity var(--ol-dur-slow) var(--ol-ease-out),
+              transform var(--ol-dur-slow) var(--ol-ease-out);
+}
+
+/* -- Animations ------------------------------------------------------ */
+
+@keyframes ol-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ol-slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ol-slide-down {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ol-scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes ol-pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes ol-pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(15, 79, 216, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(15, 79, 216, 0); }
+}
+@keyframes ol-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes ol-shimmer {
+  0% { background-position: -480px 0; }
+  100% { background-position: 480px 0; }
+}
+@keyframes ol-grow-bar {
+  from { width: 0%; }
+}
+
+.ol-anim-fade     { animation: ol-fade-in var(--ol-dur-slow) var(--ol-ease-out) both; }
+.ol-anim-slide-up { animation: ol-slide-up var(--ol-dur-slow) var(--ol-ease-out) both; }
+.ol-anim-slide-dn { animation: ol-slide-down var(--ol-dur-slow) var(--ol-ease-out) both; }
+.ol-anim-scale    { animation: ol-scale-in var(--ol-dur-base) var(--ol-spring) both; }
+
+/* Stagger helper — apply to children via inline --ol-i */
+.ol-stagger > * {
+  animation: ol-fade-in var(--ol-dur-slow) var(--ol-ease-out) both;
+  animation-delay: calc(var(--ol-i, 0) * 40ms);
+}
+
+/* -- Status dot with pulse for running states ------------------------ */
+
+.ol-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ol-ink-4);
+  flex-shrink: 0;
+}
+.ol-status-dot.is-success { background: var(--ol-success); }
+.ol-status-dot.is-error   { background: var(--ol-error); }
+.ol-status-dot.is-warning { background: var(--ol-warning); }
+.ol-status-dot.is-info    { background: var(--ol-info); }
+.ol-status-dot.is-running {
+  background: var(--ol-info);
+  box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.5);
+  animation: ol-pulse-glow 1.6s var(--ol-ease) infinite;
+}
+
+/* -- Utility classes ------------------------------------------------- */
+
+.ol-quiet       { color: var(--ol-ink-3) !important; }
+.ol-quieter     { color: var(--ol-ink-4) !important; }
+.ol-mono        { font-family: 'SFMono-Regular', 'JetBrains Mono', monospace; }
+.ol-link        { color: var(--ol-brand); cursor: pointer; transition: color var(--ol-dur-fast) var(--ol-ease); }
+.ol-link:hover  { color: var(--ol-brand-hover); }
+.ol-divider-v   { width: 1px; height: 16px; background: var(--ol-line); margin: 0 var(--ol-space-sm); display: inline-block; vertical-align: middle; }
+.ol-truncate    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ol-clamp-2     { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+.ol-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: var(--ol-radius-sm);
+  font-size: 12px;
+  line-height: 18px;
+  background: var(--ol-fill-soft);
+  color: var(--ol-ink-2);
+  border: 1px solid var(--ol-line-soft);
+}
+
+.ol-section {
+  background: var(--ol-card);
+  border: 1px solid var(--ol-line-soft);
+  border-radius: var(--ol-radius-lg);
+  padding: var(--ol-space-xl);
+}
+.ol-section + .ol-section { margin-top: var(--ol-space-lg); }
+
+.ol-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ol-space-lg);
+  min-height: calc(100vh - 96px);
+}
+.ol-page > .ol-section:last-child { flex: 1; }
+
+.ol-grid-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-auto-rows: 1fr;
+  gap: var(--ol-space-md);
+  align-items: stretch;
+}
+.ol-grid-stats > .ol-section {
+  margin-top: 0;
+  min-width: 0;
+}
+.ol-inline-stats > .ol-section {
+  margin-top: 0;
+  min-width: 0;
+}
+
+.ol-kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: 'SFMono-Regular', monospace;
+  font-size: 11px;
+  color: var(--ol-ink-2);
+  background: var(--ol-fill);
+  border: 1px solid var(--ol-line);
+  border-radius: var(--ol-radius-sm);
+  border-bottom-width: 2px;
+}
+
+/* Skeleton shimmer */
+.ol-shimmer {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 37%, #f1f5f9 63%);
+  background-size: 480px 100%;
+  animation: ol-shimmer 1.4s ease infinite;
+}
+
+/* Responsive utility */
+@media (max-width: 1280px) {
+  .ol-page { gap: var(--ol-space-md); }
+}
+
+/* Reduce motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

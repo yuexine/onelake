@@ -1,34 +1,81 @@
 /**
- * 故障复盘 / 事件时间线（对应原型 §8.9.3）。
+ * 故障复盘 / 事件时间线（对应原型 §8.9.3 升级版）。
  */
-import { Card, Tag, Timeline, Typography, Space, Button, Descriptions } from 'antd';
+import { Tag, Timeline, Typography, Space, Button } from 'antd';
+import { AlertOutlined, BugOutlined } from '@ant-design/icons';
 import { incidents } from '../../mock';
+import { PageHeader, SectionCard } from '../../components';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 export default function Incidents() {
   return (
-    <Card title="运营 / 故障复盘">
+    <div className="ol-page">
+      <PageHeader
+        icon={<AlertOutlined />}
+        title="故障复盘"
+        subtitle={<span className="ol-chip">运营 · L9-2</span>}
+        description="P0/P1 事件复盘：时间线 + 影响时长 + RCA 根因 + 改进项跟踪"
+      />
+
       {incidents.map((inc) => (
-        <Card key={inc.id} size="small" style={{ marginBottom: 12 }} title={<Space><Tag color="red">P0</Tag><Text strong>{inc.id}</Text><Text type="secondary">{inc.alert}</Text></Space>}>
-          <Title level={5}>事件时间线</Title>
-          <Timeline items={inc.timeline.map((t) => ({ children: <Space><Text strong>{t.at}</Text><Text>{t.event}</Text></Space> }))} />
-
-          <Descriptions column={2} size="small" bordered style={{ marginTop: 12 }}>
-            <Descriptions.Item label="影响时长">{inc.impactDuration}</Descriptions.Item>
-            <Descriptions.Item label="下游影响">{inc.downstreamImpact}</Descriptions.Item>
-            <Descriptions.Item label="RCA 根因" span={2}>{inc.rca}</Descriptions.Item>
-          </Descriptions>
-
-          <Card size="small" title="改进项" style={{ marginTop: 12 }}>
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {inc.improvements.map((im, i) => (
-                <div key={i}><Tag color="processing">待办</Tag><Text>{im.action}</Text><Tag style={{ marginLeft: 8 }}>{im.owner}</Tag><Tag>due {im.due}</Tag><Button size="small" type="link">建任务</Button></div>
-              ))}
+        <SectionCard
+          key={inc.id}
+          title={
+            <Space size={8}>
+              <Tag color="error" style={{ margin: 0 }}>P0</Tag>
+              <Text strong>{inc.id}</Text>
+              <Text type="secondary" style={{ fontSize: 13 }}>{inc.alert}</Text>
             </Space>
-          </Card>
-        </Card>
+          }
+          icon={<AlertOutlined />}
+        >
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 10 }}>事件时间线</div>
+              <Timeline items={inc.timeline.map((t) => ({
+                children: <Space size={8}><Text strong style={{ fontSize: 12 }}>{t.at}</Text><Text style={{ fontSize: 13 }}>{t.event}</Text></Space>,
+              }))} />
+            </div>
+
+            <div className="ol-section" style={{ padding: 14, background: 'var(--ol-fill-soft)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                <div>
+                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>影响时长</Text>
+                  <div style={{ marginTop: 4, fontSize: 14, fontWeight: 600, color: 'var(--ol-error)' }}>{inc.impactDuration}</div>
+                </div>
+                <div>
+                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>下游影响</Text>
+                  <div style={{ marginTop: 4, fontSize: 13 }}>{inc.downstreamImpact}</div>
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>RCA 根因</Text>
+                  <div style={{ marginTop: 4, fontSize: 13, lineHeight: 1.6 }}>{inc.rca}</div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 10 }}>改进项</div>
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                {inc.improvements.map((im, i) => (
+                  <div key={i} style={{
+                    display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                    padding: '8px 12px', background: 'var(--ol-fill-soft)',
+                    borderRadius: 6, border: '1px solid var(--ol-line-soft)',
+                  }}>
+                    <Tag color="processing" style={{ margin: 0 }}>待办</Tag>
+                    <Text style={{ fontSize: 13, flex: 1, minWidth: 0 }}>{im.action}</Text>
+                    <span className="ol-chip">{im.owner}</span>
+                    <span className="ol-chip">due {im.due}</span>
+                    <Button size="small" type="link">建任务</Button>
+                  </div>
+                ))}
+              </Space>
+            </div>
+          </Space>
+        </SectionCard>
       ))}
-    </Card>
+    </div>
   );
 }

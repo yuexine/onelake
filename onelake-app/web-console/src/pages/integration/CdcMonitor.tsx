@@ -1,67 +1,122 @@
 /**
- * CDC 实时监控（对应原型 §8.2.7）。
- * 位点/延迟 + Schema 演进待审批。
+ * CDC 实时监控（对应原型 §8.2.7 升级版）。
+ *   - KPI 行（位点 / 延迟 / 背压 / 状态）
+ *   - Tabs: 位点与延迟 / Schema 演进 / 运行日志
  */
-import { Card, Tabs, Table, Tag, Space, Button, Progress, Typography, Descriptions, Timeline, message } from 'antd';
+import {
+  Table, Tag, Space, Button, Typography, Descriptions, Timeline, message,
+} from 'antd';
+import {
+  PauseCircleOutlined, ReloadOutlined, CloudSyncOutlined, FieldTimeOutlined,
+  ApartmentOutlined, FileTextOutlined, ApiOutlined,
+} from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { PauseCircleOutlined, ReloadOutlined } from '@ant-design/icons';
-import { StatusBadge } from '../../components';
+import {
+  PageHeader, StatusBadge, SectionCard, EntityTypeIcon,
+} from '../../components';
 import { schemaChangeRequests } from '../../mock';
 
 const { Text } = Typography;
 
+function Sparkline({ data, color }: { data: number[]; color: string }) {
+  const w = 360, h = 60;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const step = w / (data.length - 1);
+  const pts = data.map((v, i) => `${i * step},${h - ((v - min) / range) * (h - 4) - 2}`).join(' ');
+  const area = `0,${h} ${pts} ${w},${h}`;
+  return (
+    <svg width={w} height={h} style={{ display: 'block' }}>
+      <polygon points={area} fill={color} opacity={0.10} />
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function CdcMonitor() {
   const navigate = useNavigate();
 
-  const tabs = [
-    { key: 'site', label: '位点与延迟', children: (
-      <>
-        <Descriptions bordered size="small" column={2}>
-          <Descriptions.Item label="当前位点"><Text code>binlog.000128 : 4456</Text></Descriptions.Item>
-          <Descriptions.Item label="快照阶段"><Tag color="success">✓ 已完成</Tag></Descriptions.Item>
-          <Descriptions.Item label="同步延迟"><Tag color="processing">1.2s</Tag></Descriptions.Item>
-          <Descriptions.Item label="背压"><Tag color="success">正常</Tag></Descriptions.Item>
-          <Descriptions.Item label="Exactly-Once"><Tag color="success">✓ 两阶段提交</Tag></Descriptions.Item>
-          <Descriptions.Item label="状态"><StatusBadge status="RUNNING" /></Descriptions.Item>
-        </Descriptions>
-        <Card type="inner" title="延迟曲线（近 1h）" style={{ marginTop: 16 }}>
-          <Progress percent={70} success={{ percent: 60 }} showInfo={false} />
-          <Text type="secondary">平均 1.2s, P99 5.6s</Text>
-        </Card>
-      </>
-    ) },
-    { key: 'schema', label: 'Schema 演进待审批', children: (
-      <Table size="small" rowKey="id" dataSource={schemaChangeRequests}
-        columns={[
-          { title: '时间', dataIndex: 'createdAt' },
-          { title: 'CDC 任务', dataIndex: 'sourceName' },
-          { title: '表', dataIndex: 'table' },
-          { title: '变更', dataIndex: 'change' },
-          { title: '类型', dataIndex: 'type', render: (t: string) => <Tag color={t === '破坏性' ? 'red' : 'success'}>{t}</Tag> },
-          { title: '缓冲策略', dataIndex: 'bufferStrategy' },
-          { title: '操作', render: (_: unknown, r: any) =>
-            r.status === 'PENDING' ? <Button type="link" onClick={() => navigate(`/integration/schema-change/${r.id}`)}>审批</Button> :
-            <Tag color={r.status === 'AUTO_APPLIED' ? 'success' : 'default'}>{r.status === 'AUTO_APPLIED' ? '已应用' : r.status}</Tag> },
-        ]} />
-    ) },
-    { key: 'log', label: '运行日志', children: (
-      <Card type="inner"><Timeline items={[
-        { color: 'blue', children: '10:21:35 INFO BinlogReader connect to mysql-bin.000128:4456' },
-        { color: 'blue', children: '10:21:36 INFO Snapshot phase DONE, switch to incremental' },
-        { color: 'orange', children: '09:50:21 WARN DDL change detected: ALTER TABLE users DROP COLUMN age' },
-        { color: 'red', children: '09:50:22 ERROR Pipeline paused for users (破坏性变更)，其他表继续' },
-      ]} /></Card>
-    ) },
-  ];
-
   return (
-    <Card title="CDC 实时采集 / mysql_orders_cdc" extra={
-      <Space>
-        <Button icon={<PauseCircleOutlined />} onClick={() => message.success('已暂停')}>暂停</Button>
-        <Button icon={<ReloadOutlined />} onClick={() => message.success('已触发重建快照')}>重建快照</Button>
-      </Space>
-    }>
-      <Tabs items={tabs} />
-    </Card>
+    <div className="ol-page">
+      <PageHeader
+        icon={<CloudSyncOutlined />}
+        title="CDC 实时监控"
+        subtitle={<Space size={8}><EntityTypeIcon kind="MYSQL" size={20} /><span className="ol-chip">mysql_orders_cdc</span></Space>}
+        description="Binlog 订阅 · 初始快照 + 增量衔接 · 位点原子持久化 · 两阶段 Exactly-Once"
+        meta={[
+          { label: '当前位点', value: <Text code style={{ fontSize: 12 }}>binlog.000128 : 4456</Text> },
+          { label: '状态', value: <StatusBadge status="RUNNING" label="运行中" /> },
+        ]}
+        actions={
+          <>
+            <Button icon={<PauseCircleOutlined />} onClick={() => message.success('已暂停')}>暂停</Button>
+            <Button type="primary" ghost icon={<ReloadOutlined />} onClick={() => message.success('已触发重建快照')}>重建快照</Button>
+          </>
+        }
+      />
+
+      <SectionCard
+        title="延迟曲线（近 1 小时）"
+        icon={<FieldTimeOutlined />}
+        subtitle="平均 1.2s · P99 5.6s · 背压正常"
+      >
+        <Sparkline data={[3, 2, 1, 2, 1, 1, 1, 2, 3, 4, 5, 6, 4, 3, 2, 1, 1, 1, 1, 2, 3, 5, 6, 5, 4, 3, 2, 1, 1, 1]} color="var(--ol-info)" />
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 11, color: 'var(--ol-ink-3)' }}>
+          <span>60 min ago</span>
+          <span>30 min ago</span>
+          <span>now</span>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Schema 演进审批队列"
+        icon={<ApartmentOutlined />}
+        subtitle="未审批期间按旧 schema 缓冲写入，不影响其他表"
+        flatBody
+      >
+        <Table
+          size="middle"
+          rowKey="id"
+          dataSource={schemaChangeRequests}
+          pagination={false}
+          columns={[
+            { title: '时间', dataIndex: 'createdAt', render: (t: string) => (
+              <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{new Date(t).toLocaleString('zh-CN')}</span>
+            ) },
+            { title: 'CDC 任务', dataIndex: 'sourceName', render: (s: string) => <span className="ol-chip">{s}</span> },
+            { title: '表', dataIndex: 'table' },
+            { title: '变更', dataIndex: 'change', render: (c: string) => <Text code style={{ fontSize: 12 }}>{c}</Text> },
+            { title: '类型', dataIndex: 'type', render: (t: string) => (
+              <span style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+                background: t === '破坏性' ? 'var(--ol-error-soft)' : 'var(--ol-success-soft)',
+                color: t === '破坏性' ? 'var(--ol-error)' : 'var(--ol-success)',
+              }}>{t}</span>
+            ) },
+            { title: '缓冲策略', dataIndex: 'bufferStrategy' },
+            { title: '操作', render: (_: unknown, r: any) => r.status === 'PENDING' ? (
+              <Button type="link" onClick={() => navigate(`/integration/schema-change/${r.id}`)}>审批</Button>
+            ) : (
+              <Tag color="success" style={{ margin: 0 }}>{r.status === 'AUTO_APPLIED' ? '已自动应用' : r.status}</Tag>
+            ) },
+          ]}
+        />
+      </SectionCard>
+
+      <SectionCard
+        title="运行日志"
+        icon={<FileTextOutlined />}
+        subtitle="最近 50 条"
+      >
+        <Timeline
+          items={[
+            { color: 'blue',   children: <Space direction="vertical" size={0}><Text>BinlogReader connect to <Text code>mysql-bin.000128:4456</Text></Text><Text type="secondary" style={{ fontSize: 11 }}>10:21:35 · INFO</Text></Space> },
+            { color: 'blue',   children: <Space direction="vertical" size={0}><Text>Snapshot phase DONE, switch to incremental</Text><Text type="secondary" style={{ fontSize: 11 }}>10:21:36 · INFO</Text></Space> },
+            { color: 'orange', children: <Space direction="vertical" size={0}><Text>DDL change detected: <Text code>ALTER TABLE users DROP COLUMN age</Text></Text><Text type="secondary" style={{ fontSize: 11 }}>09:50:21 · WARN</Text></Space> },
+            { color: 'red',    children: <Space direction="vertical" size={0}><Text>Pipeline paused for users（破坏性变更），其他表继续</Text><Text type="secondary" style={{ fontSize: 11 }}>09:50:22 · ERROR</Text></Space> },
+          ]}
+        />
+      </SectionCard>
+    </div>
   );
 }

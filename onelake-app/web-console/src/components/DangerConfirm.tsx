@@ -10,7 +10,7 @@ const { Text } = Typography;
 
 interface ImpactItem {
   label: string;
-  value: number;
+  value: number | string;
 }
 
 interface Props {
@@ -56,7 +56,7 @@ export function DangerConfirm({
         <Descriptions title="影响分析" size="small" column={2} bordered style={{ marginBottom: 16 }}>
           {impacts.map((i) => (
             <Descriptions.Item key={i.label} label={i.label}>
-              <Text strong style={{ color: i.value > 0 ? levelColor : undefined }}>{i.value}</Text>
+              <Text strong style={{ color: typeof i.value === 'number' && i.value > 0 ? levelColor : undefined }}>{i.value}</Text>
             </Descriptions.Item>
           ))}
         </Descriptions>

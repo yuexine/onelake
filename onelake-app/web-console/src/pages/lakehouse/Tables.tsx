@@ -7,7 +7,7 @@ import { PlusOutlined, ClusterOutlined, ApartmentOutlined, TableOutlined } from 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { lakehouseAssets } from '../../mock';
-import { ClassificationBadge, PageHeader, SectionCard } from '../../components';
+import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../components';
 import type { Asset } from '../../types';
 
 const { Text } = Typography;
@@ -103,6 +103,16 @@ export default function Tables() {
             <Table
               rowKey="id"
               dataSource={rows}
+              locale={{
+                emptyText: (
+                  <StateView
+                    state="empty"
+                    title="暂无资产"
+                    description="调整筛选条件，或新建第一个表"
+                    cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/lakehouse/tables/new')}>新建表</Button>}
+                  />
+                ),
+              }}
               size="middle"
               pagination={{ pageSize: 20, showTotal: (t) => <span className="ol-quiet" style={{ fontSize: 12 }}>共 {t} 条</span> }}
               columns={[

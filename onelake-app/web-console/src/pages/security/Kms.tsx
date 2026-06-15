@@ -4,11 +4,12 @@
 import { Table, Tag, Space, Button, message, Typography } from 'antd';
 import { PlusOutlined, ReloadOutlined, KeyOutlined, LockOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { secrets } from '../../mock';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
 export default function Kms() {
+  const { run, isLoading } = useAsyncAction();
   return (
     <div className="ol-page">
       <PageHeader
@@ -41,7 +42,14 @@ export default function Kms() {
             ) },
             { title: '操作', width: 140, render: (_: unknown, r: any) => (
               <Button size="small" ghost icon={<ReloadOutlined />}
-                onClick={() => message.success(`已触发轮换 ${r.kmsKeyId}（旧密钥保留期 30 天）`)}>
+                loading={isLoading(`rotate-${r.id}`)}
+                onClick={() => run(`rotate-${r.id}`, async () => {
+                  await new Promise((r) => setTimeout(r, 500));
+                }, {
+                  successMsg: `已轮换 ${r.kmsKeyId}，旧密钥保留期 30 天`,
+                  errorMsg: '轮换失败，请检查密钥状态',
+                  duration: 3,
+                })}>
                 立即轮换
               </Button>
             ) },

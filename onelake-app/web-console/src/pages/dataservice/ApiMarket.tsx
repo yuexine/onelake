@@ -5,7 +5,7 @@ import { Table, Tag, Space, Button, Input, Select, message, Typography } from 'a
 import { PlusOutlined, CloudOutlined, ApiOutlined, TeamOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { apis } from '../../mock';
-import { ClassificationBadge, StatusBadge, PageHeader, SectionCard, FilterBar } from '../../components';
+import { ClassificationBadge, StatusBadge, PageHeader, SectionCard, FilterBar, StateView } from '../../components';
 
 const { Text } = Typography;
 
@@ -59,6 +59,16 @@ export default function ApiMarket() {
           dataSource={apis}
           size="middle"
           pagination={{ pageSize: 20 }}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无 API"
+                description="构建第一个 API，让数据可被订阅"
+                cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/dataservice/apis/new')}>+ 构建 API</Button>}
+              />
+            ),
+          }}
           columns={[
             { title: '路径', dataIndex: 'apiPath', render: (v: string, r: any) => (
               <Space size={8}>

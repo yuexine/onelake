@@ -4,7 +4,7 @@
 import { Table, Tag, Space, Button, message, Typography } from 'antd';
 import { ReloadOutlined, FieldTimeOutlined, PlayCircleOutlined, HistoryOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { StatusBadge, PageHeader, SectionCard } from '../../components';
+import { StatusBadge, PageHeader, SectionCard, StateView, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
@@ -16,6 +16,7 @@ const runs = [
 
 export default function RunInstances() {
   const navigate = useNavigate();
+  const { run, isLoading } = useAsyncAction();
 
   const counts = {
     total: runs.length,
@@ -37,6 +38,15 @@ export default function RunInstances() {
         <Table
           rowKey="id"
           dataSource={runs}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无运行记录"
+                description="触发流水线后，运行历史将自动出现"
+              />
+            ),
+          }}
           size="middle"
           pagination={false}
           columns={[
@@ -55,10 +65,14 @@ export default function RunInstances() {
             { title: '触发人', dataIndex: 'by', width: 100, render: (b: string) => (
               <span style={{ fontSize: 12, color: b === 'system' ? 'var(--ol-ink-3)' : 'var(--ol-ink)' }}>{b}</span>
             ) },
-            { title: '操作', width: 140, render: () => (
+            { title: '操作', width: 140, render: (_: unknown, r: any) => (
               <Space>
                 <Button size="small" type="link" onClick={() => navigate('/integration/sync-tasks/st-001')}>日志</Button>
-                <Button size="small" type="link" onClick={() => message.success('已重试')}>重试</Button>
+                <Button size="small" type="link" loading={isLoading(`retry-${r.id}`)}
+                  onClick={() => run(`retry-${r.id}`, async () => {
+                    await new Promise((res) => setTimeout(res, 500));
+                  }, { successMsg: `已重试 ${r.id}`, duration: 2 })}
+                >重试</Button>
               </Space>
             ) },
           ]}

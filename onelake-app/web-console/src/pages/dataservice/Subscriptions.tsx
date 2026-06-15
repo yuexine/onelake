@@ -5,12 +5,13 @@ import { Table, Tag, Space, Button, Tabs, Form, Input, Select, InputNumber, Moda
 import { TeamOutlined, BarChartOutlined, ArrowUpOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { subscriptions, quotaRaises } from '../../mock';
-import { StatusBadge, PageHeader, SectionCard } from '../../components';
+import { StatusBadge, PageHeader, SectionCard, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
 export default function Subscriptions() {
   const [applyOpen, setApplyOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   return (
     <div className="ol-page">
@@ -88,7 +89,14 @@ export default function Subscriptions() {
         open={applyOpen}
         onCancel={() => setApplyOpen(false)}
         title="升额申请"
-        onOk={() => { setApplyOpen(false); message.success('已提交升额申请，进入审批中心'); }}
+        onOk={() => run('quota-raise', async () => {
+          await new Promise((r) => setTimeout(r, 600));
+          setApplyOpen(false);
+        }, {
+          successMsg: '已提交升额申请，进入审批中心',
+          errorMsg: '升额申请提交失败，请重试',
+          duration: 2.5,
+        })}
       >
         <Form layout="vertical">
           <Form.Item label="API">

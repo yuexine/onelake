@@ -7,7 +7,7 @@ import { Tabs, Tag, Space, Button, Typography, Input, Table, message } from 'ant
 import { CloudOutlined, ApiOutlined, FileTextOutlined, CodeOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { apis, apiVersions, subscriptions, apiCallTrend } from '../../mock';
-import { DetailPageLayout, StatusBadge, ClassificationBadge, DangerConfirm, SectionCard, StatCard } from '../../components';
+import { DetailPageLayout, StatusBadge, ClassificationBadge, DangerConfirm, SectionCard, StatCard, useAsyncAction } from '../../components';
 import ReactECharts from 'echarts-for-react';
 
 const { Text } = Typography;
@@ -17,6 +17,7 @@ export default function ApiDetail() {
   const navigate = useNavigate();
   const api = apis.find((a) => a.id === id) || apis[0];
   const [offlineOpen, setOfflineOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   const tabs = [
     { key: 'doc', label: '文档', children: (
@@ -56,11 +57,24 @@ export default function ApiDetail() {
       </SectionCard>
     ) },
     { key: 'debug', label: '调试', children: (
-      <SectionCard title="在线调试" icon={<CodeOutlined />}>
+      <SectionCard title="在线调试" icon={<CodeOutlined />} flatBody>
         <Space>
           <Text style={{ fontSize: 13 }}>order_id =</Text>
           <Input defaultValue="1001" style={{ width: 140 }} />
-          <Button type="primary" onClick={() => message.success('200 OK')}>发送</Button>
+          <Button
+            type="primary"
+            loading={isLoading('debug-send')}
+            onClick={() => run('debug-send', async () => {
+              await new Promise((r) => setTimeout(r, 600));
+              return { order_id: 1001, phone: '138****8888', amount: 99.0 };
+            }, {
+              successMsg: '200 OK · 响应正常',
+              errorMsg: '调试失败，请检查 API 是否可用',
+              duration: 2.5,
+            })}
+          >
+            发送
+          </Button>
         </Space>
         <pre style={{
           marginTop: 12, padding: 14, background: 'var(--ol-ink)', color: 'var(--ol-card)',

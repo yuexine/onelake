@@ -4,7 +4,7 @@
 import { Tag, Timeline, Typography, Space, Button } from 'antd';
 import { AlertOutlined, BugOutlined } from '@ant-design/icons';
 import { incidents } from '../../mock';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, StateView } from '../../components';
 
 const { Text } = Typography;
 
@@ -18,7 +18,13 @@ export default function Incidents() {
         description="P0/P1 事件复盘：时间线 + 影响时长 + RCA 根因 + 改进项跟踪"
       />
 
-      {incidents.map((inc) => (
+      {incidents.length === 0 ? <SectionCard flatBody>
+        <StateView
+          state="empty"
+          title="系统最近无故障事件"
+          description="一切正常"
+        />
+      </SectionCard> : incidents.map((inc) => (
         <SectionCard
           key={inc.id}
           title={

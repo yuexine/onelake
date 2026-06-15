@@ -10,9 +10,10 @@ import {
   PauseCircleOutlined, ReloadOutlined, CloudSyncOutlined, FieldTimeOutlined,
   ApartmentOutlined, FileTextOutlined, ApiOutlined,
 } from '@ant-design/icons';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  PageHeader, StatusBadge, SectionCard, EntityTypeIcon,
+  PageHeader, StatusBadge, SectionCard, EntityTypeIcon, useAsyncAction, DangerConfirm,
 } from '../../components';
 import { schemaChangeRequests } from '../../mock';
 
@@ -35,6 +36,8 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 
 export default function CdcMonitor() {
   const navigate = useNavigate();
+  const { run, isLoading } = useAsyncAction();
+  const [rebuildOpen, setRebuildOpen] = useState(false);
 
   return (
     <div className="ol-page">
@@ -49,8 +52,21 @@ export default function CdcMonitor() {
         ]}
         actions={
           <>
-            <Button icon={<PauseCircleOutlined />} onClick={() => message.success('已暂停')}>暂停</Button>
-            <Button type="primary" ghost icon={<ReloadOutlined />} onClick={() => message.success('已触发重建快照')}>重建快照</Button>
+            <Button
+              icon={<PauseCircleOutlined />}
+              loading={isLoading('pause')}
+              onClick={() => run('pause', async () => {
+                await new Promise((r) => setTimeout(r, 500));
+              }, { successMsg: 'CDC 管道已暂停，增量数据将缓冲', duration: 2.5 })}
+            >
+              暂停
+            </Button>
+            <Button
+              type="primary" ghost icon={<ReloadOutlined />}
+              onClick={() => setRebuildOpen(true)}
+            >
+              重建快照
+            </Button>
           </>
         }
       />
@@ -117,6 +133,30 @@ export default function CdcMonitor() {
           ]}
         />
       </SectionCard>
+
+      <DangerConfirm
+        open={rebuildOpen}
+        title="重建 CDC 快照"
+        description="重建会重新读取源端初始全量，过程可能持续 5-10 分钟，期间订阅方会先消费历史增量再切换到新快照。"
+        impacts={[
+          { label: '待重建表', value: 1 },
+          { label: '预计耗时', value: '5-10 min' },
+          { label: '下游依赖', value: 3 },
+        ]}
+        impactLevel="MEDIUM"
+        confirmName="重建快照"
+        okText="确认重建"
+        okType="primary"
+        onCancel={() => setRebuildOpen(false)}
+        onConfirm={() => run('rebuild-snapshot', async () => {
+          await new Promise((r) => setTimeout(r, 800));
+          setRebuildOpen(false);
+        }, {
+          successMsg: '已触发重建快照，初始全量将重新抽取',
+          errorMsg: '触发重建失败，请检查位点状态',
+          duration: 3,
+        })}
+      />
     </div>
   );
 }

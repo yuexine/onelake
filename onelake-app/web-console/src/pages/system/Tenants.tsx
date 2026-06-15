@@ -5,12 +5,13 @@ import { Table, Tag, Space, Button, Progress, Modal, Form, Input, InputNumber, m
 import { PlusOutlined, TeamOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { tenants } from '../../mock';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
 export default function Tenants() {
   const [open, setOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   const counts = {
     total: tenants.length,
@@ -89,7 +90,14 @@ export default function Tenants() {
         open={open}
         onCancel={() => setOpen(false)}
         title="新建租户"
-        onOk={() => { setOpen(false); message.success('已创建'); }}
+        onOk={() => run('create-tenant', async () => {
+          await new Promise((r) => setTimeout(r, 600));
+          setOpen(false);
+        }, {
+          successMsg: '租户已创建，请配置资源配额',
+          errorMsg: '租户创建失败，请重试',
+          duration: 2.5,
+        })}
       >
         <Form layout="vertical">
           <Form.Item label="编码"><Input placeholder="TRADE" /></Form.Item>

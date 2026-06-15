@@ -7,7 +7,7 @@ import {
   EditOutlined, CloudSyncOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { StatusBadge, PageHeader, SectionCard } from '../../components';
+import { StatusBadge, PageHeader, SectionCard, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
@@ -19,6 +19,7 @@ const pipelines = [
 
 export default function PipelineList() {
   const navigate = useNavigate();
+  const { run, isLoading } = useAsyncAction();
 
   const counts = {
     total: pipelines.length,
@@ -71,7 +72,14 @@ export default function PipelineList() {
             { title: '最近运行', dataIndex: 'lastRun', render: (l: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{l}</span> },
             { title: '操作', width: 180, render: (_: unknown, r: any) => (
               <Space>
-                <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} onClick={() => message.success('已触发')}>触发</Button>
+                <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />}
+                  loading={isLoading(`trigger-${r.id}`)}
+                  onClick={() => run(`trigger-${r.id}`, async () => {
+                    await new Promise((r) => setTimeout(r, 600));
+                  }, { successMsg: `流水线 ${r.name} 已触发运行`, duration: 2.5 })}
+                >
+                  触发
+                </Button>
                 <Button size="small" type="link" onClick={() => navigate(`/orchestration/pipelines/${r.id}`)}>打开画布</Button>
               </Space>
             ) },

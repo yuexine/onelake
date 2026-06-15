@@ -4,7 +4,7 @@
 import { Table, Tag, Space, Button, Input, Select, DatePicker, Typography, Alert } from 'antd';
 import { ExportOutlined, FileSearchOutlined } from '@ant-design/icons';
 import { auditLogs } from '../../mock';
-import { PageHeader, SectionCard, FilterBar } from '../../components';
+import { PageHeader, SectionCard, FilterBar, StateView } from '../../components';
 
 const { Text } = Typography;
 
@@ -38,6 +38,15 @@ export default function Audit() {
           dataSource={auditLogs}
           size="middle"
           pagination={{ pageSize: 20, showTotal: (t) => <span className="ol-quiet" style={{ fontSize: 12 }}>共 {t} 条</span> }}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="没有匹配的日志"
+                description="尝试调整时间范围、操作类型或操作人筛选"
+              />
+            ),
+          }}
           columns={[
             { title: '时间', dataIndex: 'occurredAt', width: 160, render: (t: string) => (
               <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{t}</span>

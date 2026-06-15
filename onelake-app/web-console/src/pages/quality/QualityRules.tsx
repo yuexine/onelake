@@ -5,7 +5,7 @@ import { Table, Tag, Space, Button, Modal, Form, Select, Input, Typography, mess
 import { PlusOutlined, SafetyOutlined, CheckCircleOutlined, WarningOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { qualityRules } from '../../mock';
-import { ClassificationBadge, StatusBadge, PageHeader, SectionCard } from '../../components';
+import { ClassificationBadge, StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
 
 const { Text } = Typography;
 
@@ -35,6 +35,16 @@ export default function QualityRules() {
         <Table
           rowKey="id"
           dataSource={qualityRules}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无规则"
+                description="新建质量规则，对资产和字段进行稽核"
+                cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新建规则</Button>}
+              />
+            ),
+          }}
           size="middle"
           pagination={{ pageSize: 20 }}
           columns={[

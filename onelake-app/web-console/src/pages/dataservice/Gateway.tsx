@@ -4,7 +4,7 @@
 import { Table, Tag, Space, Button, Form, Select, Input, Modal, message, Typography } from 'antd';
 import { ApiOutlined, CloudOutlined, PlusOutlined, SwapOutlined } from '@ant-design/icons';
 import { useState } from 'react';
-import { PageHeader, SectionCard } from '../../components';
+import { PageHeader, SectionCard, useAsyncAction, DangerConfirm } from '../../components';
 
 const { Text } = Typography;
 
@@ -16,6 +16,8 @@ const routes = [
 
 export default function Gateway() {
   const [open, setOpen] = useState(false);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   return (
     <div className="ol-page">
@@ -55,7 +57,11 @@ export default function Gateway() {
             { title: '操作', width: 180, render: () => (
               <Space>
                 <Button size="small" type="link">编辑</Button>
-                <Button size="small" type="link" danger onClick={() => message.success('已一键回退')}>一键回退</Button>
+                <Button size="small" type="link" danger
+                  onClick={() => setRollbackOpen(true)}
+                >
+                  一键回退
+                </Button>
               </Space>
             ) },
           ]}
@@ -73,7 +79,18 @@ export default function Gateway() {
             <Text style={{ width: 100, color: 'var(--ol-ink-3)', fontSize: 12 }}>消费方白名单</Text>
             <Input placeholder="AppKey ak_xxx, ak_yyy" style={{ flex: 1, maxWidth: 400 }} />
           </div>
-          <Button type="primary" onClick={() => message.success('已发布灰度，异常可一键回退 v2')}>发布灰度</Button>
+          <Button type="primary"
+            loading={isLoading('publish-gray')}
+            onClick={() => run('publish-gray', async () => {
+              await new Promise((r) => setTimeout(r, 600));
+            }, {
+              successMsg: '已发布灰度 10%，异常可一键回退 v2',
+              errorMsg: '灰度发布失败，请检查网关状态',
+              duration: 3,
+            })}
+          >
+            发布灰度
+          </Button>
         </Space>
       </SectionCard>
 
@@ -104,6 +121,25 @@ export default function Gateway() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <DangerConfirm
+        open={rollbackOpen}
+        title="一键回退到 v2 稳定版本"
+        description="当前生产环境流量将立即切换到 v2 稳定版本，v3 灰度中的请求会失败。"
+        impacts={[
+          { label: '当前版本', value: 'v3 灰度' },
+          { label: '回退目标', value: 'v2 稳定' },
+          { label: '预计耗时', value: '< 1 min' },
+        ]}
+        impactLevel="HIGH"
+        confirmName="一键回退"
+        okText="确认回退"
+        onCancel={() => setRollbackOpen(false)}
+        onConfirm={() => run('rollback', async () => {
+          await new Promise((r) => setTimeout(r, 600));
+          setRollbackOpen(false);
+        }, { successMsg: '已一键回退到 v2 稳定版本', duration: 3 })}
+      />
     </div>
   );
 }

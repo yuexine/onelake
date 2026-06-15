@@ -2,16 +2,19 @@
  * 存储优化中心（对应原型 §8.3.7 升级版）。
  */
 import { Row, Col, Table, Tag, Space, Button, Progress, message, Typography } from 'antd';
+import { useState } from 'react';
 import {
   ThunderboltOutlined, FileSearchOutlined, HddOutlined,
   ReloadOutlined, CloudOutlined,
 } from '@ant-design/icons';
 import { optimizeSuggestions } from '../../mock';
-import { PageHeader, SectionCard, StatCard } from '../../components';
+import { PageHeader, SectionCard, StatCard, useAsyncAction, DangerConfirm } from '../../components';
 
 const { Text } = Typography;
 
 export default function OptimizeCenter() {
+  const [batchOpen, setBatchOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
   return (
     <div className="ol-page">
       <PageHeader
@@ -19,7 +22,14 @@ export default function OptimizeCenter() {
         title="存储优化中心"
         subtitle={<span className="ol-chip">湖仓 · L2-3</span>}
         description="自动检测小文件、孤儿文件、冷数据，给出优化建议与进度跟踪"
-        actions={<Button type="primary" icon={<ThunderboltOutlined />} onClick={() => message.success('已批量优化')}>批量优化</Button>}
+        actions={
+          <Button
+            type="primary" icon={<ThunderboltOutlined />}
+            onClick={() => setBatchOpen(true)}
+          >
+            批量优化
+          </Button>
+        }
       />
 
       <div className="ol-grid-stats">
@@ -49,7 +59,12 @@ export default function OptimizeCenter() {
             ) },
             { title: '建议', dataIndex: 'suggestion' },
             { title: '操作', width: 120, render: (_: unknown, r: any) => (
-              <Button type="primary" size="small" ghost onClick={() => message.success(`${r.suggestion} 已触发`)} icon={<ThunderboltOutlined />}>{r.action}</Button>
+              <Button type="primary" size="small" ghost
+                loading={isLoading(`opt-${r.table}`)}
+                onClick={() => run(`opt-${r.table}`, async () => {
+                  await new Promise((resolve) => setTimeout(resolve, 600));
+                }, { successMsg: `${r.suggestion} 已触发`, duration: 2.5 })}
+                icon={<ThunderboltOutlined />}>{r.action}</Button>
             ) },
           ]}
         />
@@ -81,6 +96,30 @@ export default function OptimizeCenter() {
           ))}
         </Space>
       </SectionCard>
+
+      <DangerConfirm
+        open={batchOpen}
+        title={`批量触发 ${optimizeSuggestions.length} 条优化建议`}
+        description="将启动 Compaction / 冷数据下沉 / 排序等操作，过程中可能短暂影响读取性能。"
+        impacts={[
+          { label: '优化任务', value: optimizeSuggestions.length },
+          { label: '影响范围', value: '全租户' },
+          { label: '预计耗时', value: '数十分钟' },
+        ]}
+        impactLevel="MEDIUM"
+        confirmName="批量优化"
+        okText="确认触发"
+        okType="primary"
+        onCancel={() => setBatchOpen(false)}
+        onConfirm={() => run('batch-optimize', async () => {
+          await new Promise((r) => setTimeout(r, 1000));
+          setBatchOpen(false);
+        }, {
+          successMsg: `已批量触发 ${optimizeSuggestions.length} 条优化建议`,
+          errorMsg: '批量优化触发失败，请重试',
+          duration: 3,
+        })}
+      />
     </div>
   );
 }

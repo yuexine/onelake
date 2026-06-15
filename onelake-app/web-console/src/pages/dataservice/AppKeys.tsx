@@ -5,12 +5,13 @@ import { Table, Tag, Space, Button, Modal, Form, Input, message, Tooltip, Typogr
 import { PlusOutlined, CopyOutlined, ReloadOutlined, KeyOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { appKeys } from '../../mock';
-import { StatusBadge, PageHeader, SectionCard } from '../../components';
+import { StatusBadge, PageHeader, SectionCard, useAsyncAction, StateView } from '../../components';
 
 const { Text } = Typography;
 
 export default function AppKeys() {
   const [newOpen, setNewOpen] = useState(false);
+  const { run, isLoading } = useAsyncAction();
 
   return (
     <div className="ol-page">
@@ -28,6 +29,16 @@ export default function AppKeys() {
           dataSource={appKeys}
           size="middle"
           pagination={false}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无凭据"
+                description="创建 AppKey 以调用已订阅的 API"
+                cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => setNewOpen(true)}>+ 新建凭据</Button>}
+              />
+            ),
+          }}
           expandable={{
             expandedRowRender: (r: any) => (
               <div className="ol-section" style={{ padding: 16, background: 'var(--ol-fill-soft)' }}>
@@ -48,7 +59,16 @@ export default function AppKeys() {
                     <div style={{ marginTop: 4 }}>
                       <Space>
                         <Text code style={{ fontSize: 12 }}>••••••••••••</Text>
-                        <Button size="small" type="link" icon={<ReloadOutlined />} onClick={() => message.success('已重置 Secret')}>重置</Button>
+                        <Button size="small" type="link" icon={<ReloadOutlined />}
+                          loading={isLoading(`reset-${r.id}`)}
+                          onClick={() => run(`reset-${r.id}`, async () => {
+                            await new Promise((resolve) => setTimeout(resolve, 500));
+                          }, {
+                            successMsg: `已重置 ${r.appKey} 的 Secret（仅展示一次，请妥善保存）`,
+                            errorMsg: 'Secret 重置失败，请重试',
+                            duration: 4,
+                          })}
+                        >重置</Button>
                       </Space>
                     </div>
                   </div>
@@ -89,10 +109,15 @@ export default function AppKeys() {
         open={newOpen}
         onCancel={() => setNewOpen(false)}
         title="新建 AppKey"
-        onOk={() => {
+        okButtonProps={{ loading: isLoading('create-appkey') }}
+        onOk={() => run('create-appkey', async () => {
+          await new Promise((r) => setTimeout(r, 600));
           setNewOpen(false);
-          message.success('AppKey 已创建（Secret 仅展示一次，请妥善保存）');
-        }}
+        }, {
+          successMsg: 'AppKey 已创建（Secret 仅展示一次，请妥善保存）',
+          errorMsg: 'AppKey 创建失败，请重试',
+          duration: 5,
+        })}
       >
         <Form layout="vertical">
           <Form.Item label="所有者"><Input defaultValue="报表组" /></Form.Item>

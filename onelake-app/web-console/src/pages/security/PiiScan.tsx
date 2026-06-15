@@ -5,11 +5,12 @@ import { Table, Tag, Space, Button, message, Modal, Typography } from 'antd';
 import { ScanOutlined, ReloadOutlined, CheckCircleOutlined, LockOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { piiScan } from '../../mock';
-import { ClassificationBadge, PageHeader, SectionCard } from '../../components';
+import { ClassificationBadge, PageHeader, SectionCard, StateView, useAsyncAction } from '../../components';
 
 const { Text } = Typography;
 
 export default function PiiScan() {
+  const { run, isLoading } = useAsyncAction();
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -43,6 +44,15 @@ export default function PiiScan() {
         <Table
           rowKey="fqn"
           dataSource={piiScan}
+          locale={{
+            emptyText: (
+              <StateView
+                state="empty"
+                title="暂无 PII 字段"
+                description="全库扫描未发现需要确认的敏感字段"
+              />
+            ),
+          }}
           size="middle"
           pagination={false}
           rowSelection={{ selectedRowKeys: selected, onChange: (k) => setSelected(k as string[]) }}
@@ -83,11 +93,16 @@ export default function PiiScan() {
         open={confirmOpen}
         onCancel={() => setConfirmOpen(false)}
         title="批量确认密级"
-        onOk={() => {
+        okButtonProps={{ loading: isLoading('batch-confirm') }}
+        onOk={() => run('batch-confirm', async () => {
+          await new Promise((r) => setTimeout(r, 800));
           setConfirmOpen(false);
           setSelected([]);
-          message.success('已确认，全站随动（采集脱敏 + 目录徽章 + API 返回脱敏）');
-        }}
+        }, {
+          successMsg: `已确认 ${selected.length} 个字段密级 · 全站随动生效（采集脱敏 + 目录徽章 + API 返回脱敏）`,
+          errorMsg: '批量确认失败，请重试',
+          duration: 4,
+        })}
       >
         <Text>将批量确认 <Text strong>{selected.length}</Text> 个字段的密级。</Text>
         <div style={{

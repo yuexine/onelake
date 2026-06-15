@@ -31,3 +31,7 @@ logs/
 *.db
 *.sqlite
 Thumbs.db
+
+# Tooling artifacts
+.playwright-mcp/
+.superpowers/

@@ -5,7 +5,7 @@ import com.onelake.common.exception.BizException;
 import com.onelake.quality.domain.entity.Alert;
 import com.onelake.quality.domain.entity.Rule;
 import com.onelake.quality.domain.entity.RunResult;
-import com.onelake.quality.repository.AlertRepository;
+import com.onelake.quality.repository.QualityAlertRepository;
 import com.onelake.quality.repository.RuleRepository;
 import com.onelake.quality.repository.RunResultRepository;
 import lombok.RequiredArgsConstructor;
@@ -21,7 +21,7 @@ public class QualityService {
 
     private final RuleRepository ruleRepo;
     private final RunResultRepository resultRepo;
-    private final AlertRepository alertRepo;
+    private final QualityAlertRepository alertRepo;
 
     @Transactional
     public Rule createRule(Rule r) {

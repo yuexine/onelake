@@ -6,6 +6,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.List;
 import java.util.UUID;
 
-public interface AlertRepository extends JpaRepository<Alert, UUID> {
+public interface QualityAlertRepository extends JpaRepository<Alert, UUID> {
     List<Alert> findByTenantIdAndStatus(UUID tenantId, String status);
 }

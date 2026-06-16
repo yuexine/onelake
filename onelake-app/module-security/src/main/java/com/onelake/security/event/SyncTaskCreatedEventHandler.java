@@ -2,6 +2,7 @@ package com.onelake.security.event;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
 import com.onelake.security.service.PiiScanService;
@@ -9,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -26,8 +28,8 @@ public class SyncTaskCreatedEventHandler implements DomainEventHandler {
     private final PiiScanService piiScanService;
 
     @Override
-    public boolean supports(String eventType) {
-        return "integration.sync_task.created".equals(eventType);
+    public Set<String> eventTypes() {
+        return Set.of(DomainEvents.INTEGRATION_SYNC_TASK_CREATED);
     }
 
     @Override

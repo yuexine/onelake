@@ -34,6 +34,15 @@ http.interceptors.response.use(
       clearAuth();
       void startLogin(`${window.location.pathname}${window.location.search}${window.location.hash}`);
     }
+
+    const body = error.response?.data as unknown;
+    if (body && typeof body === 'object' && 'message' in body) {
+      const message = (body as { message?: unknown }).message;
+      if (typeof message === 'string' && message.trim()) {
+        return Promise.reject(new Error(message));
+      }
+    }
+
     return Promise.reject(error);
   },
 );

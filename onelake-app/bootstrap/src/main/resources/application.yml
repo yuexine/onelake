@@ -24,7 +24,7 @@ spring:
     show-sql: false
     open-in-view: false
   flyway:
-    enabled: true
+    enabled: ${SPRING_FLYWAY_ENABLED:false}
     baseline-on-migrate: true
     schemas: common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api
     locations: >

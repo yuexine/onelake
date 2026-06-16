@@ -23,9 +23,12 @@ import com.onelake.integration.repository.SyncTaskRepository;
 import com.onelake.integration.service.SyncTaskService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.onelake.common.util.JsonUtil;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -50,6 +53,9 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     private final AuditLogger audit;
     private final OutboxPublisher outbox;
 
+    @Value("${onelake.dataplane.airbyte.destination-id:}")
+    private String defaultAirbyteDestinationId;
+
     @Override
     @Transactional
     public SyncTaskDTO create(CreateSyncTaskVO vo) {
@@ -57,8 +63,11 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         if (tenantId == null) {
             throw new BizException(40100, "租户上下文缺失");
         }
-        dsRepo.findById(vo.sourceId())
+        DataSource source = dsRepo.findById(vo.sourceId())
             .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+        if (!tenantId.equals(source.getTenantId())) {
+            throw new BizException(40400, "数据源不存在");
+        }
         if (taskRepo.existsByTenantIdAndName(tenantId, vo.name())) {
             throw new BizException(40911, "采集任务名称已存在");
         }
@@ -160,6 +169,9 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     public SyncTaskDTO enable(UUID id) {
         SyncTask task = taskRepo.findById(id)
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
+        if (task.getAirbyteConnectionId() == null || task.getAirbyteConnectionId().isBlank()) {
+            task.setAirbyteConnectionId(ensureAirbyteConnection(task));
+        }
         task.setStatus(TaskStatus.ENABLED);
         audit.audit("ENABLE", "sync_task", id.toString(), null);
         outbox.publish(DomainEvents.INTEGRATION_SYNC_TASK_STATUS_CHANGED, id.toString(),
@@ -300,6 +312,44 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         Long durationMs = durationMs(run);
         if (durationMs == null || durationMs <= 0 || run.getRowsWritten() == null) return null;
         return run.getRowsWritten() * 1000 / durationMs;
+    }
+
+    private String ensureAirbyteConnection(SyncTask task) {
+        DataSource source = dsRepo.findById(task.getSourceId())
+            .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+        if (!task.getTenantId().equals(source.getTenantId())) {
+            throw new BizException(40400, "数据源不存在");
+        }
+        Map<String, Object> config = configMap(source);
+        String airbyteSourceId = firstText(config, "airbyteSourceId", "externalSourceId");
+        String airbyteDestinationId = firstText(config, "airbyteDestinationId", "externalDestinationId");
+        if (airbyteDestinationId.isBlank()) {
+            airbyteDestinationId = defaultAirbyteDestinationId == null ? "" : defaultAirbyteDestinationId.trim();
+        }
+        if (airbyteSourceId.isBlank()) {
+            throw new BizException(40032, "数据源未配置 airbyteSourceId，无法发布采集任务");
+        }
+        if (airbyteDestinationId.isBlank()) {
+            throw new BizException(40033, "未配置 Airbyte destinationId，无法发布采集任务");
+        }
+        return airbyte.ensureConnection(airbyteSourceId, airbyteDestinationId, "onelake-" + task.getName());
+    }
+
+    private Map<String, Object> configMap(DataSource source) {
+        try {
+            return JsonUtil.mapper().readValue(source.getConfig(), new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            throw new BizException(50001, "数据源配置解析失败");
+        }
+    }
+
+    private String firstText(Map<String, Object> config, String first, String second) {
+        Object firstValue = config.get(first);
+        if (firstValue != null && !String.valueOf(firstValue).isBlank()) {
+            return String.valueOf(firstValue).trim();
+        }
+        Object secondValue = config.get(second);
+        return secondValue == null ? "" : String.valueOf(secondValue).trim();
     }
 
     private String namespaceOf(String targetTable) {

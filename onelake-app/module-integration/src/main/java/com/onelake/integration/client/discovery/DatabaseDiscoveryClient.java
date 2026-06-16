@@ -2,77 +2,51 @@ package com.onelake.integration.client.discovery;
 
 import com.onelake.common.exception.BizException;
 import com.onelake.integration.domain.enums.DataSourceType;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import org.springframework.stereotype.Component;
 
-import java.sql.DriverManager;
-import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 
 @Component
 public class DatabaseDiscoveryClient {
 
-    public List<String> discover(DataSourceType type, Map<String, Object> config) {
-        return switch (type) {
-            case MYSQL -> queryDatabases(jdbcUrl(type, config), config,
-                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA " +
-                    "WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys') " +
-                    "ORDER BY SCHEMA_NAME");
-            case POSTGRES -> queryDatabases(jdbcUrl(type, config), config,
-                "SELECT datname FROM pg_database WHERE datallowconn = true AND datistemplate = false ORDER BY datname");
-            default -> throw new BizException(40024, "当前类型暂不支持库列表探查，请手动输入");
-        };
-    }
+    private final Map<DataSourceType, DataSourceDiscoveryStrategy> strategies;
 
-    private List<String> queryDatabases(String url, Map<String, Object> config, String sql) {
-        Properties props = new Properties();
-        props.setProperty("user", text(config.get("username")));
-        props.setProperty("password", text(config.get("password")));
-        List<String> databases = new ArrayList<>();
-        try (var connection = DriverManager.getConnection(url, props);
-             var statement = connection.createStatement()) {
-            statement.setQueryTimeout(10);
-            try (var rs = statement.executeQuery(sql)) {
-                while (rs.next()) {
-                    String name = rs.getString(1);
-                    if (name != null && !name.isBlank()) {
-                        databases.add(name);
-                    }
-                }
+    public DatabaseDiscoveryClient(List<DataSourceDiscoveryStrategy> strategies) {
+        EnumMap<DataSourceType, DataSourceDiscoveryStrategy> indexed = new EnumMap<>(DataSourceType.class);
+        for (DataSourceDiscoveryStrategy strategy : strategies) {
+            DataSourceDiscoveryStrategy previous = indexed.put(strategy.type(), strategy);
+            if (previous != null) {
+                throw new IllegalStateException("Duplicate discovery strategy for " + strategy.type());
             }
-            return databases;
-        } catch (Exception e) {
-            throw new BizException(40025, "库列表探查失败: " + e.getMessage());
         }
+        this.strategies = Collections.unmodifiableMap(indexed);
     }
 
-    private String jdbcUrl(DataSourceType type, Map<String, Object> config) {
-        String host = text(config.getOrDefault("host", "localhost"));
-        int port = intValue(config.get("port"));
-        String dbName = text(config.get("dbName"));
-        if (dbName.isBlank()) {
-            dbName = text(config.get("database"));
-        }
-        return switch (type) {
-            case MYSQL -> "jdbc:mysql://" + host + ":" + (port == 0 ? 3306 : port) + "/";
-            case POSTGRES -> "jdbc:postgresql://" + host + ":" + (port == 0 ? 5432 : port) + "/" +
-                (dbName.isBlank() ? "postgres" : dbName);
-            default -> throw new BizException(40024, "当前类型暂不支持库列表探查，请手动输入");
-        };
+    public List<String> discover(DataSourceType type, Map<String, Object> config) {
+        return strategy(type, 40024, "当前类型暂不支持库列表探查，请手动输入").discover(config);
     }
 
-    private String text(Object value) {
-        return value == null ? "" : String.valueOf(value).trim();
+    public List<String> listSchemas(DataSourceType type, Map<String, Object> config) {
+        return strategy(type, 40026, "当前类型暂不支持 schema 探查").listSchemas(config);
     }
 
-    private int intValue(Object value) {
-        if (value instanceof Number n) {
-            return n.intValue();
+    public List<String> listTables(DataSourceType type, Map<String, Object> config, String schema) {
+        return strategy(type, 40027, "当前类型暂不支持表探查").listTables(config, schema);
+    }
+
+    public List<DiscoveredColumnDTO> describeTable(DataSourceType type, Map<String, Object> config, String objectName) {
+        return strategy(type, 40028, "当前类型暂不支持字段探查").describeTable(config, objectName);
+    }
+
+    private DataSourceDiscoveryStrategy strategy(DataSourceType type, int errorCode, String errorMessage) {
+        DataSourceDiscoveryStrategy strategy = strategies.get(type);
+        if (strategy == null) {
+            throw new BizException(errorCode, errorMessage);
         }
-        if (value == null || String.valueOf(value).isBlank()) {
-            return 0;
-        }
-        return Integer.parseInt(String.valueOf(value));
+        return strategy;
     }
 }

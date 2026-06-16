@@ -8,6 +8,7 @@ import com.onelake.integration.api.vo.ProbeDatabasesVO;
 import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.service.DataSourceService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -151,6 +152,30 @@ class DataSourceControllerTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.databases[0]").value("orders"))
             .andExpect(jsonPath("$.data.manualAllowed").value(true));
+    }
+
+    @Test
+    void discoveryEndpointsBindDatasourceIdAndObjectName() throws Exception {
+        UUID id = UUID.randomUUID();
+        when(service.listSchemas(id)).thenReturn(List.of("public"));
+        when(service.listTables(id, "public")).thenReturn(List.of("public.orders"));
+        when(service.describeTable(id, "public.orders")).thenReturn(List.of(
+            new DiscoveredColumnDTO("id", "bigint", false, true, 1)
+        ));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/{id}/schemas", id))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0]").value("public"));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/{id}/tables", id)
+                .param("schema", "public"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0]").value("public.orders"));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/{id}/tables/{objectName}/columns", id, "public.orders"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].name").value("id"))
+            .andExpect(jsonPath("$.data[0].primaryKey").value(true));
     }
 
     @Test

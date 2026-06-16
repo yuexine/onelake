@@ -8,6 +8,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理（对应《技术初始化文档》§6.9）。
@@ -34,6 +35,12 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> denied(AccessDeniedException e) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
             .body(ApiResponse.fail(40300, "无权限: " + e.getMessage()));
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> notFound(NoResourceFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(ApiResponse.fail(40400, "接口不存在: " + e.getResourcePath()));
     }
 
     @ExceptionHandler(Exception.class)

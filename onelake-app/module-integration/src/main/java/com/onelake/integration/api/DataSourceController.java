@@ -8,6 +8,7 @@ import com.onelake.integration.api.vo.ProbeDatabasesVO;
 import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.service.DataSourceService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -85,5 +86,22 @@ public class DataSourceController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<DatabaseProbeResult> probeDatabases(@Valid @RequestBody ProbeDatabasesVO vo) {
         return ApiResponse.ok(service.probeDatabases(vo));
+    }
+
+    @GetMapping("/{id}/schemas")
+    public ApiResponse<List<String>> schemas(@PathVariable UUID id) {
+        return ApiResponse.ok(service.listSchemas(id));
+    }
+
+    @GetMapping("/{id}/tables")
+    public ApiResponse<List<String>> tables(@PathVariable UUID id,
+                                            @RequestParam(required = false) String schema) {
+        return ApiResponse.ok(service.listTables(id, schema));
+    }
+
+    @GetMapping("/{id}/tables/{objectName}/columns")
+    public ApiResponse<List<DiscoveredColumnDTO>> columns(@PathVariable UUID id,
+                                                          @PathVariable String objectName) {
+        return ApiResponse.ok(service.describeTable(id, objectName));
     }
 }

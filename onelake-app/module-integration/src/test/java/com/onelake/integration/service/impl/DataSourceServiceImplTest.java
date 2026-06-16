@@ -19,6 +19,7 @@ import com.onelake.integration.domain.enums.EnvLevel;
 import com.onelake.integration.domain.enums.Health;
 import com.onelake.integration.domain.enums.NetworkMode;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.mapper.DataSourceMapper;
 import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SyncTaskRepository;
@@ -276,6 +277,31 @@ class DataSourceServiceImplTest {
         assertThat(result.databases()).containsExactly("orders", "inventory");
         assertThat(result.manualAllowed()).isTrue();
         verify(databaseDiscoveryClient).discover(DataSourceType.MYSQL, vo.config());
+    }
+
+    @Test
+    void discoveryLoadsCurrentTenantDatasourceAndDelegatesToClient() {
+        UUID id = UUID.randomUUID();
+        DataSource ds = datasource(id);
+        ds.setConfig(JsonUtil.toJson(Map.of(
+            "host", "db.internal",
+            "port", 5432,
+            "database", "orders",
+            "username", "reader"
+        )));
+        when(repo.findById(id)).thenReturn(Optional.of(ds));
+        when(databaseDiscoveryClient.listSchemas(eq(DataSourceType.POSTGRES), any(Map.class)))
+            .thenReturn(List.of("public"));
+        when(databaseDiscoveryClient.listTables(eq(DataSourceType.POSTGRES), any(Map.class), eq("public")))
+            .thenReturn(List.of("public.orders"));
+        when(databaseDiscoveryClient.describeTable(eq(DataSourceType.POSTGRES), any(Map.class), eq("public.orders")))
+            .thenReturn(List.of(new DiscoveredColumnDTO("id", "bigint", false, true, 1)));
+
+        assertThat(service.listSchemas(id)).containsExactly("public");
+        assertThat(service.listTables(id, "public")).containsExactly("public.orders");
+        assertThat(service.describeTable(id, "public.orders"))
+            .extracting(DiscoveredColumnDTO::name)
+            .containsExactly("id");
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.onelake.integration.api.vo.ProbeDatabasesVO;
 import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 
 import java.util.List;
 import java.util.UUID;
@@ -28,4 +29,10 @@ public interface DataSourceService {
     ConnectivityResult testConnectivity(TestDataSourceVO vo);
 
     DatabaseProbeResult probeDatabases(ProbeDatabasesVO vo);
+
+    List<String> listSchemas(UUID id);
+
+    List<String> listTables(UUID id, String schema);
+
+    List<DiscoveredColumnDTO> describeTable(UUID id, String objectName);
 }

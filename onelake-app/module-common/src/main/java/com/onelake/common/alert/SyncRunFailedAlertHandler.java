@@ -14,7 +14,7 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 消费 integration.sync_run.failed 事件，自动创建运营告警。
+ * 消费 integration.sync.failed 事件，自动创建运营告警。
  *
  * <p>每次采集任务失败都生成一条 P1 告警（连续 3 次由后续聚合规则升级 P0）。
  * 这条告警会被前端 AlertCenter 页面展示，运营可认领/关闭。

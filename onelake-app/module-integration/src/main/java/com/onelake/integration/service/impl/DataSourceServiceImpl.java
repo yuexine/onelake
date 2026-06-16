@@ -19,11 +19,13 @@ import com.onelake.integration.domain.enums.DataSourceType;
 import com.onelake.integration.domain.enums.NetworkMode;
 import com.onelake.integration.domain.enums.Health;
 import com.onelake.integration.dto.DataSourceDTO;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.mapper.DataSourceMapper;
 import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SyncTaskRepository;
 import com.onelake.integration.service.DataSourceService;
 import com.onelake.integration.service.validation.DataSourceConfigValidator;
+import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
@@ -204,6 +206,27 @@ public class DataSourceServiceImpl implements DataSourceService {
         return new DatabaseProbeResult(databases, true, databases.isEmpty() ? "未发现可选数据库，可手动输入" : "ok");
     }
 
+    @Override
+    @Transactional(readOnly = true)
+    public List<String> listSchemas(UUID id) {
+        DataSource ds = loadDatasourceForCurrentTenant(id);
+        return databaseDiscoveryClient.listSchemas(ds.getType(), configMap(ds));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<String> listTables(UUID id, String schema) {
+        DataSource ds = loadDatasourceForCurrentTenant(id);
+        return databaseDiscoveryClient.listTables(ds.getType(), configMap(ds), schema);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<DiscoveredColumnDTO> describeTable(UUID id, String objectName) {
+        DataSource ds = loadDatasourceForCurrentTenant(id);
+        return databaseDiscoveryClient.describeTable(ds.getType(), configMap(ds), objectName);
+    }
+
     private DataSourceType parseDataSourceType(String type) {
         try {
             return DataSourceType.valueOf(type.toUpperCase());
@@ -226,6 +249,30 @@ public class DataSourceServiceImpl implements DataSourceService {
         }
         if (!projectRepository.existsByTenantIdAndId(tenantId, projectId)) {
             throw new BizException(40018, "项目不存在或不属于当前租户");
+        }
+    }
+
+    private DataSource loadDatasourceForCurrentTenant(UUID id) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) {
+            throw new BizException(40100, "租户上下文缺失");
+        }
+        DataSource ds = repo.findById(id)
+            .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+        if (!tenantId.equals(ds.getTenantId())) {
+            throw new BizException(40400, "数据源不存在");
+        }
+        return ds;
+    }
+
+    private Map<String, Object> configMap(DataSource ds) {
+        try {
+            return com.onelake.common.util.JsonUtil.mapper().readValue(
+                ds.getConfig(),
+                new TypeReference<Map<String, Object>>() {}
+            );
+        } catch (Exception e) {
+            throw new BizException(50001, "数据源配置解析失败");
         }
     }
 }

@@ -12,17 +12,18 @@ import {
 import {
   ArrowLeftOutlined, ArrowRightOutlined, CheckOutlined, DatabaseOutlined,
   ApartmentOutlined, FieldTimeOutlined, ScheduleOutlined, PlayCircleOutlined,
-  InboxOutlined, HourglassOutlined, CloudSyncOutlined, FileTextOutlined,
+  HourglassOutlined, CloudSyncOutlined, FileTextOutlined,
 } from '@ant-design/icons';
 import { useState } from 'react';
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ClassificationBadge, SectionCard, EntityTypeIcon,
+  StateView,
 } from '../../components';
-import { dataSources as mockDataSources } from '../../mock';
 import type { DataSource, FieldMapping } from '../../types';
 import { IntegrationAPI } from '../../api';
+import type { DiscoveredColumn } from '../../api';
 
 const { Text } = Typography;
 
@@ -33,56 +34,179 @@ const MODES = [
   { value: 'FILE',        label: '文件采集',   desc: 'SFTP/S3 监听，分片上传 + MD5',     icon: <FileTextOutlined /> },
 ];
 
-const sampleMapping: FieldMapping[] = [
-  { source: 'order_id', sourceType: 'BIGINT', target: 'order_id', targetType: 'BIGINT', compatible: true },
-  { source: 'phone', sourceType: 'VARCHAR', target: 'phone', targetType: 'STRING', classification: 'L3', masked: true, compatible: true },
-  { source: 'amount', sourceType: 'NUMBER(10,2)', target: 'amount', targetType: 'DECIMAL(18,2)', compatible: true },
-  { source: 'status', sourceType: 'VARCHAR', target: 'status', targetType: 'STRING', compatible: true },
-  { source: 'order_time', sourceType: 'DATETIME', target: 'order_time', targetType: 'TIMESTAMP', compatible: true },
-  { source: 'memo', sourceType: 'TEXT', target: 'memo', targetType: 'STRING', compatible: false },
-];
-
 export default function SyncTaskWizard() {
   const navigate = useNavigate();
   const [sp] = useSearchParams();
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState('INCREMENTAL');
-  const [tables, setTables] = useState<string[]>(['ods.orders']);
-  const [mapping] = useState<FieldMapping[]>(sampleMapping);
-  const [dataSources, setDataSources] = useState<DataSource[]>(mockDataSources);
+  const [tables, setTables] = useState<string[]>([]);
+  const [mapping, setMapping] = useState<FieldMapping[]>([]);
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [schemas, setSchemas] = useState<string[]>([]);
+  const [schema, setSchema] = useState<string>();
+  const [tableOptions, setTableOptions] = useState<string[]>([]);
+  const [scheduleCron, setScheduleCron] = useState('0 2 * * *');
+  const [rateLimit, setRateLimit] = useState<number | null>(2500);
+  const [saving, setSaving] = useState(false);
+  const [dataSourceLoading, setDataSourceLoading] = useState(false);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [columnLoading, setColumnLoading] = useState(false);
+  const [dataSourceError, setDataSourceError] = useState<string | null>(null);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [tableError, setTableError] = useState<string | null>(null);
+  const [columnError, setColumnError] = useState<string | null>(null);
 
-  const [sourceId, setSourceId] = useState(sp.get('sourceId') || mockDataSources[0].id);
-  const source = dataSources.find((d) => d.id === sourceId) || dataSources[0] || mockDataSources[0];
+  const [sourceId, setSourceId] = useState(sp.get('sourceId') || '');
+  const source = dataSources.find((d) => d.id === sourceId);
+  const selectedTable = tables[0] || '';
+  const targetTable = selectedTable ? `ods.${selectedTable.split('.').pop()}` : 'ods.untitled';
+  const discoveryLoading = schemaLoading || tableLoading || columnLoading;
+  const canChooseTable = Boolean(sourceId) && !schemaLoading && !schemaError;
+  const canSubmit = Boolean(sourceId && selectedTable && mapping.length > 0) &&
+    !dataSourceLoading && !discoveryLoading && !dataSourceError && !schemaError && !tableError && !columnError;
 
-  useEffect(() => {
+  const loadDataSources = () => {
+    setDataSourceLoading(true);
+    setDataSourceError(null);
     IntegrationAPI.listDatasources()
       .then((rows) => {
         setDataSources(rows);
-        if (!rows.some((d) => d.id === sourceId) && rows[0]) {
-          setSourceId(rows[0].id);
+        const requestedSourceId = sp.get('sourceId');
+        if (requestedSourceId && rows.some((d) => d.id === requestedSourceId)) {
+          setSourceId(requestedSourceId);
+        } else if (!rows.some((d) => d.id === sourceId)) {
+          setSourceId(rows[0]?.id || '');
         }
       })
-      .catch((e) => message.error(e.message || '连接列表加载失败'));
+      .catch((e) => {
+        const errorMessage = friendlyDiscoveryError(e.message || '连接列表加载失败');
+        setDataSources([]);
+        setSourceId('');
+        setDataSourceError(errorMessage);
+        message.error(errorMessage);
+      })
+      .finally(() => setDataSourceLoading(false));
+  };
+
+  const loadTables = (currentSourceId: string, currentSchema?: string) => {
+    setTableLoading(true);
+    setTableError(null);
+    setTableOptions([]);
+    setTables([]);
+    setMapping([]);
+    setColumnError(null);
+    IntegrationAPI.listDatasourceTables(currentSourceId, currentSchema)
+      .then((rows) => {
+        setTableOptions(rows);
+        setTables(rows[0] ? [rows[0]] : []);
+      })
+      .catch((e) => {
+        const errorMessage = friendlyDiscoveryError(e.message || '来源表加载失败');
+        setTableError(errorMessage);
+        message.error(errorMessage);
+      })
+      .finally(() => setTableLoading(false));
+  };
+
+  const loadColumns = (currentSourceId: string, objectName: string) => {
+    setColumnLoading(true);
+    setColumnError(null);
+    setMapping([]);
+    IntegrationAPI.describeDatasourceTable(currentSourceId, objectName)
+      .then((columns) => {
+        setMapping(columnsToMapping(columns));
+        if (columns.length === 0) {
+          const errorMessage = '未发现字段，请检查源表权限或选择其他表';
+          setColumnError(errorMessage);
+          message.warning(errorMessage);
+        }
+      })
+      .catch((e) => {
+        const errorMessage = friendlyDiscoveryError(e.message || '字段探查失败');
+        setColumnError(errorMessage);
+        message.error(errorMessage);
+      })
+      .finally(() => setColumnLoading(false));
+  };
+
+  const loadSchemas = (currentSourceId: string) => {
+    setSchemaLoading(true);
+    setSchemaError(null);
+    setSchemas([]);
+    setSchema(undefined);
+    setTableOptions([]);
+    setTables([]);
+    setMapping([]);
+    setTableError(null);
+    setColumnError(null);
+    IntegrationAPI.listDatasourceSchemas(currentSourceId)
+      .then((rows) => {
+        setSchemas(rows);
+        const nextSchema = rows[0];
+        setSchema(nextSchema);
+        if (!nextSchema) {
+          loadTables(currentSourceId);
+        }
+      })
+      .catch((e) => {
+        const errorMessage = friendlyDiscoveryError(e.message || 'Schema 探查失败');
+        setSchemaError(errorMessage);
+        message.error(errorMessage);
+      })
+      .finally(() => setSchemaLoading(false));
+  };
+
+  useEffect(() => {
+    loadDataSources();
   }, []);
 
-  const publishTask = () => {
-    const targetTable = tables[0] || 'ods.untitled';
+  useEffect(() => {
+    if (!sourceId) return;
+    loadSchemas(sourceId);
+  }, [sourceId]);
+
+  useEffect(() => {
+    if (!sourceId || !schema) return;
+    loadTables(sourceId, schema);
+  }, [sourceId, schema]);
+
+  useEffect(() => {
+    if (!sourceId || !selectedTable) return;
+    loadColumns(sourceId, selectedTable);
+  }, [sourceId, selectedTable]);
+
+  const buildTaskBody = () => ({
+    sourceId,
+    name: `${targetTable.split('.').pop()}_${mode.toLowerCase()}`,
+    mode,
+    targetTable,
+    fieldMapping: mapping,
+    scheduleCron: mode === 'CDC' ? '' : scheduleCron,
+    rateLimit: rateLimit || undefined,
+    dirtyThreshold: 0,
+  });
+
+  const saveTask = (publish: boolean) => {
+    if (!sourceId || !selectedTable) {
+      message.warning('请选择源连接和来源表');
+      return;
+    }
+    if (mapping.length === 0) {
+      message.warning('请先完成真实字段探查');
+      return;
+    }
+    setSaving(true);
     IntegrationAPI.createSyncTask({
-      sourceId,
-      name: `${targetTable.split('.').pop()}_${mode.toLowerCase()}`,
-      mode,
-      targetTable,
-      fieldMapping: mapping,
-      scheduleCron: mode === 'CDC' ? '' : '0 2 * * *',
-      rateLimit: 2500,
-      dirtyThreshold: 0,
+      ...buildTaskBody(),
     })
-      .then((created) => IntegrationAPI.enableSyncTask(created.id))
-      .then(() => {
-        message.success('采集任务已创建');
+      .then((created) => publish ? IntegrationAPI.enableSyncTask(created.id) : created)
+      .then((task) => {
+        message.success(publish ? '采集任务已发布' : '草稿已保存');
         navigate('/integration/sync-tasks');
       })
-      .catch((e) => message.error(e.message || '采集任务创建失败'));
+      .catch((e) => message.error(e.message || (publish ? '采集任务发布失败' : '草稿保存失败')))
+      .finally(() => setSaving(false));
   };
 
   const steps = [
@@ -104,12 +228,12 @@ export default function SyncTaskWizard() {
               <div style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>四步配置：源与模式 → 映射 → 增量 → 调度</div>
             </div>
           </Space>
-          <Space size={8}>
+          {source && <Space size={8}>
             <EntityTypeIcon kind={source.type} size={28} />
             <div style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
               源：<span style={{ color: 'var(--ol-ink)', fontWeight: 500 }}>{source.name}</span> · {source.host}
             </div>
-          </Space>
+          </Space>}
         </div>
       </div>
 
@@ -135,10 +259,17 @@ export default function SyncTaskWizard() {
           {step === 0 && (
             <Form layout="vertical" requiredMark="optional">
               <Form.Item label="源连接" required>
-                <Select value={source.id} onChange={setSourceId} options={dataSources.map((d) => ({
+                <Select
+                  value={sourceId || undefined}
+                  onChange={setSourceId}
+                  loading={dataSourceLoading}
+                  disabled={dataSourceLoading || dataSources.length === 0}
+                  placeholder="选择已创建的数据源连接"
+                  options={dataSources.map((d) => ({
                   label: <Space size={8}><EntityTypeIcon kind={d.type} size={20} /> {d.name} <Text type="secondary" style={{ fontSize: 11 }}>{d.host}</Text></Space>,
                   value: d.id,
-                }))} />
+                }))}
+                />
               </Form.Item>
 
               <Form.Item label="采集模式" required>
@@ -168,37 +299,58 @@ export default function SyncTaskWizard() {
                 </Radio.Group>
               </Form.Item>
 
-              <Form.Item label="选择来源表" tooltip="支持多选树 + 搜索">
+              {schemas.length > 0 && (
+                <Form.Item label="Schema">
+                  <Select
+                    value={schema}
+                    onChange={setSchema}
+                    loading={schemaLoading}
+                    options={schemas.map((s) => ({ label: s, value: s }))}
+                  />
+                </Form.Item>
+              )}
+
+              <Form.Item label="选择来源表" required tooltip="当前任务绑定一张来源表；批量建任务将在模板阶段接入">
                 <Select
-                  mode="multiple" value={tables} onChange={setTables}
-                  options={['ods.orders', 'ods.order_items', 'ods.users', 'ods.payments'].map((t) => ({ label: t, value: t }))}
-                  tagRender={(props) => (
-                    <Tag closable onClose={props.onClose} style={{ margin: 2, fontSize: 11 }}>
-                      {props.label}
-                    </Tag>
-                  )}
+                  showSearch
+                  value={selectedTable || undefined}
+                  onChange={(value) => setTables(value ? [value] : [])}
+                  loading={tableLoading}
+                  disabled={!canChooseTable || tableLoading || tableOptions.length === 0}
+                  placeholder={tableOptions.length === 0 ? '暂无可选来源表' : '选择来源表'}
+                  options={tableOptions.map((t) => ({ label: t, value: t }))}
                 />
               </Form.Item>
             </Form>
           )}
 
           {step === 1 && (
-            <Table size="middle" rowKey="source" dataSource={mapping} pagination={false}
-              columns={[
-                { title: '源字段', dataIndex: 'source', render: (v: string, r: FieldMapping) => (
-                  <Space size={6}><Text strong>{v}</Text>{r.classification && <ClassificationBadge level={r.classification} size="small" />}</Space>
-                ) },
-                { title: '源类型', dataIndex: 'sourceType', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
-                { title: '', render: () => <ArrowRightOutlined style={{ color: 'var(--ol-ink-4)' }} /> },
-                { title: '目标字段', dataIndex: 'target' },
-                { title: '目标类型', dataIndex: 'targetType', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
-                { title: '兼容性', dataIndex: 'compatible', render: (c: boolean) => c
-                  ? <Tag color="success" style={{ margin: 0 }}>✓ 兼容</Tag>
-                  : <Tooltip title="TEXT → STRING 可能丢失多字节字符"><Tag color="warning" style={{ margin: 0 }}>⚠ 转换</Tag></Tooltip>
-                },
-                { title: '采集前脱敏', dataIndex: 'masked', render: (m?: boolean) => <Switch size="small" defaultChecked={m} /> },
-              ]}
-            />
+            columnLoading ? (
+              <StateView state="loading" rows={6} />
+            ) : mapping.length === 0 ? (
+              <StateView
+                state="empty"
+                title="尚未生成字段映射"
+                description="请选择真实来源表，系统会根据源端字段自动生成默认映射"
+              />
+            ) : (
+              <Table size="middle" rowKey="source" dataSource={mapping} pagination={false}
+                columns={[
+                  { title: '源字段', dataIndex: 'source', render: (v: string, r: FieldMapping) => (
+                    <Space size={6}><Text strong>{v}</Text>{r.classification && <ClassificationBadge level={r.classification} size="small" />}</Space>
+                  ) },
+                  { title: '源类型', dataIndex: 'sourceType', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
+                  { title: '', render: () => <ArrowRightOutlined style={{ color: 'var(--ol-ink-4)' }} /> },
+                  { title: '目标字段', dataIndex: 'target' },
+                  { title: '目标类型', dataIndex: 'targetType', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
+                  { title: '兼容性', dataIndex: 'compatible', render: (c: boolean) => c
+                    ? <Tag color="success" style={{ margin: 0 }}>✓ 兼容</Tag>
+                    : <Tooltip title="源端类型需要人工确认目标湖仓类型"><Tag color="warning" style={{ margin: 0 }}>⚠ 转换</Tag></Tooltip>
+                  },
+                  { title: '采集前脱敏', dataIndex: 'masked', render: (m?: boolean) => <Switch size="small" defaultChecked={m} /> },
+                ]}
+              />
+            )
           )}
 
           {step === 2 && (
@@ -206,7 +358,7 @@ export default function SyncTaskWizard() {
               {mode === 'INCREMENTAL' && (
                 <>
                   <Form.Item label="水位列" required>
-                    <Select options={['updated_at', 'create_time', 'id'].map((v) => ({ label: v, value: v }))} defaultValue="updated_at" />
+                    <Select options={mapping.map((f) => ({ label: f.source, value: f.source }))} defaultValue={mapping[0]?.source || 'id'} />
                   </Form.Item>
                   <Form.Item label="回溯 N 分钟（容错）" tooltip="防止水位回拨造成数据缺失">
                     <Space><InputNumber defaultValue={5} min={0} /> 分钟</Space>
@@ -255,13 +407,13 @@ export default function SyncTaskWizard() {
             <>
               <Form layout="vertical">
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                  <Form.Item label="调度 Cron"><Input placeholder="0 2 * * *" /></Form.Item>
+                  <Form.Item label="调度 Cron"><Input value={scheduleCron} onChange={(e) => setScheduleCron(e.target.value)} placeholder="0 2 * * *" /></Form.Item>
                   <Form.Item label="错峰时间窗"><Input placeholder="02:00-06:00" /></Form.Item>
                 </div>
                 <Form.Item label="依赖上游任务触发"><Switch defaultChecked /></Form.Item>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                   <Form.Item label="失败重试次数"><InputNumber defaultValue={3} min={0} style={{ width: '100%' }} /></Form.Item>
-                  <Form.Item label="抽取限流 (rows/s)"><InputNumber defaultValue={2500} style={{ width: '100%' }} /></Form.Item>
+                  <Form.Item label="抽取限流 (rows/s)"><InputNumber value={rateLimit} onChange={setRateLimit} style={{ width: '100%' }} /></Form.Item>
                 </div>
               </Form>
 
@@ -277,10 +429,11 @@ export default function SyncTaskWizard() {
                   预览汇总
                 </div>
                 <Space direction="vertical" size={4}>
-                  <Text>源：<Text code>{source.name}</Text> · <span className="ol-chip">{source.type}</span></Text>
+                  <Text>源：<Text code>{source?.name || '-'}</Text> · <span className="ol-chip">{source?.type || '-'}</span></Text>
                   <Text>模式：<span className="ol-chip">{mode}</span> · 表数 {tables.length}</Text>
                   <Text style={{ fontSize: 12 }}>{tables.join(', ')}</Text>
-                  <Text>限流：<Text code>2500 rows/s</Text> · 重试 3 次 · 错峰 02:00-06:00</Text>
+                  <Text>目标：<Text code>{targetTable}</Text></Text>
+                  <Text>限流：<Text code>{rateLimit || '-'} rows/s</Text> · 重试 3 次 · 错峰 02:00-06:00</Text>
                 </Space>
               </div>
             </>
@@ -302,18 +455,22 @@ export default function SyncTaskWizard() {
             ) : (
               <Button onClick={() => setStep(step - 1)}><ArrowLeftOutlined /> 上一步</Button>
             )}
-            <Button onClick={() => message.success('已保存草稿')}>保存草稿</Button>
+            <Button loading={saving} disabled={!canSubmit} onClick={() => saveTask(false)}>保存草稿</Button>
           </Space>
           <Space>
             {step < 3 && (
-              <Button type="primary" onClick={() => setStep(step + 1)}>
+              <Button
+                type="primary"
+                disabled={(step === 0 && (!selectedTable || columnLoading || mapping.length === 0 || Boolean(columnError))) || (step === 1 && mapping.length === 0)}
+                onClick={() => setStep(step + 1)}
+              >
                 下一步 <ArrowRightOutlined />
               </Button>
             )}
             {step === 3 && (
               <>
-                <Button icon={<PlayCircleOutlined />} onClick={() => message.success('已试跑，预览采样 100 行')}>试跑</Button>
-                <Button type="primary" icon={<CheckOutlined />} onClick={publishTask}>发布</Button>
+                <Button icon={<PlayCircleOutlined />} onClick={() => message.warning('试跑功能将在运行闭环阶段接入')}>试跑</Button>
+                <Button type="primary" loading={saving} disabled={!canSubmit} icon={<CheckOutlined />} onClick={() => saveTask(true)}>发布</Button>
               </>
             )}
           </Space>
@@ -321,4 +478,33 @@ export default function SyncTaskWizard() {
       </SectionCard>
     </div>
   );
+}
+
+function columnsToMapping(columns: DiscoveredColumn[]): FieldMapping[] {
+  return columns.map((column) => ({
+    source: column.name,
+    sourceType: column.type,
+    target: column.name,
+    targetType: toLakeType(column.type),
+    compatible: true,
+  }));
+}
+
+function toLakeType(type: string) {
+  const normalized = type.toUpperCase();
+  if (normalized.includes('INT')) return normalized.includes('BIG') ? 'BIGINT' : 'INT';
+  if (normalized.includes('DECIMAL') || normalized.includes('NUMERIC')) return 'DECIMAL';
+  if (normalized.includes('TIME') || normalized.includes('DATE')) return 'TIMESTAMP';
+  if (normalized.includes('BOOL')) return 'BOOLEAN';
+  return 'STRING';
+}
+
+function friendlyDiscoveryError(messageText: string) {
+  if (/status code 500/i.test(messageText)) {
+    return '后端探查服务返回异常，请检查连接配置、账号权限或稍后重新探查。';
+  }
+  if (/timeout|timed out/i.test(messageText)) {
+    return '探查请求超时，请确认源端网络可达后重新探查。';
+  }
+  return messageText;
 }

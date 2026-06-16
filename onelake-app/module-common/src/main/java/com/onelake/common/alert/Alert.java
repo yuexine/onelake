@@ -6,7 +6,7 @@ import lombok.Setter;
 import java.time.Instant;
 import java.util.UUID;
 
-@Entity
+@Entity(name = "CommonAlert")
 @Table(name = "alert", schema = "common")
 @Getter @Setter
 public class Alert {

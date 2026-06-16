@@ -41,7 +41,7 @@ public interface DomainEventHandler {
     }
 
     /**
-     * 处理事件。抛异常即视为失败，会被分发器标记为 FAILED。
+     * 处理事件。抛异常即视为本次消费失败，消息保留在 Redis Stream pending 列表等待重试。
      */
     void handle(OutboxEvent event);
 }

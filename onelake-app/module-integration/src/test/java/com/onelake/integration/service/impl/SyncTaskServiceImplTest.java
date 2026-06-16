@@ -224,6 +224,32 @@ class SyncTaskServiceImplTest {
     }
 
     @Test
+    void enableEnsuresAirbyteConnectionWhenMissing() {
+        UUID sourceId = UUID.randomUUID();
+        UUID taskId = UUID.randomUUID();
+        SyncTask task = task(taskId, sourceId, TaskStatus.DRAFT);
+        task.setAirbyteConnectionId("");
+        DataSource ds = datasource(sourceId, "orders-db");
+        ds.setConfig(JsonUtil.toJson(Map.of(
+            "host", "db.internal",
+            "port", 5432,
+            "database", "orders",
+            "username", "reader",
+            "airbyteSourceId", "ab-src",
+            "airbyteDestinationId", "ab-dst"
+        )));
+        when(taskRepo.findById(taskId)).thenReturn(Optional.of(task));
+        when(dsRepo.findById(sourceId)).thenReturn(Optional.of(ds));
+        when(airbyte.ensureConnection("ab-src", "ab-dst", "onelake-orders-cdc")).thenReturn("conn-new");
+
+        SyncTaskDTO dto = service.enable(taskId);
+
+        assertThat(dto.status()).isEqualTo("ENABLED");
+        assertThat(dto.airbyteConnectionId()).isEqualTo("conn-new");
+        verify(airbyte).ensureConnection("ab-src", "ab-dst", "onelake-orders-cdc");
+    }
+
+    @Test
     void triggerRequiresEnabledTaskAndAirbyteConnection() {
         UUID sourceId = UUID.randomUUID();
         SyncTask draft = task(UUID.randomUUID(), sourceId, TaskStatus.DRAFT);

@@ -1,5 +1,6 @@
 package com.onelake.common.outbox;
 
+import com.onelake.common.context.TenantContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
@@ -92,6 +93,10 @@ public class RedisStreamDomainEventConsumer {
         }
 
         try {
+            if (envelope.getTenantId() != null) {
+                TenantContext.setTenantId(envelope.getTenantId());
+            }
+            TenantContext.setTraceId("event:" + envelope.getEventId());
             handler.handle(envelope.toEvent());
             ConsumedEvent consumed = new ConsumedEvent();
             consumed.setEventId(envelope.getEventId());
@@ -101,6 +106,8 @@ public class RedisStreamDomainEventConsumer {
         } catch (Exception e) {
             log.warn("domain event consumer {} failed for event {}: {}",
                 handler.consumerName(), envelope.getEventId(), e.getMessage());
+        } finally {
+            TenantContext.clear();
         }
     }
 }

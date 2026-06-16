@@ -2,6 +2,7 @@ package com.onelake.orchestration.event;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
 import com.onelake.orchestration.domain.entity.Dag;
@@ -13,10 +14,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * 消费 integration.sync_run.succeeded 事件，自动触发依赖该表的下游 DAG。
+ * 消费 integration.table.loaded 事件，自动触发依赖该表的下游 DAG。
  *
  * <p>设计意图（CLAUDE.md §3 旅程一闭环）：
  * 采集任务完成 → 数据已落入 ODS → 自动触发加工 DAG（清洗/脱敏/入 DWD/DWS）。
@@ -34,8 +36,8 @@ public class SyncRunSucceededEventHandler implements DomainEventHandler {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
-    public boolean supports(String eventType) {
-        return "integration.sync_run.succeeded".equals(eventType);
+    public Set<String> eventTypes() {
+        return Set.of(DomainEvents.INTEGRATION_TABLE_LOADED);
     }
 
     @Override

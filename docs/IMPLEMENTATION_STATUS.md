@@ -67,8 +67,8 @@
 | 子包 | 类 | 职责 |
 |------|----|------|
 | module-common/api | `SystemContextController` | `/api/v1/system/context`、`/api/v1/system/projects`，提供当前租户和项目选项 |
-| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 已保存/未保存配置测连 + 库列表探查 |
-| api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/触发/历史 |
+| api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 已保存/未保存配置测连 + 库/schema/table/column 探查 |
+| api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/发布/暂停/触发/历史 |
 | api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `TestDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
 | service | `DataSourceService` / `SyncTaskService` | 用例编排接口 |
 | service/impl | `DataSourceServiceImpl` / `SyncTaskServiceImpl` | 事务边界 + Outbox + 审计 |
@@ -77,10 +77,10 @@
 | domain/enums | 7 个枚举（Health / SyncMode / DataSourceType / NetworkMode / EnvLevel / TaskStatus / RunStatus） | |
 | repository | 4 个 JPA Repository | |
 | client | `ConnectivityTester` | TCP + JDBC 双探活（NET/AUTH/DRV 分类） |
-| client/discovery | `DatabaseDiscoveryClient` | 根据连接信息探查 MySQL/PostgreSQL 可选库名，支持前端下拉或手动输入 |
-| client | `AirbyteSyncDriver` | Airbyte `/connections/sync` + `/jobs/get` |
+| client/discovery | `DatabaseDiscoveryClient` + `DataSourceDiscoveryStrategy` | 门面按数据源类型分发探查策略；MySQL/PostgreSQL 独立实现 schema/table/columns 探查，支持采集向导真实选表和字段映射 |
+| client | `AirbyteSyncDriver` | Airbyte `/connections/list` + `/connections/create` + `/connections/sync` + `/jobs/get` + `/jobs/cancel` |
 | mapper | `DataSourceMapper` / `SyncTaskMapper` | MapStruct |
-| dto | `DataSourceDTO` / `SyncTaskDTO` / `SyncRunDTO` | 对外 DTO（不暴露 config 中的密码） |
+| dto | `DataSourceDTO` / `SyncTaskDTO` / `SyncRunDTO` / `DiscoveredColumnDTO` | 对外 DTO（不暴露 config 中的密码） |
 
 ---
 

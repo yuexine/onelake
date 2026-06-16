@@ -3,13 +3,20 @@ package com.onelake.integration.service.impl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.onelake.common.audit.AuditLogger;
+import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.util.JsonUtil;
+import com.onelake.integration.client.discovery.DatabaseDiscoveryClient;
+import com.onelake.integration.domain.entity.DataSource;
 import com.onelake.integration.domain.entity.SourceSchemaSnapshot;
+import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.dto.SourceSchemaSnapshotDTO;
+import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SourceSchemaSnapshotRepository;
 import com.onelake.integration.service.SourceSchemaSnapshotService;
+import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,10 +37,7 @@ import java.util.UUID;
 /**
  * Schema 快照与漂移检测服务实现。
  *
- * <p>注意：当前 {@link #capture(UUID, String)} 是离线 stub —— 真实从源端拉 columns 需要
- * 调 {@code DatabaseDiscoveryClient}（已存在于 client/discovery）。Stub 状态下会读取最近
- * 一次快照或返回一段占位 columns，便于前端走通流程；接入 discovery client 后此处只需
- * 替换 captureColumns 的实现。
+ * <p>当前从 {@code DatabaseDiscoveryClient} 拉取 MySQL/Postgres 真实 columns。
  */
 @Service
 @RequiredArgsConstructor
@@ -41,6 +45,8 @@ import java.util.UUID;
 public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotService {
 
     private final SourceSchemaSnapshotRepository repo;
+    private final DataSourceRepository dataSourceRepo;
+    private final DatabaseDiscoveryClient discoveryClient;
     private final AuditLogger audit;
     private final OutboxPublisher outbox;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -120,17 +126,15 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
 
     /* ---------------- helpers ---------------- */
 
-    /**
-     * 占位实现：从最近一次快照复用 columns；首次则返回最小占位 schema。
-     * TODO: 接入 DatabaseDiscoveryClient.describe(objectName) 拉真实 columns。
-     */
     private String captureColumns(UUID sourceId, String objectName) {
-        Optional<SourceSchemaSnapshot> last = repo.findFirstBySourceIdAndObjectNameOrderByCapturedAtDesc(sourceId, objectName);
-        if (last.isPresent()) {
-            return last.get().getColumns();
+        DataSource ds = dataSourceRepo.findById(sourceId)
+            .orElseThrow(() -> new BizException(40400, "数据源不存在"));
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId != null && !tenantId.equals(ds.getTenantId())) {
+            throw new BizException(40400, "数据源不存在");
         }
-        // 占位 schema（首次快照）—— 接入 discovery client 后替换为真实结构
-        return "[{\"name\":\"id\",\"type\":\"BIGINT\"},{\"name\":\"created_at\",\"type\":\"TIMESTAMP\"}]";
+        List<DiscoveredColumnDTO> columns = discoveryClient.describeTable(ds.getType(), configMap(ds), objectName);
+        return JsonUtil.toJson(columns);
     }
 
     private SourceSchemaSnapshotDTO toDto(SourceSchemaSnapshot s) {
@@ -216,5 +220,13 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
             if (!name.isEmpty()) map.put(name, type);
         }
         return map;
+    }
+
+    private Map<String, Object> configMap(DataSource ds) {
+        try {
+            return JsonUtil.mapper().readValue(ds.getConfig(), new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            throw new BizException(50001, "数据源配置解析失败");
+        }
     }
 }

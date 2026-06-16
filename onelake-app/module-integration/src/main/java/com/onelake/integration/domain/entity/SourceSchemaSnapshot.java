@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -32,6 +33,7 @@ public class SourceSchemaSnapshot {
     private String objectName;        // 库.表
 
     @Column(columnDefinition = "jsonb", nullable = false)
+    @ColumnTransformer(write = "?::jsonb")
     private String columns;
 
     @Column(nullable = false)

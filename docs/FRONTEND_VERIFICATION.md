@@ -75,7 +75,7 @@
 |------|------|------|
 | §8.2.1 连接列表 + 测连 + 新建抽屉 | `DatasourceList.tsx` | ✅ |
 | §8.2.2 连接创建/编辑抽屉（类型选择/动态表单/加密存储） | `DatasourceList.tsx` 内 Drawer | ✅ |
-| §8.2.3 采集任务向导（4 步：选源→映射→CDC→调度） | `SyncTaskWizard.tsx` | ✅ |
+| §8.2.3 采集任务向导（4 步：选源→映射→CDC→调度） | `SyncTaskWizard.tsx`，真实数据源/schema/table/columns 驱动，接口失败显式错误/重试，无样例字段兜底 | ✅ |
 | §8.2.4 任务详情 + 运行历史 + 实时日志 | `SyncTaskDetail.tsx` | ✅ |
 | §8.2.5 采集监控大盘（吞吐/失败率/失败 Top） | `CollectMonitor.tsx` | ✅ |
 | §8.2.6 文件采集（监听/分片/校验/去重） | `FileCollect.tsx` | ✅ |
@@ -197,7 +197,7 @@
 | §6.1 无权限打码 + 申请访问 | `StateView state="no-permission"` + 资产详情打码样例 | ✅ |
 | §6.1 危险操作二次确认 + 输入名称 + 影响分析 | `DangerConfirm` + `ImpactAnalysis` | ✅ |
 | §6.1 长任务进度条 + Toast + 通知红点 | `TaskProgressBar` + message | ✅ |
-| §6.2 向导即时校验 + 保存草稿 | Wizard 各页面 | ✅ |
+| §6.2 向导即时校验 + 保存草稿 | `SyncTaskWizard` 保存/发布前要求真实来源表和字段映射已生成 | ✅ |
 | §6.3 表格列设置/密度/批量操作条 | AntD Table rowSelection + 批量按钮 | ✅ |
 | §6.4 可访问性：键盘 + 文字图标密级 | `ClassificationBadge` 文字+颜色双编码 | ✅ |
 

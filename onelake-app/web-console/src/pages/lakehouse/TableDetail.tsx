@@ -5,18 +5,27 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { Table, Tag, Space, Button, Typography, Timeline, message } from 'antd';
 import { ArrowRightOutlined, BranchesOutlined, TableOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { lakehouseAssets, tableSnapshots } from '../../mock';
 import { DetailPageLayout, ClassificationBadge, DangerConfirm, SectionCard } from '../../components';
+import { CatalogAPI } from '../../api';
+import { normalizeCatalogAsset } from './assetAdapter';
 
 const { Text } = Typography;
 
 export default function TableDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const asset = lakehouseAssets.find((a) => a.id === id) || lakehouseAssets[1];
+  const [asset, setAsset] = useState(() => lakehouseAssets.find((a) => a.id === id) || lakehouseAssets[1]);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRollback, setConfirmRollback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    CatalogAPI.getAsset(id)
+      .then((item) => setAsset(normalizeCatalogAsset(item)))
+      .catch((e) => message.error(e.message || '表详情加载失败，已显示本地示例数据'));
+  }, [id]);
 
   const tabs = [
     { key: 'schema', label: 'Schema', children: (
@@ -111,11 +120,11 @@ export default function TableDetail() {
           <Button key="del" danger onClick={() => setConfirmDel(true)}>删除字段</Button>,
         ]}
         meta={[
-          { label: '行数', value: asset.rows?.toLocaleString() },
-          { label: '大小', value: `${((asset.sizeBytes || 0) / 1e9).toFixed(2)} GB` },
+          { label: '行数', value: asset.rows == null ? '-' : asset.rows.toLocaleString() },
+          { label: '大小', value: asset.sizeBytes == null ? '-' : `${(asset.sizeBytes / 1e9).toFixed(2)} GB` },
           { label: '负责人', value: asset.ownerName },
           { label: '格式', value: asset.format },
-          { label: '质量分', value: asset.qualityScore },
+          { label: '质量分', value: asset.qualityScore == null ? '-' : asset.qualityScore },
           { label: '被订阅', value: asset.popularity },
         ]}
       />

@@ -1,6 +1,6 @@
 package com.onelake.catalog.api;
 
-import com.onelake.catalog.domain.entity.Asset;
+import com.onelake.catalog.dto.AssetDTO;
 import com.onelake.catalog.service.CatalogService;
 import com.onelake.catalog.service.CatalogSyncService;
 import com.onelake.common.api.ApiResponse;
@@ -22,12 +22,12 @@ public class CatalogController {
     private final CatalogSyncService syncService;
 
     @GetMapping("/assets/{id}")
-    public ApiResponse<Asset> get(@PathVariable UUID id) {
+    public ApiResponse<AssetDTO> get(@PathVariable UUID id) {
         return ApiResponse.ok(catalogService.getAsset(id));
     }
 
     @GetMapping("/assets")
-    public ApiResponse<List<Asset>> list(@RequestParam(required = false) String layer) {
+    public ApiResponse<List<AssetDTO>> list(@RequestParam(required = false) String layer) {
         return ApiResponse.ok(catalogService.listByLayer(layer));
     }
 

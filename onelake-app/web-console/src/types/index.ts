@@ -129,7 +129,8 @@ export interface AssetColumn {
   type: string;
   description?: string;
   classification?: Classification;
-  piiType?: 'PHONE' | 'ID_CARD' | 'BANK_CARD' | 'EMAIL' | 'NAME';
+  piiType?: string;
+  suggestLevel?: Classification;
   upstreamFqn?: string;
   stats?: { nullRate?: number; cardinality?: number; min?: string; max?: string };
 }

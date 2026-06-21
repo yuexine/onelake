@@ -2,12 +2,13 @@
  * 资产搜索浏览（对应原型 §8.6.1 升级版）。
  */
 import { Input, Row, Col, Tag, List, Space, Avatar, Typography, Drawer, Form, Select, Checkbox, Button, message } from 'antd';
-import { SearchOutlined, FireOutlined, AppstoreOutlined, StarOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { SearchOutlined, FireOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { lakehouseAssets, searchHot } from '../../mock';
+import { searchHot } from '../../mock';
 import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../components';
 import type { Asset } from '../../types';
+import { CatalogAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -25,8 +26,28 @@ export default function CatalogSearch() {
   const [classification, setClassification] = useState<string>();
   const [owner, setOwner] = useState<string>();
   const [applyOpen, setApplyOpen] = useState<Asset | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string>();
 
-  const filtered = lakehouseAssets.filter((a) =>
+  const loadAssets = () => {
+    setLoading(true);
+    setLoadError(undefined);
+    CatalogAPI.listAssets()
+      .then(setAssets)
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : '目录资产加载失败';
+        setLoadError(msg);
+        message.error(msg);
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadAssets();
+  }, []);
+
+  const filtered = assets.filter((a) =>
     (!keyword || a.fqn.includes(keyword) || a.name.includes(keyword) || (a.description || '').includes(keyword)) &&
     (!layer || a.layer === layer) &&
     (!classification || a.classification === classification) &&
@@ -101,11 +122,11 @@ export default function CatalogSearch() {
           <SectionCard title="猜你需要" icon={<FireOutlined />} padded="sm" style={{ marginTop: 12 }}>
             <List
               size="small"
-              dataSource={lakehouseAssets.slice(0, 3)}
+              dataSource={assets.slice(0, 3)}
               renderItem={(a) => (
                 <List.Item style={{ padding: '6px 0' }}>
                   <Space size={8} style={{ minWidth: 0 }}>
-                    <Avatar size="small" style={{ background: LAYER_BG[a.layer], fontSize: 11 }}>{a.layer[0]}</Avatar>
+                    <Avatar size="small" style={{ background: LAYER_BG[a.layer || 'ODS'], fontSize: 11 }}>{(a.layer || 'ODS')[0]}</Avatar>
                     <a className="ol-link ol-truncate" style={{ fontSize: 12 }} onClick={() => navigate(`/catalog/assets/${a.id}`)}>{a.fqn}</a>
                   </Space>
                 </List.Item>
@@ -116,7 +137,16 @@ export default function CatalogSearch() {
 
         <Col xs={24} lg={19}>
           <SectionCard title={`搜索结果 (${filtered.length})`} icon={<SearchOutlined />} flatBody>
-            {filtered.length === 0 ? (
+            {loading ? (
+              <StateView state="loading" rows={6} />
+            ) : loadError ? (
+              <StateView
+                state="error"
+                title="目录资产加载失败"
+                description={loadError}
+                onRetry={loadAssets}
+              />
+            ) : filtered.length === 0 ? (
               <StateView
                 state="empty"
                 title="没有找到匹配的资产"
@@ -134,7 +164,7 @@ export default function CatalogSearch() {
                   ]}
                 >
                   <List.Item.Meta
-                    avatar={<Avatar style={{ background: LAYER_BG[a.layer] }}>{a.layer[0]}</Avatar>}
+                    avatar={<Avatar style={{ background: LAYER_BG[a.layer || 'ODS'] }}>{(a.layer || 'ODS')[0]}</Avatar>}
                     title={
                       <Space size={8} wrap>
                         <a className="ol-link" style={{ fontSize: 14, fontWeight: 500 }} onClick={() => navigate(`/catalog/assets/${a.id}`)}>{a.fqn}</a>

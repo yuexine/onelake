@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -38,6 +39,8 @@ public class Asset {
     @Column(length = 8)
     private String layer;         // ODS/DWD/DWS/ADS
 
+    private String domain;
+
     private String displayName;
 
     @Column(columnDefinition = "text")
@@ -45,13 +48,36 @@ public class Asset {
 
     private UUID ownerId;
 
+    private String ownerName;
+
     @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
     private String tags;
+
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String columns;
 
     @Column(length = 8)
     private String classification;     // L1/L2/L3/L4 密级
 
     private java.math.BigDecimal qualityScore;
+
+    private Integer popularity = 0;
+
+    private Integer accessCount = 0;
+
+    private Long rowCount;
+
+    private Long sizeBytes;
+
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String partitions;
+
+    private String format;
+
+    private Instant lastSyncAt;
 
     private Instant syncedAt = Instant.now();
 }

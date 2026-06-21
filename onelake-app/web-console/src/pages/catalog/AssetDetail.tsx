@@ -5,19 +5,28 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { Table, Tag, Space, Button, Typography, message } from 'antd';
 import { DatabaseOutlined, BranchesOutlined, SafetyOutlined, AppstoreOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { lakehouseAssets, metadataChanges, accessGrants } from '../../mock';
 import { DetailPageLayout, ClassificationBadge, StatusBadge, SectionCard } from '../../components';
 import { AccessApplyDrawer } from './_AccessApplyDrawer';
+import { CatalogAPI } from '../../api';
+import type { Asset } from '../../types';
 
 const { Text } = Typography;
 
 export default function AssetDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const asset = lakehouseAssets.find((a) => a.id === id) || lakehouseAssets[1];
+  const [asset, setAsset] = useState<Asset>(() => lakehouseAssets.find((a) => a.id === id) || lakehouseAssets[1]);
   const [applyOpen, setApplyOpen] = useState(false);
   const myGrant = accessGrants.find((g) => g.assetFqn === asset.fqn);
+
+  useEffect(() => {
+    if (!id) return;
+    CatalogAPI.getAsset(id)
+      .then(setAsset)
+      .catch(() => message.error('资产详情加载失败，已显示本地示例数据'));
+  }, [id]);
 
   const tabs = [
     { key: 'overview', label: '概览', children: (
@@ -49,7 +58,9 @@ export default function AssetDetail() {
             { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
             { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
             { title: '描述', dataIndex: 'description' },
+            { title: 'PII类型', dataIndex: 'piiType', render: (v: string) => v || '-' },
             { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+            { title: '建议密级', dataIndex: 'suggestLevel', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
             { title: '枚举分布', render: () => <Text type="secondary" style={{ fontSize: 12 }}>1000+ 唯一值</Text> },
           ]} />
       </SectionCard>

@@ -2,13 +2,15 @@
  * 分层表浏览（对应原型 §8.3.1 升级版）。
  *   左侧分层/域树 + 右侧表清单
  */
-import { Row, Col, Tree, Table, Tag, Space, Button, Input, Typography } from 'antd';
+import { Row, Col, Tree, Table, Tag, Space, Button, Input, Typography, message } from 'antd';
 import { PlusOutlined, ClusterOutlined, ApartmentOutlined, TableOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { lakehouseAssets } from '../../mock';
 import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../components';
 import type { Asset } from '../../types';
+import { CatalogAPI } from '../../api';
+import { normalizeCatalogAssets } from './assetAdapter';
 
 const { Text } = Typography;
 
@@ -21,23 +23,40 @@ const LAYER_COLOR: Record<string, { bg: string; fg: string }> = {
 
 export default function Tables() {
   const navigate = useNavigate();
+  const [assets, setAssets] = useState<Asset[]>(lakehouseAssets);
+  const [loading, setLoading] = useState(true);
   const [layer, setLayer] = useState<string>();
   const [domain, setDomain] = useState<string>();
   const [keyword, setKeyword] = useState('');
 
-  const rows = lakehouseAssets.filter((a) =>
+  const loadAssets = () => {
+    setLoading(true);
+    CatalogAPI.listAssets()
+      .then((items) => setAssets(normalizeCatalogAssets(items)))
+      .catch((e) => {
+        setAssets(lakehouseAssets);
+        message.error(e.message || '分层表资产加载失败，已显示本地示例数据');
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadAssets();
+  }, []);
+
+  const rows = assets.filter((a) =>
     (!layer || a.layer === layer) &&
     (!domain || a.domain === domain) &&
-    (!keyword || a.fqn.includes(keyword) || a.name.includes(keyword))
+    (!keyword || a.fqn.includes(keyword) || a.name.includes(keyword) || a.columns.some((c) => c.name.includes(keyword)))
   );
 
   const counts = {
-    total: lakehouseAssets.length,
-    ods: lakehouseAssets.filter((a) => a.layer === 'ODS').length,
-    dwd: lakehouseAssets.filter((a) => a.layer === 'DWD').length,
-    dws: lakehouseAssets.filter((a) => a.layer === 'DWS').length,
-    ads: lakehouseAssets.filter((a) => a.layer === 'ADS').length,
-    sensitive: lakehouseAssets.filter((a) => a.classification === 'L3' || a.classification === 'L4').length,
+    total: assets.length,
+    ods: assets.filter((a) => a.layer === 'ODS').length,
+    dwd: assets.filter((a) => a.layer === 'DWD').length,
+    dws: assets.filter((a) => a.layer === 'DWS').length,
+    ads: assets.filter((a) => a.layer === 'ADS').length,
+    sensitive: assets.filter((a) => a.classification === 'L3' || a.classification === 'L4').length,
   };
 
   return (
@@ -60,10 +79,10 @@ export default function Tables() {
             <Tree
               defaultExpandAll
               treeData={[
-                { title: '贴源 ODS', key: 'ODS', children: lakehouseAssets.filter((a) => a.layer === 'ODS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
-                { title: '明细 DWD', key: 'DWD', children: lakehouseAssets.filter((a) => a.layer === 'DWD').map((a) => ({ title: <Space>{a.name}<ClassificationBadge level={a.classification} size="small" /></Space>, key: a.id, isLeaf: true })) },
-                { title: '汇总 DWS', key: 'DWS', children: lakehouseAssets.filter((a) => a.layer === 'DWS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
-                { title: '应用 ADS', key: 'ADS', children: lakehouseAssets.filter((a) => a.layer === 'ADS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
+                { title: '贴源 ODS', key: 'ODS', children: assets.filter((a) => a.layer === 'ODS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
+                { title: '明细 DWD', key: 'DWD', children: assets.filter((a) => a.layer === 'DWD').map((a) => ({ title: <Space>{a.name}<ClassificationBadge level={a.classification} size="small" /></Space>, key: a.id, isLeaf: true })) },
+                { title: '汇总 DWS', key: 'DWS', children: assets.filter((a) => a.layer === 'DWS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
+                { title: '应用 ADS', key: 'ADS', children: assets.filter((a) => a.layer === 'ADS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
               ]}
               onSelect={(keys, info) => {
                 const node = info.node;
@@ -103,6 +122,7 @@ export default function Tables() {
             <Table
               rowKey="id"
               dataSource={rows}
+              loading={loading}
               locale={{
                 emptyText: (
                   <StateView
@@ -123,15 +143,15 @@ export default function Tables() {
                   const c = LAYER_COLOR[l] || LAYER_COLOR.ODS;
                   return <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: c.bg, color: c.fg }}>{l}</span>;
                 } },
-                { title: '行数', dataIndex: 'rows', align: 'right' as const, render: (v?: number) => v ? <span className="mono tnum">{v.toLocaleString()}</span> : '-' },
-                { title: '大小', dataIndex: 'sizeBytes', render: (v?: number) => v ? <span className="mono">{(v / 1e9).toFixed(2)} GB</span> : '-' },
-                { title: '质量分', dataIndex: 'qualityScore', width: 90, render: (v?: number) => v ? (
+                { title: '行数', dataIndex: 'rows', align: 'right' as const, render: (v?: number) => v == null ? '-' : <span className="mono tnum">{v.toLocaleString()}</span> },
+                { title: '大小', dataIndex: 'sizeBytes', render: (v?: number) => v == null ? '-' : <span className="mono">{(v / 1e9).toFixed(2)} GB</span> },
+                { title: '质量分', dataIndex: 'qualityScore', width: 90, render: (v?: number) => v == null ? '-' : (
                   <span style={{
                     padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
                     background: v > 90 ? 'var(--ol-success-soft)' : v > 80 ? 'var(--ol-warning-soft)' : 'var(--ol-error-soft)',
                     color: v > 90 ? 'var(--ol-success)' : v > 80 ? '#B45309' : 'var(--ol-error)',
                   }}>{v}</span>
-                ) : '-' },
+                ) },
                 { title: '密级', dataIndex: 'classification', width: 110, render: (c: string) => <ClassificationBadge level={c as any} /> },
                 { title: '负责人', dataIndex: 'ownerName', width: 100 },
               ]}

@@ -1,11 +1,15 @@
 COMPOSE := docker compose -f docker-compose.yml
 MVN := mvn -q
 
-.PHONY: up down ps logs seed migrate backend debug frontend dev clean help fmt
+.PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down down ps logs seed migrate backend debug frontend dev clean help fmt
 
 help:
 	@echo "OneLake 控制面 - 本地开发 Makefile"
-	@echo "  make up          启动数据面底座（postgres/redis/minio/trino/keycloak/...）"
+	@echo "  make up          启动 Compose 数据面（不含 Airbyte；Airbyte 用 abctl）"
+	@echo "  make up-core     启动控制面最小依赖（postgres/redis/minio/keycloak）"
+	@echo "  make dagster-up  构建并启动 Dagster webserver/daemon/code-location"
+	@echo "  make airbyte-up  使用 abctl 启动本地 Airbyte（默认 http://localhost:8000）"
+	@echo "  make airbyte-status / airbyte-credentials / airbyte-down"
 	@echo "  make down        停止并清理数据面"
 	@echo "  make ps          查看容器状态"
 	@echo "  make logs        跟踪数据面日志"
@@ -20,7 +24,31 @@ help:
 up:
 	$(COMPOSE) up -d
 	@echo "waiting for postgres..." && sleep 5
-	@echo "数据面已启动。访问: MinIO=9001  Trino=8080  Keycloak=8081  OpenMetadata=8585"
+	@echo "Compose 数据面已启动。访问: MinIO=9001  Trino=8080  Keycloak=8081  OpenMetadata=8585  Dagster=3000"
+	@echo "Airbyte 不再由 docker-compose 管理，请使用: make airbyte-up"
+
+up-core:
+	$(COMPOSE) up -d postgres redis minio keycloak
+	@echo "控制面最小依赖已启动。访问: MinIO=9001  Keycloak=8081"
+
+dagster-up:
+	$(COMPOSE) up -d --build dagster-postgres dagster-user-code dagster-webserver dagster-daemon
+	@echo "Dagster 已启动。访问: http://localhost:3000"
+
+dagster-down:
+	$(COMPOSE) stop dagster-daemon dagster-webserver dagster-user-code dagster-postgres
+
+airbyte-up:
+	./scripts/airbyte-local.sh install
+
+airbyte-status:
+	./scripts/airbyte-local.sh status
+
+airbyte-credentials:
+	./scripts/airbyte-local.sh credentials
+
+airbyte-down:
+	./scripts/airbyte-local.sh uninstall
 
 down:
 	$(COMPOSE) down

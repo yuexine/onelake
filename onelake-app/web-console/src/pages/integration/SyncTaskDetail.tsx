@@ -5,11 +5,12 @@
  */
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Table, Tag, Space, Button, message, Typography,
+  Table, Tag, Space, Button, message, Typography, Modal, Tooltip,
 } from 'antd';
 import {
   PauseCircleOutlined, EditOutlined, ReloadOutlined, CloudSyncOutlined,
   FieldTimeOutlined, NodeIndexOutlined, ApartmentOutlined, BranchesOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import {
@@ -34,6 +35,11 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
       <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
     </svg>
   );
+}
+
+function formatThroughput(value?: number) {
+  if (value == null || value <= 0) return '-';
+  return `${value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}/s`;
 }
 
 export default function SyncTaskDetail() {
@@ -61,6 +67,10 @@ export default function SyncTaskDetail() {
   }, [id]);
 
   const handleTrigger = () => {
+    if (task.status !== 'ENABLED') {
+      message.warning('任务启用后才能触发运行，请先发布任务');
+      return;
+    }
     IntegrationAPI.triggerSyncTask(task.id)
       .then(() => {
         message.success('已触发运行');
@@ -69,7 +79,20 @@ export default function SyncTaskDetail() {
       .catch((e) => message.error(e.message || '触发运行失败'));
   };
 
+  const handleEnable = () => {
+    IntegrationAPI.enableSyncTask(task.id)
+      .then((next) => {
+        setTask(next);
+        message.success('任务已启用');
+      })
+      .catch((e) => message.error(e.message || '任务启用失败'));
+  };
+
   const handleDisable = () => {
+    if (task.status !== 'ENABLED') {
+      message.warning('只有已启用任务可以暂停');
+      return;
+    }
     IntegrationAPI.disableSyncTask(task.id)
       .then((next) => {
         setTask(next);
@@ -78,9 +101,65 @@ export default function SyncTaskDetail() {
       .catch((e) => message.error(e.message || '暂停失败'));
   };
 
+  const handleDryRun = () => {
+    IntegrationAPI.dryRunSyncTask(task.id)
+      .then((report) => {
+        if (report.ready) {
+          message.success('试跑检查通过');
+          return;
+        }
+        const failed = report.checks.filter((item) => !item.passed);
+        message.warning(failed.map((item) => `${item.label}: ${item.message}`).join('；') || '试跑检查未通过');
+      })
+      .catch((e) => message.error(e.message || '试跑检查失败'));
+  };
+
+  const handleViewLogs = (run: SyncRun) => {
+    IntegrationAPI.getSyncRunLogs(run.id)
+      .then((logs) => {
+        Modal.info({
+          title: `运行日志 · ${run.id}`,
+          width: 760,
+          content: (
+            <pre style={{ maxHeight: 420, overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}>
+              {logs.map((line) => `[${line.level}] ${line.message}`).join('\n') || '暂无日志'}
+            </pre>
+          ),
+        });
+      })
+      .catch((e) => message.error(e.message || '日志加载失败'));
+  };
+
+  const handleCancelRun = (run: SyncRun) => {
+    IntegrationAPI.cancelSyncRun(run.id)
+      .then(() => {
+        message.success('已提交取消');
+        loadTask();
+      })
+      .catch((e) => message.error(e.message || '取消运行失败'));
+  };
+
   const successRate = runs.length > 0
     ? Math.round(runs.filter((r) => r.status === 'SUCCEEDED').length / runs.length * 100)
     : 100;
+  const taskActions = task.status === 'ENABLED'
+    ? [
+      <Button key="dry-run" icon={<PlayCircleOutlined />} onClick={handleDryRun}>试跑</Button>,
+      <Button key="run" type="primary" icon={<ReloadOutlined />} onClick={handleTrigger}>触发运行</Button>,
+      <Button key="pause" icon={<PauseCircleOutlined />} onClick={handleDisable}>暂停</Button>,
+      <Button key="edit" icon={<EditOutlined />}>编辑</Button>,
+    ]
+    : [
+      <Button key="dry-run" icon={<PlayCircleOutlined />} onClick={handleDryRun}>试跑</Button>,
+      <Button key="enable" type="primary" icon={<CloudSyncOutlined />} onClick={handleEnable}>
+        {task.status === 'DRAFT' ? '发布任务' : '启用任务'}
+      </Button>,
+      <Tooltip key="run-disabled-tip" title="任务启用后才能触发运行">
+        <span><Button icon={<ReloadOutlined />} disabled>触发运行</Button></span>
+      </Tooltip>,
+      <Button key="pause" icon={<PauseCircleOutlined />} disabled>暂停</Button>,
+      <Button key="edit" icon={<EditOutlined />}>编辑</Button>,
+    ];
 
   const tabs = [
     {
@@ -168,10 +247,14 @@ export default function SyncTaskDetail() {
                 <span className="mono tnum">{v.toLocaleString()}</span>
               ) },
               { title: '耗时', dataIndex: 'durationMs', render: (d?: number) => d ? `${(d/1000).toFixed(1)}s` : '-' },
-              { title: '吞吐', dataIndex: 'throughputRows', render: (t?: number) => t ? `${t.toLocaleString()}/s` : '-' },
+              { title: '吞吐', dataIndex: 'throughputRows', render: (t?: number) => formatThroughput(t) },
               { title: '操作', render: (_: unknown, r: any) => (
-                <Button size="small" type="link"
-                  onClick={() => navigate(`/integration/sync-tasks/${task.id}/runs/${r.id}`)}>日志</Button>
+                <Space size={4}>
+                  <Button size="small" type="link" onClick={() => handleViewLogs(r)}>日志</Button>
+                  {(r.status === 'RUNNING' || r.status === 'QUEUED') && (
+                    <Button size="small" type="link" danger onClick={() => handleCancelRun(r)}>取消</Button>
+                  )}
+                </Space>
               ) },
             ]}
           />
@@ -203,11 +286,7 @@ export default function SyncTaskDetail() {
       status={<StatusBadge status={task.status} />}
       breadcrumb={[{ path: '/integration/sync-tasks', label: '采集任务' }, { label: task.name }]}
       tabs={tabs}
-      actions={[
-        <Button key="run" type="primary" icon={<ReloadOutlined />} onClick={handleTrigger}>触发运行</Button>,
-        <Button key="pause" icon={<PauseCircleOutlined />} onClick={handleDisable}>暂停</Button>,
-        <Button key="edit" icon={<EditOutlined />}>编辑</Button>,
-      ]}
+      actions={taskActions}
       meta={[
         { label: '源', value: task.sourceName },
         { label: '模式', value: task.mode },

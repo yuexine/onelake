@@ -3,8 +3,10 @@ package com.onelake.integration.api;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
 import com.onelake.integration.api.vo.UpdateSyncTaskVO;
+import com.onelake.integration.dto.SyncRunLogDTO;
 import com.onelake.integration.dto.SyncRunDTO;
 import com.onelake.integration.dto.SyncTaskDTO;
+import com.onelake.integration.dto.SyncTaskDryRunDTO;
 import com.onelake.integration.service.SyncTaskService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -74,6 +76,18 @@ public class SyncTaskController {
         return ApiResponse.ok(service.disable(id));
     }
 
+    @PostMapping("/dry-run")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncTaskDryRunDTO> dryRunDraft(@Valid @RequestBody CreateSyncTaskVO vo) {
+        return ApiResponse.ok(service.dryRun(vo));
+    }
+
+    @PostMapping("/{id}/dry-run")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncTaskDryRunDTO> dryRun(@PathVariable UUID id) {
+        return ApiResponse.ok(service.dryRun(id));
+    }
+
     @PostMapping("/{id}/run")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<java.util.Map<String, Object>> run(@PathVariable UUID id) {
@@ -93,6 +107,22 @@ public class SyncTaskController {
     public ApiResponse<Void> reconcile(@PathVariable UUID runId) {
         service.reconcile(runId);
         return ApiResponse.ok();
+    }
+
+    @GetMapping("/runs/{runId}")
+    public ApiResponse<SyncRunDTO> getRun(@PathVariable UUID runId) {
+        return ApiResponse.ok(service.getRun(runId));
+    }
+
+    @GetMapping("/runs/{runId}/logs")
+    public ApiResponse<List<SyncRunLogDTO>> logs(@PathVariable UUID runId) {
+        return ApiResponse.ok(service.logs(runId));
+    }
+
+    @PostMapping("/runs/{runId}/cancel")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<SyncRunDTO> cancel(@PathVariable UUID runId) {
+        return ApiResponse.ok(service.cancelRun(runId));
     }
 
     @GetMapping("/{id}/runs")

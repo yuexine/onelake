@@ -14,12 +14,15 @@ import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.client.discovery.DatabaseDiscoveryClient;
 import com.onelake.integration.client.ConnectivityTester;
+import com.onelake.integration.client.AirbyteSyncDriver;
 import com.onelake.integration.domain.entity.DataSource;
 import com.onelake.integration.domain.enums.DataSourceType;
 import com.onelake.integration.domain.enums.NetworkMode;
 import com.onelake.integration.domain.enums.Health;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.dto.DiscoveredColumnDTO;
+import com.onelake.integration.dto.AirbyteConnectorDefinitionDTO;
+import com.onelake.integration.dto.AirbyteConnectorSpecDTO;
 import com.onelake.integration.mapper.DataSourceMapper;
 import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SyncTaskRepository;
@@ -55,6 +58,7 @@ public class DataSourceServiceImpl implements DataSourceService {
     private final ProjectRepository projectRepository;
     private final DataSourceConfigValidator configValidator;
     private final DatabaseDiscoveryClient databaseDiscoveryClient;
+    private final AirbyteSyncDriver airbyte;
 
     @Override
     @Transactional
@@ -225,6 +229,30 @@ public class DataSourceServiceImpl implements DataSourceService {
     public List<DiscoveredColumnDTO> describeTable(UUID id, String objectName) {
         DataSource ds = loadDatasourceForCurrentTenant(id);
         return databaseDiscoveryClient.describeTable(ds.getType(), configMap(ds), objectName);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<AirbyteConnectorDefinitionDTO> listAirbyteSourceDefinitions() {
+        return airbyte.listSourceDefinitions();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<AirbyteConnectorDefinitionDTO> listAirbyteDestinationDefinitions() {
+        return airbyte.listDestinationDefinitions();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public AirbyteConnectorSpecDTO getAirbyteSourceDefinitionSpec(String definitionId) {
+        return airbyte.getSourceDefinitionSpec(definitionId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public AirbyteConnectorSpecDTO getAirbyteDestinationDefinitionSpec(String definitionId) {
+        return airbyte.getDestinationDefinitionSpec(definitionId);
     }
 
     private DataSourceType parseDataSourceType(String type) {

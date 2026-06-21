@@ -61,6 +61,39 @@ export interface DiscoveredColumn {
   ordinalPosition: number;
 }
 
+export interface SyncTaskDryRunCheck {
+  code: string;
+  label: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface SyncTaskDryRunResult {
+  ready: boolean;
+  checks: SyncTaskDryRunCheck[];
+}
+
+export interface SyncRunLogLine {
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
+export interface AirbyteConnectorDefinition {
+  id: string;
+  name: string;
+  dockerRepository?: string;
+  dockerImageTag?: string;
+  type: 'SOURCE' | 'DESTINATION';
+}
+
+export interface AirbyteConnectorSpec {
+  definitionId: string;
+  type: 'SOURCE' | 'DESTINATION';
+  documentationUrl?: string;
+  connectionSpecification?: Record<string, unknown>;
+}
+
 export const SystemAPI = {
   context: () => unwrap<SystemContext>(http.get('/system/context')),
 
@@ -103,6 +136,22 @@ export const IntegrationAPI = {
       http.post('/integration/datasources/test-config', body),
     ),
 
+  listAirbyteSourceDefinitions: () =>
+    unwrap<AirbyteConnectorDefinition[]>(http.get('/integration/datasources/airbyte/source-definitions')),
+
+  listAirbyteDestinationDefinitions: () =>
+    unwrap<AirbyteConnectorDefinition[]>(http.get('/integration/datasources/airbyte/destination-definitions')),
+
+  getAirbyteSourceDefinitionSpec: (definitionId: string) =>
+    unwrap<AirbyteConnectorSpec>(
+      http.get(`/integration/datasources/airbyte/source-definitions/${definitionId}/spec`),
+    ),
+
+  getAirbyteDestinationDefinitionSpec: (definitionId: string) =>
+    unwrap<AirbyteConnectorSpec>(
+      http.get(`/integration/datasources/airbyte/destination-definitions/${definitionId}/spec`),
+    ),
+
   deleteDatasource: (id: string) =>
     unwrap<void>(http.delete(`/integration/datasources/${id}`)),
 
@@ -127,11 +176,26 @@ export const IntegrationAPI = {
   disableSyncTask: (id: string) =>
     unwrap<SyncTask>(http.post(`/integration/sync-tasks/${id}/disable`)),
 
+  dryRunSyncTaskDraft: (body: unknown) =>
+    unwrap<SyncTaskDryRunResult>(http.post('/integration/sync-tasks/dry-run', body)),
+
+  dryRunSyncTask: (id: string) =>
+    unwrap<SyncTaskDryRunResult>(http.post(`/integration/sync-tasks/${id}/dry-run`)),
+
   listSyncTasksBySource: (sourceId: string) =>
     unwrap<SyncTask[]>(http.get(`/integration/sync-tasks/by-source/${sourceId}`)),
 
   triggerSyncTask: (id: string) =>
     unwrap<{ runId: string }>(http.post(`/integration/sync-tasks/${id}/trigger`)),
+
+  getSyncRun: (runId: string) =>
+    unwrap<SyncRun>(http.get(`/integration/sync-tasks/runs/${runId}`)),
+
+  cancelSyncRun: (runId: string) =>
+    unwrap<SyncRun>(http.post(`/integration/sync-tasks/runs/${runId}/cancel`)),
+
+  getSyncRunLogs: (runId: string) =>
+    unwrap<SyncRunLogLine[]>(http.get(`/integration/sync-tasks/runs/${runId}/logs`)),
 
   listRuns: (taskId: string, page = 0, size = 20) =>
     unwrap<PageResult<SyncRun>>(http.get(`/integration/sync-tasks/${taskId}/runs`, { params: { page, size } })),

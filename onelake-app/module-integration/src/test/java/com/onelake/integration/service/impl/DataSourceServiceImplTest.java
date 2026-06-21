@@ -11,6 +11,7 @@ import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.ProbeDatabasesVO;
 import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
+import com.onelake.integration.client.AirbyteSyncDriver;
 import com.onelake.integration.client.ConnectivityTester;
 import com.onelake.integration.client.discovery.DatabaseDiscoveryClient;
 import com.onelake.integration.domain.entity.DataSource;
@@ -57,6 +58,7 @@ class DataSourceServiceImplTest {
     private AuditLogger audit;
     private ProjectRepository projectRepository;
     private DatabaseDiscoveryClient databaseDiscoveryClient;
+    private AirbyteSyncDriver airbyte;
     private DataSourceServiceImpl service;
 
     @BeforeEach
@@ -69,6 +71,7 @@ class DataSourceServiceImplTest {
         audit = mock(AuditLogger.class);
         projectRepository = mock(ProjectRepository.class);
         databaseDiscoveryClient = mock(DatabaseDiscoveryClient.class);
+        airbyte = mock(AirbyteSyncDriver.class);
         DataSourceMapper mapper = Mappers.getMapper(DataSourceMapper.class);
         service = new DataSourceServiceImpl(
             repo,
@@ -79,7 +82,8 @@ class DataSourceServiceImplTest {
             audit,
             projectRepository,
             new DataSourceConfigValidator(),
-            databaseDiscoveryClient
+            databaseDiscoveryClient,
+            airbyte
         );
         when(projectRepository.existsByTenantIdAndId(eq(TENANT_ID), any(UUID.class))).thenReturn(true);
     }

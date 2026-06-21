@@ -11,7 +11,7 @@
 | 维度 | 设计要求 | 实施结果 | 状态 |
 |------|---------|---------|------|
 | 控制面 | `onelake-app` 模块化单体（8 业务模块 + bootstrap） | 9 个 Maven 子模块 | ✅ 完成 |
-| 数据面 | 13 个开源组件 Docker 镜像 | `docker-compose.yml` 全部覆盖 | ✅ 完成 |
+| 数据面 | Compose 组件 + Airbyte 本地部署 | `docker-compose.yml` 覆盖 Compose 组件；Airbyte 改由 `abctl` 管理且本地入口已可访问 | ⚠ 待端到端联调 |
 | 数据库 | 单 PG + 9 schema（含 dataservice_api） | 8 个 schema Flyway 脚本（含审查补全表） | ✅ 完成 |
 | 前端 | React 18 + TS + Ant Design Pro | 工作台 + 集成模块完整 / 其余占位骨架 | ⚠ 部分 |
 | dbt | ODS→DWD→ADS 分层 + 质量门禁 | 工程骨架 + 示例模型 + 脱敏宏 | ✅ 完成 |
@@ -26,7 +26,8 @@
 |------|------------|------|
 | `onelake-app/pom.xml` | §3.2 父 POM 依赖版本锁定 | ✅ |
 | `onelake-app/Makefile` | §5.2 up/down/seed/migrate/backend/frontend/dev | ✅ |
-| `onelake-app/docker-compose.yml` | §6.1 数据面 13 组件 | ✅ |
+| `onelake-app/docker-compose.yml` | §6.1 数据面 Compose 组件；Dagster 为 webserver/daemon/code-location 多容器 | ✅ |
+| `onelake-app/scripts/airbyte-local.sh` | Airbyte 本地 `abctl` 管理入口 | ✅ `airbyte-abctl` / `ingress-nginx` 已 deployed，`http://localhost:8000` 返回 200 |
 | `onelake-app/.gitignore` | 通用 | ✅ |
 | `scripts/postgres-init.sql` | §7.1 pgcrypto + web_anon 角色 | ✅ |
 | `scripts/keycloak-realm.sh` | §5.2 seed 目标 + §八 校验 #2 | ✅ |
@@ -68,7 +69,7 @@
 |------|----|------|
 | module-common/api | `SystemContextController` | `/api/v1/system/context`、`/api/v1/system/projects`，提供当前租户和项目选项 |
 | api | `DataSourceController` | `/api/v1/integration/datasources` CRUD + 已保存/未保存配置测连 + 库/schema/table/column 探查 |
-| api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/发布/暂停/触发/历史 |
+| api | `SyncTaskController` | `/api/v1/integration/sync-tasks` 创建/发布/暂停/试跑/触发/历史/运行详情/日志/取消 |
 | api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `TestDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
 | service | `DataSourceService` / `SyncTaskService` | 用例编排接口 |
 | service/impl | `DataSourceServiceImpl` / `SyncTaskServiceImpl` | 事务边界 + Outbox + 审计 |
@@ -78,9 +79,10 @@
 | repository | 4 个 JPA Repository | |
 | client | `ConnectivityTester` | TCP + JDBC 双探活（NET/AUTH/DRV 分类） |
 | client/discovery | `DatabaseDiscoveryClient` + `DataSourceDiscoveryStrategy` | 门面按数据源类型分发探查策略；MySQL/PostgreSQL 独立实现 schema/table/columns 探查，支持采集向导真实选表和字段映射 |
-| client | `AirbyteSyncDriver` | Airbyte `/connections/list` + `/connections/create` + `/connections/sync` + `/jobs/get` + `/jobs/cancel` |
+| client | `AirbyteSyncDriver` | Airbyte source/destination/connection 准备、同步触发、job snapshot、运行日志、取消 |
+| client | `DagsterScheduleClient` | 启用/暂停采集任务时向 Dagster reconciliation job 传递调度登记/撤销意图，默认关闭不阻断发布 |
 | mapper | `DataSourceMapper` / `SyncTaskMapper` | MapStruct |
-| dto | `DataSourceDTO` / `SyncTaskDTO` / `SyncRunDTO` / `DiscoveredColumnDTO` | 对外 DTO（不暴露 config 中的密码） |
+| dto | `DataSourceDTO` / `SyncTaskDTO` / `SyncRunDTO` / `DiscoveredColumnDTO` / `SyncTaskDryRunDTO` / `SyncRunLogDTO` / `AirbyteConnectorDefinitionDTO` / `AirbyteConnectorSpecDTO` | 对外 DTO（不暴露 config 中的密码） |
 
 ---
 
@@ -247,7 +249,7 @@
 | ① `docker compose up -d` 全部组件健康 | ⚠ 待用户实机启动验证（compose 已就绪） |
 | ② Keycloak onelake realm + 5 角色 + onelake-app 客户端 | ✅ `scripts/keycloak-realm.sh` |
 | ③ `make migrate` Flyway 8 schema 建表 | ✅ 8 个 V1__*.sql 已就绪 |
-| ④ Airbyte → Iceberg ODS → sync_run 回写 | ✅ AirbyteSyncDriver 已实现（待 Airbyte 实际部署） |
+| ④ Airbyte → ODS → sync_run 回写 | ✅ 已完成真实本地实证：Postgres 源表 3 行经 Airbyte job `2` 同步到 `onelake_lake.ods_airbyte.codex_orders`，`sync_run` 回写 `rowsRead=3`、`rowsWritten=3` |
 | ⑤ dbt run 产出 ads_order_gmv_daily + 质量门禁 | ✅ 模型 + schema.yml 已就绪 |
 | ⑥ OpenMetadata 资产 → catalog.asset | ✅ CatalogSyncService 已实现 |
 | ⑦ PostgREST 视图 + APISIX key-auth + limit-req | ✅ DataServicePublisher 已实现 |

@@ -16,5 +16,7 @@ public interface SyncRunRepository extends JpaRepository<SyncRun, UUID>, JpaSpec
 
     List<SyncRun> findByTaskId(UUID taskId);
 
+    List<SyncRun> findByTaskIdAndStatusIn(UUID taskId, List<RunStatus> statuses);
+
     boolean existsByTaskIdAndStatus(UUID taskId, RunStatus status);
 }

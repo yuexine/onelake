@@ -62,14 +62,27 @@ export default function SyncTaskList() {
 
   const { run, isLoading } = useAsyncAction();
 
-  const handleTrigger = (id: string, name: string) => {
-    run(`trigger-${id}`, async () => {
-      return IntegrationAPI.triggerSyncTask(id);
+  const handleTrigger = (task: SyncTask) => {
+    if (task.status !== 'ENABLED') {
+      message.warning('任务启用后才能触发运行，请先发布任务');
+      return;
+    }
+    run(`trigger-${task.id}`, async () => {
+      return IntegrationAPI.triggerSyncTask(task.id);
     }, {
-      successMsg: `已触发 ${name} · runId 已生成`,
+      successMsg: `已触发 ${task.name} · runId 已生成`,
       errorMsg: `触发失败，请检查任务状态`,
       duration: 2.5,
     });
+  };
+
+  const handleEnable = (r: SyncTask) => {
+    IntegrationAPI.enableSyncTask(r.id)
+      .then((next) => {
+        setSyncTasks((rows) => rows.map((item) => item.id === next.id ? next : item));
+        message.success('任务已启用');
+      })
+      .catch((e) => message.error(e.message || '任务启用失败'));
   };
 
   const handleDisable = (r: SyncTask) => {
@@ -146,19 +159,27 @@ export default function SyncTaskList() {
       render: (r?: number) => r ? <span className="mono ol-quiet" style={{ fontSize: 12 }}>{r} rows/s</span> : <span className="ol-quiet">-</span>,
     },
     {
-      title: '操作', key: 'actions', width: 130, fixed: 'right' as const,
+      title: '操作', key: 'actions', width: 170, fixed: 'right' as const,
       render: (_: unknown, r: any) => (
         <Space size={2}>
-          <Tooltip title="触发运行">
-            <Button
-              size="small" type="text"
-              icon={<PlayCircleOutlined style={{ color: 'var(--ol-success)' }} />}
-              loading={isLoading(`trigger-${r.id}`)}
-              onClick={() => handleTrigger(r.id, r.name)}
-            />
+          <Tooltip title={r.status === 'ENABLED' ? '触发运行' : '任务启用后才能触发运行'}>
+            <span>
+              <Button
+                size="small" type="text"
+                icon={<PlayCircleOutlined style={{ color: r.status === 'ENABLED' ? 'var(--ol-success)' : undefined }} />}
+                loading={isLoading(`trigger-${r.id}`)}
+                disabled={r.status !== 'ENABLED'}
+                onClick={() => handleTrigger(r)}
+              />
+            </span>
           </Tooltip>
+          {r.status !== 'ENABLED' && (
+            <Button size="small" type="link" onClick={() => handleEnable(r)}>
+              {r.status === 'DRAFT' ? '发布' : '启用'}
+            </Button>
+          )}
           <Tooltip title="暂停">
-            <Button size="small" type="text" icon={<PauseCircleOutlined />} onClick={() => handleDisable(r)} />
+            <Button size="small" type="text" icon={<PauseCircleOutlined />} disabled={r.status !== 'ENABLED'} onClick={() => handleDisable(r)} />
           </Tooltip>
           <Button size="small" type="link" onClick={() => navigate(`/integration/sync-tasks/${r.id}`)}>详情</Button>
           <Dropdown trigger={['click']} menu={{

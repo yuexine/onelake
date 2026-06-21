@@ -44,6 +44,9 @@ public class SyncTask {
     private SyncMode mode;
 
     @Column(nullable = false)
+    private String sourceTable;
+
+    @Column(nullable = false)
     private String targetTable;
 
     @Column(columnDefinition = "jsonb")

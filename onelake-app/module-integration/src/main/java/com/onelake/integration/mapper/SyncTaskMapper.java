@@ -35,6 +35,7 @@ public interface SyncTaskMapper {
             sourceName,
             entity.getName(),
             fromMode(entity.getMode()),
+            entity.getSourceTable(),
             entity.getTargetTable(),
             fieldMapping(entity.getFieldMapping()),
             entity.getScheduleCron(),

@@ -22,11 +22,11 @@ const ordersMapping: FieldMapping[] = [
 ];
 
 export const syncTasks: SyncTask[] = [
-  { id: 'st-001', sourceId: 'ds-001', sourceName: '订单库', name: 'orders_sync', mode: 'INCREMENTAL', targetTable: 'ods.orders', fieldMapping: ordersMapping, scheduleCron: '0 2 * * *', rateLimit: 2500, dirtyThreshold: 0, status: 'ENABLED', airbyteConnectionId: 'abc-001', createdAt: '2026-03-01T11:00:00Z' },
-  { id: 'st-002', sourceId: 'ds-001', sourceName: '订单库', name: 'order_items_sync', mode: 'INCREMENTAL', targetTable: 'ods.order_items', scheduleCron: '0 2 * * *', rateLimit: 2500, status: 'ENABLED', createdAt: '2026-03-01T11:00:00Z' },
-  { id: 'st-003', sourceId: 'ds-002', sourceName: '用户库', name: 'user_cdc', mode: 'CDC', targetTable: 'ods.users', scheduleCron: '', status: 'ENABLED', createdAt: '2026-03-02T10:00:00Z' },
-  { id: 'st-004', sourceId: 'ds-003', sourceName: '日志-S3', name: 'logs_file', mode: 'FILE', targetTable: 'ods.access_log', status: 'ENABLED', createdAt: '2026-04-01T08:30:00Z' },
-  { id: 'st-005', sourceId: 'ds-004', sourceName: '风控-Hive', name: 'risk_events', mode: 'FULL', targetTable: 'ods.risk_events', scheduleCron: '0 4 * * 1', status: 'DRAFT', createdAt: '2026-03-15T11:00:00Z' },
+  { id: 'st-001', sourceId: 'ds-001', sourceName: '订单库', name: 'orders_sync', mode: 'INCREMENTAL', sourceTable: 'order_db.orders', targetTable: 'ods.orders', fieldMapping: ordersMapping, scheduleCron: '0 2 * * *', rateLimit: 2500, dirtyThreshold: 0, status: 'ENABLED', airbyteConnectionId: 'abc-001', createdAt: '2026-03-01T11:00:00Z' },
+  { id: 'st-002', sourceId: 'ds-001', sourceName: '订单库', name: 'order_items_sync', mode: 'INCREMENTAL', sourceTable: 'order_db.order_items', targetTable: 'ods.order_items', scheduleCron: '0 2 * * *', rateLimit: 2500, status: 'ENABLED', createdAt: '2026-03-01T11:00:00Z' },
+  { id: 'st-003', sourceId: 'ds-002', sourceName: '用户库', name: 'user_cdc', mode: 'CDC', sourceTable: 'public.users', targetTable: 'ods.users', scheduleCron: '', status: 'ENABLED', createdAt: '2026-03-02T10:00:00Z' },
+  { id: 'st-004', sourceId: 'ds-003', sourceName: '日志-S3', name: 'logs_file', mode: 'FILE', sourceTable: 'access-log/access_log', targetTable: 'ods.access_log', status: 'ENABLED', createdAt: '2026-04-01T08:30:00Z' },
+  { id: 'st-005', sourceId: 'ds-004', sourceName: '风控-Hive', name: 'risk_events', mode: 'FULL', sourceTable: 'risk.risk_events', targetTable: 'ods.risk_events', scheduleCron: '0 4 * * 1', status: 'DRAFT', createdAt: '2026-03-15T11:00:00Z' },
 ];
 
 export const syncRuns: SyncRun[] = [

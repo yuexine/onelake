@@ -48,6 +48,7 @@ export default function SyncTaskWizard() {
   const [scheduleCron, setScheduleCron] = useState('0 2 * * *');
   const [rateLimit, setRateLimit] = useState<number | null>(2500);
   const [saving, setSaving] = useState(false);
+  const [dryRunning, setDryRunning] = useState(false);
   const [dataSourceLoading, setDataSourceLoading] = useState(false);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [tableLoading, setTableLoading] = useState(false);
@@ -180,6 +181,7 @@ export default function SyncTaskWizard() {
     sourceId,
     name: `${targetTable.split('.').pop()}_${mode.toLowerCase()}`,
     mode,
+    sourceTable: selectedTable,
     targetTable,
     fieldMapping: mapping,
     scheduleCron: mode === 'CDC' ? '' : scheduleCron,
@@ -207,6 +209,25 @@ export default function SyncTaskWizard() {
       })
       .catch((e) => message.error(e.message || (publish ? '采集任务发布失败' : '草稿保存失败')))
       .finally(() => setSaving(false));
+  };
+
+  const dryRunTask = () => {
+    if (!canSubmit) {
+      message.warning('请先完成源连接、来源表和字段映射配置');
+      return;
+    }
+    setDryRunning(true);
+    IntegrationAPI.dryRunSyncTaskDraft(buildTaskBody())
+      .then((report) => {
+        if (report.ready) {
+          message.success('试跑检查通过，可以发布任务');
+          return;
+        }
+        const failed = report.checks.filter((item) => !item.passed);
+        message.warning(failed.map((item) => `${item.label}: ${item.message}`).join('；') || '试跑检查未通过');
+      })
+      .catch((e) => message.error(e.message || '试跑检查失败'))
+      .finally(() => setDryRunning(false));
   };
 
   const steps = [
@@ -469,7 +490,7 @@ export default function SyncTaskWizard() {
             )}
             {step === 3 && (
               <>
-                <Button icon={<PlayCircleOutlined />} onClick={() => message.warning('试跑功能将在运行闭环阶段接入')}>试跑</Button>
+                <Button icon={<PlayCircleOutlined />} loading={dryRunning} disabled={!canSubmit} onClick={dryRunTask}>试跑</Button>
                 <Button type="primary" loading={saving} disabled={!canSubmit} icon={<CheckOutlined />} onClick={() => saveTask(true)}>发布</Button>
               </>
             )}

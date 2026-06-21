@@ -11,6 +11,7 @@ public record SyncTaskDTO(
     String sourceName,
     String name,
     String mode,
+    String sourceTable,
     String targetTable,
     List<Map<String, Object>> fieldMapping,
     String scheduleCron,

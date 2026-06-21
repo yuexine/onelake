@@ -76,15 +76,31 @@ springdoc:
 onelake:
   webclient:
     connect-timeout-ms: 3000
-    read-timeout-ms: 15000
+    read-timeout-ms: 60000
   dataplane:
     airbyte:
       base-url: ${AIRBYTE_URL:http://localhost:8000/api/v1}
+      auth:
+        client-id: ${AIRBYTE_CLIENT_ID:}
+        client-secret: ${AIRBYTE_CLIENT_SECRET:}
+        token-path: ${AIRBYTE_TOKEN_PATH:/applications/token}
+      workspace-id: ${AIRBYTE_WORKSPACE_ID:}
+      destination-id: ${AIRBYTE_DESTINATION_ID:}
+      destination-definition-id: ${AIRBYTE_DESTINATION_DEFINITION_ID:}
+      destination-config: ${AIRBYTE_DESTINATION_CONFIG:{}}
+      source-definitions:
+        mysql: ${AIRBYTE_MYSQL_SOURCE_DEFINITION_ID:}
+        postgres: ${AIRBYTE_POSTGRES_SOURCE_DEFINITION_ID:}
     dagster:
       graphql-url: ${DAGSTER_GRAPHQL_URL:http://localhost:3000/graphql}
+      schedule-enabled: ${DAGSTER_SCHEDULE_ENABLED:false}
+      repository-name: ${DAGSTER_REPOSITORY_NAME:onelake}
+      location-name: ${DAGSTER_LOCATION_NAME:onelake-loc}
+      schedule-reconcile-job: ${DAGSTER_SCHEDULE_RECONCILE_JOB:onelake_sync_task_schedule_reconcile}
     openmetadata:
       base-url: ${OPENMETADATA_URL:http://localhost:8585/api/v1}
       token: ${OM_TOKEN:}
+      writeback-enabled: ${OPENMETADATA_WRITEBACK_ENABLED:false}
     trino:
       jdbc-url: ${TRINO_JDBC_URL:jdbc:trino://localhost:18080/iceberg}
       user: ${TRINO_USER:onelake}

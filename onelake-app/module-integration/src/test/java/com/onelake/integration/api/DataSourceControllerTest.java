@@ -1,6 +1,7 @@
 package com.onelake.integration.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.onelake.common.util.JsonUtil;
 import com.onelake.integration.api.vo.ConnectivityResult;
 import com.onelake.integration.api.vo.CreateDataSourceVO;
 import com.onelake.integration.api.vo.DatabaseProbeResult;
@@ -9,6 +10,8 @@ import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.dto.DiscoveredColumnDTO;
+import com.onelake.integration.dto.AirbyteConnectorDefinitionDTO;
+import com.onelake.integration.dto.AirbyteConnectorSpecDTO;
 import com.onelake.integration.service.DataSourceService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -202,6 +205,58 @@ class DataSourceControllerTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.ok").value(true))
             .andExpect(jsonPath("$.data.rttMillis").value(8));
+    }
+
+    @Test
+    void airbyteConnectorEndpointsReturnDefinitionsAndSpec() throws Exception {
+        AirbyteConnectorDefinitionDTO source = new AirbyteConnectorDefinitionDTO(
+            "src-def-1",
+            "Postgres",
+            "airbyte/source-postgres",
+            "1.0.0",
+            "SOURCE"
+        );
+        AirbyteConnectorDefinitionDTO destination = new AirbyteConnectorDefinitionDTO(
+            "dst-def-1",
+            "S3",
+            "airbyte/destination-s3",
+            "1.0.0",
+            "DESTINATION"
+        );
+        when(service.listAirbyteSourceDefinitions()).thenReturn(List.of(source));
+        when(service.listAirbyteDestinationDefinitions()).thenReturn(List.of(destination));
+        when(service.getAirbyteSourceDefinitionSpec("src-def-1")).thenReturn(new AirbyteConnectorSpecDTO(
+            "src-def-1",
+            "SOURCE",
+            "https://docs.airbyte.com",
+            JsonUtil.mapper().createObjectNode().put("title", "Postgres Source")
+        ));
+        when(service.getAirbyteDestinationDefinitionSpec("dst-def-1")).thenReturn(new AirbyteConnectorSpecDTO(
+            "dst-def-1",
+            "DESTINATION",
+            "https://docs.airbyte.com",
+            JsonUtil.mapper().createObjectNode().put("title", "S3 Destination")
+        ));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/airbyte/source-definitions"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].id").value("src-def-1"))
+            .andExpect(jsonPath("$.data[0].type").value("SOURCE"));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/airbyte/destination-definitions"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].id").value("dst-def-1"))
+            .andExpect(jsonPath("$.data[0].type").value("DESTINATION"));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/airbyte/source-definitions/{definitionId}/spec", "src-def-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.definitionId").value("src-def-1"))
+            .andExpect(jsonPath("$.data.connectionSpecification.title").value("Postgres Source"));
+
+        mockMvc.perform(get("/api/v1/integration/datasources/airbyte/destination-definitions/{definitionId}/spec", "dst-def-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.definitionId").value("dst-def-1"))
+            .andExpect(jsonPath("$.data.connectionSpecification.title").value("S3 Destination"));
     }
 
     private DataSourceDTO dto(UUID id, String name) {

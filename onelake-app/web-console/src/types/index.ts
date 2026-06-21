@@ -36,6 +36,7 @@ export interface SyncTask {
   sourceName: string;
   name: string;
   mode: SyncMode;
+  sourceTable: string;
   targetTable: string;
   fieldMapping?: FieldMapping[];
   scheduleCron?: string;
@@ -60,7 +61,7 @@ export interface SyncRun {
   id: UUID;
   taskId: UUID;
   externalJobId?: string;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
   rowsRead: number;
   rowsWritten: number;
   errorCode?: string;

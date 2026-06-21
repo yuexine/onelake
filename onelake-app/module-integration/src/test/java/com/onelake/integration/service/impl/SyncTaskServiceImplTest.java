@@ -9,6 +9,7 @@ import com.onelake.common.util.JsonUtil;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
 import com.onelake.integration.api.vo.UpdateSyncTaskVO;
 import com.onelake.integration.client.AirbyteSyncDriver;
+import com.onelake.integration.client.DagsterScheduleClient;
 import com.onelake.integration.domain.entity.DataSource;
 import com.onelake.integration.domain.entity.SyncRun;
 import com.onelake.integration.domain.entity.SyncTask;
@@ -18,6 +19,7 @@ import com.onelake.integration.domain.enums.SyncMode;
 import com.onelake.integration.domain.enums.TaskStatus;
 import com.onelake.integration.dto.SyncRunDTO;
 import com.onelake.integration.dto.SyncTaskDTO;
+import com.onelake.integration.dto.SyncTaskDryRunDTO;
 import com.onelake.integration.mapper.SyncTaskMapper;
 import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SyncRunRepository;
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mapstruct.factory.Mappers;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -40,9 +43,11 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,6 +59,7 @@ class SyncTaskServiceImplTest {
     private SyncRunRepository runRepo;
     private DataSourceRepository dsRepo;
     private AirbyteSyncDriver airbyte;
+    private DagsterScheduleClient dagsterSchedule;
     private AuditLogger audit;
     private OutboxPublisher outbox;
     private SyncTaskServiceImpl service;
@@ -65,10 +71,11 @@ class SyncTaskServiceImplTest {
         runRepo = mock(SyncRunRepository.class);
         dsRepo = mock(DataSourceRepository.class);
         airbyte = mock(AirbyteSyncDriver.class);
+        dagsterSchedule = mock(DagsterScheduleClient.class);
         audit = mock(AuditLogger.class);
         outbox = mock(OutboxPublisher.class);
         SyncTaskMapper mapper = Mappers.getMapper(SyncTaskMapper.class);
-        service = new SyncTaskServiceImpl(taskRepo, runRepo, dsRepo, mapper, airbyte, audit, outbox);
+        service = new SyncTaskServiceImpl(taskRepo, runRepo, dsRepo, mapper, airbyte, dagsterSchedule, audit, outbox);
     }
 
     @AfterEach
@@ -105,7 +112,11 @@ class SyncTaskServiceImplTest {
         assertThat(dto.status()).isEqualTo("DRAFT");
         assertThat(dto.mode()).isEqualTo("CDC");
         verify(audit).auditCreate("sync_task", dto.id(), null);
-        verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_TASK_CREATED), eq(dto.id().toString()), any(Map.class));
+        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_TASK_CREATED), eq(dto.id().toString()), payloadCaptor.capture());
+        assertThat(payloadCaptor.getValue()).containsEntry("targetTable", "ods.orders");
+        assertThat(payloadCaptor.getValue()).containsKey("fieldMapping");
+        assertThat((List<?>) payloadCaptor.getValue().get("fieldMapping")).hasSize(1);
     }
 
     @Test
@@ -158,6 +169,7 @@ class SyncTaskServiceImplTest {
         SyncTaskDTO dto = service.update(taskId, new UpdateSyncTaskVO(
             "orders-full",
             "full",
+            "public.orders",
             "dwd.orders",
             List.of(Map.of("source", "id", "target", "id")),
             "0 0 * * * ?",
@@ -177,7 +189,7 @@ class SyncTaskServiceImplTest {
         SyncTask enabled = task(UUID.randomUUID(), sourceId, TaskStatus.ENABLED);
         when(taskRepo.findById(enabled.getId())).thenReturn(Optional.of(enabled));
 
-        assertThatThrownBy(() -> service.update(enabled.getId(), new UpdateSyncTaskVO("x", null, null, null, null, null, null, null)))
+        assertThatThrownBy(() -> service.update(enabled.getId(), new UpdateSyncTaskVO("x", null, null, null, null, null, null, null, null)))
             .isInstanceOf(BizException.class)
             .hasMessage("已启用任务请先暂停再编辑");
     }
@@ -209,6 +221,8 @@ class SyncTaskServiceImplTest {
         SyncTask task = task(taskId, sourceId, TaskStatus.DRAFT);
         when(taskRepo.findById(taskId)).thenReturn(Optional.of(task));
         when(dsRepo.findById(sourceId)).thenReturn(Optional.of(datasource(sourceId, "orders-db")));
+        when(dagsterSchedule.registerOrUpdate(task)).thenReturn(true);
+        when(dagsterSchedule.disable(task)).thenReturn(true);
 
         assertThat(service.enable(taskId).status()).isEqualTo("ENABLED");
         assertThat(service.disable(taskId).status()).isEqualTo("PAUSED");
@@ -217,8 +231,10 @@ class SyncTaskServiceImplTest {
         when(runRepo.existsByTaskIdAndStatus(taskId, RunStatus.RUNNING)).thenReturn(false);
         service.delete(taskId);
 
-        verify(audit).audit("ENABLE", "sync_task", taskId.toString(), null);
-        verify(audit).audit("DISABLE", "sync_task", taskId.toString(), null);
+        verify(dagsterSchedule).registerOrUpdate(task);
+        verify(dagsterSchedule).disable(task);
+        verify(audit).audit(eq("ENABLE"), eq("sync_task"), eq(taskId.toString()), any(Map.class));
+        verify(audit).audit(eq("DISABLE"), eq("sync_task"), eq(taskId.toString()), any(Map.class));
         verify(audit).auditDelete("sync_task", taskId);
         verify(taskRepo).delete(task);
     }
@@ -240,13 +256,14 @@ class SyncTaskServiceImplTest {
         )));
         when(taskRepo.findById(taskId)).thenReturn(Optional.of(task));
         when(dsRepo.findById(sourceId)).thenReturn(Optional.of(ds));
-        when(airbyte.ensureConnection("ab-src", "ab-dst", "onelake-orders-cdc")).thenReturn("conn-new");
+        when(airbyte.ensureConnection(eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList()))
+            .thenReturn("conn-new");
 
         SyncTaskDTO dto = service.enable(taskId);
 
         assertThat(dto.status()).isEqualTo("ENABLED");
         assertThat(dto.airbyteConnectionId()).isEqualTo("conn-new");
-        verify(airbyte).ensureConnection("ab-src", "ab-dst", "onelake-orders-cdc");
+        verify(airbyte).ensureConnection(eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList());
     }
 
     @Test
@@ -285,7 +302,7 @@ class SyncTaskServiceImplTest {
         UUID runId = service.trigger(taskId);
 
         assertThat(runId).isNotNull();
-        verify(runRepo).save(any(SyncRun.class));
+        verify(runRepo, times(2)).save(any(SyncRun.class));
         verify(audit).audit(eq("TRIGGER"), eq("sync_task"), eq(taskId.toString()), any(Map.class));
         verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_RUN_STARTED), eq(runId.toString()), any(Map.class));
     }
@@ -293,23 +310,102 @@ class SyncTaskServiceImplTest {
     @Test
     void reconcileUpdatesTerminalStatusAndIgnoresDriverFailures() {
         UUID runId = UUID.randomUUID();
+        UUID taskId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        SyncRun run = new SyncRun();
+        run.setId(runId);
+        run.setTaskId(taskId);
+        run.setExternalJobId("987");
+        run.setStatus(RunStatus.RUNNING);
+        when(runRepo.findById(runId)).thenReturn(Optional.of(run));
+        when(taskRepo.findById(taskId)).thenReturn(Optional.of(task(taskId, sourceId, TaskStatus.ENABLED)));
+        when(airbyte.getJobSnapshot(987L)).thenReturn(new AirbyteSyncDriver.AirbyteJobSnapshot("succeeded", 120L, 4096L, null));
+
+        service.reconcile(runId);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.SUCCEEDED);
+        assertThat(run.getRowsRead()).isEqualTo(120L);
+        assertThat(run.getRowsWritten()).isEqualTo(120L);
+        assertThat(run.getFinishedAt()).isNotNull();
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_TABLE_LOADED), eq(runId.toString()), any(Map.class));
+
+        when(airbyte.getJobSnapshot(987L)).thenThrow(new RuntimeException("airbyte down"));
+        service.reconcile(runId);
+        assertThat(run.getStatus()).isEqualTo(RunStatus.SUCCEEDED);
+    }
+
+    @Test
+    void getRunRefreshesActiveAirbyteStatus() {
+        UUID runId = UUID.randomUUID();
+        UUID taskId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        SyncRun run = new SyncRun();
+        run.setId(runId);
+        run.setTaskId(taskId);
+        run.setExternalJobId("3");
+        run.setStatus(RunStatus.RUNNING);
+        run.setStartedAt(Instant.parse("2026-06-15T00:00:00Z"));
+        when(runRepo.findById(runId)).thenReturn(Optional.of(run));
+        when(taskRepo.findById(taskId)).thenReturn(Optional.of(task(taskId, sourceId, TaskStatus.ENABLED)));
+        when(airbyte.getJobSnapshot(3L)).thenReturn(new AirbyteSyncDriver.AirbyteJobSnapshot("succeeded", 3L, 900L, null));
+
+        SyncRunDTO dto = service.getRun(runId);
+
+        assertThat(dto.status()).isEqualTo("SUCCEEDED");
+        assertThat(dto.rowsWritten()).isEqualTo(3L);
+        assertThat(run.getFinishedAt()).isNotNull();
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_TABLE_LOADED), eq(runId.toString()), any(Map.class));
+    }
+
+    @Test
+    void dryRunReportsAirbyteReadinessForDraftPayload() {
+        UUID sourceId = UUID.randomUUID();
+        DataSource ds = datasource(sourceId, "orders-db");
+        ds.setConfig(JsonUtil.toJson(Map.of(
+            "host", "db.internal",
+            "port", 5432,
+            "database", "orders",
+            "username", "reader",
+            "airbyteWorkspaceId", "workspace-1",
+            "sourceDefinitionId", "source-def",
+            "destinationDefinitionId", "destination-def"
+        )));
+        when(dsRepo.findById(sourceId)).thenReturn(Optional.of(ds));
+
+        SyncTaskDryRunDTO report = service.dryRun(new CreateSyncTaskVO(
+            sourceId,
+            "orders-cdc",
+            "CDC",
+            "public.orders",
+            "ods.orders",
+            List.of(Map.of("source", "id", "target", "id")),
+            "0 */5 * * * ?",
+            1000,
+            5,
+            null
+        ));
+
+        assertThat(report.ready()).isTrue();
+        assertThat(report.checks()).extracting(SyncTaskDryRunDTO.Check::code)
+            .contains("airbyte_workspace", "airbyte_source", "airbyte_destination");
+    }
+
+    @Test
+    void cancelRunUpdatesRunningAirbyteJob() {
+        UUID runId = UUID.randomUUID();
         SyncRun run = new SyncRun();
         run.setId(runId);
         run.setTaskId(UUID.randomUUID());
         run.setExternalJobId("987");
         run.setStatus(RunStatus.RUNNING);
         when(runRepo.findById(runId)).thenReturn(Optional.of(run));
-        when(airbyte.getJobStatus(987L)).thenReturn("succeeded");
+        when(airbyte.cancel(987L)).thenReturn(true);
 
-        service.reconcile(runId);
+        SyncRunDTO dto = service.cancelRun(runId);
 
-        assertThat(run.getStatus()).isEqualTo(RunStatus.SUCCEEDED);
+        assertThat(dto.status()).isEqualTo("CANCELLED");
         assertThat(run.getFinishedAt()).isNotNull();
-        verify(outbox).publish(eq(DomainEvents.INTEGRATION_TABLE_LOADED), eq(runId.toString()), any(Map.class));
-
-        when(airbyte.getJobStatus(987L)).thenThrow(new RuntimeException("airbyte down"));
-        service.reconcile(runId);
-        assertThat(run.getStatus()).isEqualTo(RunStatus.SUCCEEDED);
+        verify(audit).audit(eq("CANCEL"), eq("sync_run"), eq(runId.toString()), any(Map.class));
     }
 
     @Test
@@ -331,7 +427,32 @@ class SyncTaskServiceImplTest {
 
         assertThat(page.getContent()).hasSize(1);
         assertThat(page.getContent().get(0).durationMs()).isEqualTo(2000L);
-        assertThat(page.getContent().get(0).throughputRows()).isEqualTo(50L);
+        assertThat(page.getContent().get(0).throughputRows()).isEqualTo(50.0);
+    }
+
+    @Test
+    void runsRefreshesActiveRunsBeforeListing() {
+        UUID taskId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        SyncRun run = new SyncRun();
+        run.setId(runId);
+        run.setTaskId(taskId);
+        run.setExternalJobId("5");
+        run.setStatus(RunStatus.RUNNING);
+        run.setStartedAt(Instant.parse("2026-06-15T00:00:00Z"));
+        when(runRepo.findByTaskIdAndStatusIn(eq(taskId), anyList())).thenReturn(List.of(run));
+        when(runRepo.findByTaskIdOrderByStartedAtDesc(eq(taskId), any(PageRequest.class)))
+            .thenReturn(new PageImpl<>(List.of(run)));
+        when(taskRepo.findById(taskId)).thenReturn(Optional.of(task(taskId, sourceId, TaskStatus.ENABLED)));
+        when(airbyte.getJobSnapshot(5L)).thenReturn(new AirbyteSyncDriver.AirbyteJobSnapshot("failed", 0L, 0L, "schema validation failed"));
+
+        Page<SyncRunDTO> page = service.runs(taskId, PageRequest.of(0, 20));
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("FAILED");
+        assertThat(page.getContent().get(0).errorMsg()).isEqualTo("schema validation failed");
+        assertThat(run.getFinishedAt()).isNotNull();
+        verify(outbox).publish(eq(DomainEvents.INTEGRATION_SYNC_FAILED), eq(runId.toString()), any(Map.class));
     }
 
     private CreateSyncTaskVO createVo(UUID sourceId, String name) {
@@ -339,6 +460,7 @@ class SyncTaskServiceImplTest {
             sourceId,
             name,
             "cdc",
+            "public.orders",
             "ods.orders",
             List.of(Map.of("source", "id", "target", "id")),
             "0 */5 * * * ?",
@@ -365,11 +487,13 @@ class SyncTaskServiceImplTest {
         task.setSourceId(sourceId);
         task.setName("orders-cdc");
         task.setMode(SyncMode.CDC);
+        task.setSourceTable("public.orders");
         task.setTargetTable("ods.orders");
         task.setFieldMapping("[{\"source\":\"id\",\"target\":\"id\"}]");
         task.setRateLimit(1000);
         task.setDirtyThreshold(5);
         task.setAirbyteConnectionId("conn-1");
+        task.setScheduleCron("0 */5 * * * ?");
         task.setStatus(status);
         return task;
     }

@@ -8,6 +8,8 @@ import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.dto.DiscoveredColumnDTO;
+import com.onelake.integration.dto.AirbyteConnectorDefinitionDTO;
+import com.onelake.integration.dto.AirbyteConnectorSpecDTO;
 
 import java.util.List;
 import java.util.UUID;
@@ -35,4 +37,12 @@ public interface DataSourceService {
     List<String> listTables(UUID id, String schema);
 
     List<DiscoveredColumnDTO> describeTable(UUID id, String objectName);
+
+    List<AirbyteConnectorDefinitionDTO> listAirbyteSourceDefinitions();
+
+    List<AirbyteConnectorDefinitionDTO> listAirbyteDestinationDefinitions();
+
+    AirbyteConnectorSpecDTO getAirbyteSourceDefinitionSpec(String definitionId);
+
+    AirbyteConnectorSpecDTO getAirbyteDestinationDefinitionSpec(String definitionId);
 }

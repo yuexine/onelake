@@ -14,7 +14,7 @@ public record SyncRunDTO(
     String errorMsg,
     String checkpoint,
     Long durationMs,
-    Long throughputRows,
+    Double throughputRows,
     Instant startedAt,
     Instant finishedAt
 ) {}

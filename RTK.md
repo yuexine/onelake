@@ -30,7 +30,7 @@
 | --- | --- |
 | Backend | Java 17, Spring Boot 3.3.2, Maven multi-module modular monolith under `onelake-app/`. |
 | Modules | `module-common`, `module-integration`, `module-orchestration`, `module-catalog`, `module-modeling`, `module-quality`, `module-security`, `module-dataservice`, and `bootstrap`. |
-| Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, Airbyte, and Superset. |
+| Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, and Superset. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
 | Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. |
 | Frontend | React 18, Vite 5, TypeScript, Ant Design 5, Pro Components, React Router, React Query, Zustand, X6, Monaco, ECharts under `onelake-app/web-console`. |
 | Product Scope | MVP control-plane skeleton plus full frontend prototype coverage for the OneLake data platform. |
@@ -90,6 +90,10 @@ Run Makefile commands from `onelake-app/`.
 cd onelake-app
 make help
 make up          # Start Docker data plane
+make up-core     # Start minimum local control-plane dependencies
+make dagster-up  # Build and start Dagster webserver/daemon/code-location
+make airbyte-up  # Start local Airbyte with abctl
+make airbyte-status
 make ps          # Inspect data plane containers
 make logs        # Follow data plane logs
 make seed        # Initialize Keycloak realm and MinIO bucket
@@ -124,6 +128,7 @@ Useful URLs when services are actually running:
 | APISIX Admin | `http://localhost:9180/` |
 | PostgREST | `http://localhost:3001/` |
 | Dagster | `http://localhost:3000/` |
+| Airbyte | `http://localhost:8000/` after `make airbyte-up` |
 | Superset | `http://localhost:8088/` |
 
 ## 6. Known Runtime Notes
@@ -142,6 +147,9 @@ Useful URLs when services are actually running:
   gateway, backend, or mock/prototype data before changing UI code.
 - Data-plane startup can be heavy. Report container health and reachable URLs
   separately from local app readiness.
+- Airbyte is no longer started by Docker Compose. Use `make airbyte-up`, which
+  delegates to `abctl local install --port 8000`; use `make airbyte-status` and
+  `make airbyte-credentials` for readiness and login credentials.
 
 ## 7. Verification Strategy
 

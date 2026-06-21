@@ -42,6 +42,13 @@ type FieldDef = {
 const DATA_SOURCE_TYPES: DataSourceFormType[] = ['MYSQL', 'POSTGRES', 'HIVE', 'KAFKA', 'S3'];
 const DATABASE_FIELD_TYPES: DataSourceFormType[] = ['MYSQL', 'POSTGRES', 'HIVE'];
 const DATABASE_PROBE_TYPES: DataSourceFormType[] = ['MYSQL', 'POSTGRES'];
+const AIRBYTE_FORM_FIELDS = [
+  'airbyteWorkspaceId',
+  'airbyteSourceDefinitionId',
+  'airbyteSourceId',
+  'airbyteDestinationId',
+  'airbyteDestinationDefinitionId',
+];
 
 const NETWORK_MODE_OPTIONS = [
   { label: 'DIRECT', value: 'DIRECT' },
@@ -170,6 +177,12 @@ const createPayload = (values: Record<string, unknown>) => {
   if (DATABASE_FIELD_TYPES.includes(type) && values.dbName) {
     config.dbName = values.dbName;
   }
+  AIRBYTE_FORM_FIELDS.forEach((field) => {
+    const value = values[field];
+    if (value !== undefined && value !== null && value !== '') {
+      config[field] = value;
+    }
+  });
   return {
     name: values.name,
     type,
@@ -211,6 +224,10 @@ export default function DatasourceList() {
   const [systemContext, setSystemContext] = useState<Awaited<ReturnType<typeof SystemAPI.context>>>();
   const [databaseOptions, setDatabaseOptions] = useState<{ label: string; value: string }[]>([]);
   const [databaseProbeLoading, setDatabaseProbeLoading] = useState(false);
+  const [airbyteDefinitionLoading, setAirbyteDefinitionLoading] = useState(false);
+  const [airbyteSourceDefinitions, setAirbyteSourceDefinitions] = useState<
+    Awaited<ReturnType<typeof IntegrationAPI.listAirbyteSourceDefinitions>>
+  >([]);
   const [drawerTestLoading, setDrawerTestLoading] = useState(false);
   const [drawerWritePrivilegeDetected, setDrawerWritePrivilegeDetected] = useState(false);
   const [form] = Form.useForm();
@@ -219,6 +236,25 @@ export default function DatasourceList() {
   const selectedSshAuthType = Form.useWatch('sshAuthType', form);
   const tenant = useAppStore((s) => s.tenant);
   const databaseFieldVisible = DATABASE_FIELD_TYPES.includes(selectedType);
+  const airbyteSourceDefinitionOptions = useMemo(() => {
+    const keywordMap: Record<DataSourceFormType, string[]> = {
+      MYSQL: ['mysql'],
+      POSTGRES: ['postgres', 'postgresql'],
+      HIVE: ['hive'],
+      KAFKA: ['kafka'],
+      S3: ['s3'],
+    };
+    const keywords = keywordMap[selectedType];
+    return airbyteSourceDefinitions
+      .filter((definition) => {
+        const text = `${definition.name} ${definition.dockerRepository || ''}`.toLowerCase();
+        return keywords.some((keyword) => text.includes(keyword));
+      })
+      .map((definition) => ({
+        label: `${definition.name}${definition.dockerImageTag ? ` · ${definition.dockerImageTag}` : ''}`,
+        value: definition.id,
+      }));
+  }, [airbyteSourceDefinitions, selectedType]);
 
   const openCreateDrawer = () => {
     form.resetFields();
@@ -236,6 +272,14 @@ export default function DatasourceList() {
     IntegrationAPI.listDatasources()
       .then(setDataSources)
       .catch((e) => message.error(e.message || '连接列表加载失败'));
+  };
+
+  const loadAirbyteSourceDefinitions = () => {
+    setAirbyteDefinitionLoading(true);
+    IntegrationAPI.listAirbyteSourceDefinitions()
+      .then(setAirbyteSourceDefinitions)
+      .catch((e) => message.warning(e.message || 'Airbyte Connector 列表加载失败，可手动填写 definition id'))
+      .finally(() => setAirbyteDefinitionLoading(false));
   };
 
   const handleProbeDatabases = () => {
@@ -300,6 +344,12 @@ export default function DatasourceList() {
       .then(setSystemContext)
       .catch((e) => message.error(e.message || '租户项目上下文加载失败'));
   }, []);
+
+  useEffect(() => {
+    if (drawerOpen && !airbyteSourceDefinitions.length) {
+      loadAirbyteSourceDefinitions();
+    }
+  }, [drawerOpen]);
 
   const filtered = useMemo(() => dataSources.filter((r) =>
     (!filterType || r.type === filterType) &&
@@ -654,6 +704,46 @@ export default function DatasourceList() {
               </AutoComplete>
             </Form.Item>
           )}
+
+          <div style={{ marginTop: 12 }}>
+            <Space style={{ marginBottom: 8 }}>
+              <ApiOutlined style={{ color: 'var(--ol-brand)' }} />
+              <Text style={{ fontSize: 13, fontWeight: 500 }}>Airbyte 数据面配置</Text>
+              <Button
+                size="small"
+                type="link"
+                loading={airbyteDefinitionLoading}
+                onClick={loadAirbyteSourceDefinitions}
+              >
+                刷新 Connector
+              </Button>
+            </Space>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <Form.Item label="Workspace ID" name="airbyteWorkspaceId">
+                <Input placeholder="Airbyte workspaceId" />
+              </Form.Item>
+              <Form.Item label="Source Definition" name="airbyteSourceDefinitionId">
+                <AutoComplete
+                  allowClear
+                  options={airbyteSourceDefinitionOptions}
+                  placeholder={airbyteSourceDefinitionOptions.length ? '选择或粘贴 source definition id' : '可手动粘贴 source definition id'}
+                  filterOption={(inputValue, option) =>
+                    String(option?.label || '').toLowerCase().includes(inputValue.toLowerCase()) ||
+                    String(option?.value || '').toLowerCase().includes(inputValue.toLowerCase())
+                  }
+                />
+              </Form.Item>
+              <Form.Item label="已有 Source ID" name="airbyteSourceId">
+                <Input placeholder="已有 sourceId 时可直接复用" />
+              </Form.Item>
+              <Form.Item label="Destination ID" name="airbyteDestinationId">
+                <Input placeholder="默认目的端，可留空走后端配置" />
+              </Form.Item>
+              <Form.Item label="Destination Definition" name="airbyteDestinationDefinitionId" style={{ gridColumn: '1 / span 2' }}>
+                <Input placeholder="需自动创建 destination 时填写" />
+              </Form.Item>
+            </div>
+          </div>
 
           <Alert
             type={drawerWritePrivilegeDetected ? 'warning' : 'info'} showIcon

@@ -3,8 +3,10 @@ package com.onelake.integration.api;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.onelake.integration.api.vo.CreateSyncTaskVO;
 import com.onelake.integration.api.vo.UpdateSyncTaskVO;
+import com.onelake.integration.dto.SyncRunLogDTO;
 import com.onelake.integration.dto.SyncRunDTO;
 import com.onelake.integration.dto.SyncTaskDTO;
+import com.onelake.integration.dto.SyncTaskDryRunDTO;
 import com.onelake.integration.service.SyncTaskService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -90,6 +92,7 @@ class SyncTaskControllerTest {
         UpdateSyncTaskVO update = new UpdateSyncTaskVO(
             "orders-full",
             "FULL",
+            "public.orders",
             "dwd.orders",
             List.of(Map.of("source", "id", "target", "id")),
             "0 0 * * * ?",
@@ -142,11 +145,14 @@ class SyncTaskControllerTest {
             null,
             null,
             2000L,
-            50L,
+            50.0,
             Instant.now(),
             Instant.now()
         );
         when(service.trigger(taskId)).thenReturn(runId);
+        when(service.getRun(runId)).thenReturn(run);
+        when(service.cancelRun(runId)).thenReturn(run);
+        when(service.logs(runId)).thenReturn(List.of(new SyncRunLogDTO(Instant.now(), "INFO", "job started")));
         when(service.runs(eq(taskId), any(PageRequest.class)))
             .thenReturn(new PageImpl<>(List.of(run), PageRequest.of(0, 10), 1));
 
@@ -162,13 +168,48 @@ class SyncTaskControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0));
 
+        mockMvc.perform(get("/api/v1/integration/sync-tasks/runs/{runId}", runId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.externalJobId").value("987"));
+
+        mockMvc.perform(get("/api/v1/integration/sync-tasks/runs/{runId}/logs", runId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].message").value("job started"));
+
+        mockMvc.perform(post("/api/v1/integration/sync-tasks/runs/{runId}/cancel", runId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("SUCCEEDED"));
+
         mockMvc.perform(get("/api/v1/integration/sync-tasks/{id}/runs", taskId)
                 .param("page", "0")
                 .param("size", "10"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.content[0].throughputRows").value(50));
+            .andExpect(jsonPath("$.data.content[0].throughputRows").value(50.0));
 
         verify(service).reconcile(runId);
+    }
+
+    @Test
+    void dryRunEndpointsReturnChecks() throws Exception {
+        UUID taskId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        CreateSyncTaskVO vo = createVo(sourceId, "orders-cdc");
+        SyncTaskDryRunDTO report = new SyncTaskDryRunDTO(true, List.of(
+            new SyncTaskDryRunDTO.Check("source", "数据源", true, "数据源可读取")
+        ));
+        when(service.dryRun(vo)).thenReturn(report);
+        when(service.dryRun(taskId)).thenReturn(report);
+
+        mockMvc.perform(post("/api/v1/integration/sync-tasks/dry-run")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(vo)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.ready").value(true))
+            .andExpect(jsonPath("$.data.checks[0].code").value("source"));
+
+        mockMvc.perform(post("/api/v1/integration/sync-tasks/{id}/dry-run", taskId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.ready").value(true));
     }
 
     private CreateSyncTaskVO createVo(UUID sourceId, String name) {
@@ -176,6 +217,7 @@ class SyncTaskControllerTest {
             sourceId,
             name,
             "CDC",
+            "public.orders",
             "ods.orders",
             List.of(Map.of("source", "id", "target", "id")),
             "0 */5 * * * ?",
@@ -192,6 +234,7 @@ class SyncTaskControllerTest {
             "orders-db",
             name,
             "CDC",
+            "public.orders",
             "ods.orders",
             List.of(Map.of("source", "id", "target", "id")),
             "0 */5 * * * ?",

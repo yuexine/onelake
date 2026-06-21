@@ -9,6 +9,8 @@ import com.onelake.integration.api.vo.TestDataSourceVO;
 import com.onelake.integration.api.vo.UpdateDataSourceVO;
 import com.onelake.integration.dto.DataSourceDTO;
 import com.onelake.integration.dto.DiscoveredColumnDTO;
+import com.onelake.integration.dto.AirbyteConnectorDefinitionDTO;
+import com.onelake.integration.dto.AirbyteConnectorSpecDTO;
 import com.onelake.integration.service.DataSourceService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -86,6 +88,26 @@ public class DataSourceController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<DatabaseProbeResult> probeDatabases(@Valid @RequestBody ProbeDatabasesVO vo) {
         return ApiResponse.ok(service.probeDatabases(vo));
+    }
+
+    @GetMapping("/airbyte/source-definitions")
+    public ApiResponse<List<AirbyteConnectorDefinitionDTO>> airbyteSourceDefinitions() {
+        return ApiResponse.ok(service.listAirbyteSourceDefinitions());
+    }
+
+    @GetMapping("/airbyte/destination-definitions")
+    public ApiResponse<List<AirbyteConnectorDefinitionDTO>> airbyteDestinationDefinitions() {
+        return ApiResponse.ok(service.listAirbyteDestinationDefinitions());
+    }
+
+    @GetMapping("/airbyte/source-definitions/{definitionId}/spec")
+    public ApiResponse<AirbyteConnectorSpecDTO> airbyteSourceDefinitionSpec(@PathVariable String definitionId) {
+        return ApiResponse.ok(service.getAirbyteSourceDefinitionSpec(definitionId));
+    }
+
+    @GetMapping("/airbyte/destination-definitions/{definitionId}/spec")
+    public ApiResponse<AirbyteConnectorSpecDTO> airbyteDestinationDefinitionSpec(@PathVariable String definitionId) {
+        return ApiResponse.ok(service.getAirbyteDestinationDefinitionSpec(definitionId));
     }
 
     @GetMapping("/{id}/schemas")

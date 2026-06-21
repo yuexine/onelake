@@ -214,6 +214,169 @@
   - `task_plan.md`
   - `progress.md`
 
+### 阶段 15：数据面执行闭环第一批实现
+- **状态：** complete
+- **开始时间：** 2026-06-16 CST
+- 执行的操作：
+  - 读取当前计划、发现、进度、Airbyte 驱动、采集任务服务、Controller、前端向导和详情页。
+  - 新增 `SyncTaskDryRunDTO`、`SyncRunLogDTO`，扩展 `RunStatus.CANCELLED`。
+  - `AirbyteSyncDriver` 增加 source/destination 动态创建、connection 检查、job 快照解析和日志提取。
+  - `SyncTaskServiceImpl` 增加 dry-run、run 详情、run logs、run cancel；发布时可动态准备 Airbyte source/destination/connection；触发失败会落失败 run；reconcile 回写 rows/error/checkpoint。
+  - `SyncTaskController` 暴露 `/dry-run`、`/{id}/dry-run`、`/runs/{runId}`、`/logs`、`/cancel`。
+  - 前端 `IntegrationAPI`、`SyncTaskWizard`、`SyncTaskDetail`、`FailureDiagnose` 接入试跑、真实 run、日志和取消。
+  - 运行 `mvn -q -pl module-integration -am test` 和 `pnpm build`。
+- 创建/修改的文件：
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/client/AirbyteSyncDriver.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/impl/SyncTaskServiceImpl.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/api/SyncTaskController.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/dto/SyncTaskDryRunDTO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/dto/SyncRunLogDTO.java`
+  - `onelake-app/bootstrap/src/main/resources/application.yml`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/integration/SyncTaskWizard.tsx`
+  - `onelake-app/web-console/src/pages/integration/SyncTaskDetail.tsx`
+  - `onelake-app/web-console/src/pages/integration/FailureDiagnose.tsx`
+
+### 阶段 16：调度与 Connector 配置闭环推进
+- **状态：** complete
+- **开始时间：** 2026-06-16 CST
+- 执行的操作：
+  - 新增 `AirbyteConnectorDefinitionDTO`、`AirbyteConnectorSpecDTO`。
+  - `AirbyteSyncDriver` 增加 source/destination connector definition 列表和 spec 查询。
+  - `DataSourceController` 暴露 `/airbyte/source-definitions`、`/airbyte/destination-definitions` 及对应 spec 接口。
+  - `DatasourceList` 新建抽屉增加 Airbyte 数据面配置区，可加载 source definition 并保存 workspace/source/destination 元信息。
+  - 新增 `DagsterScheduleClient`，任务启用/暂停时在 `DAGSTER_SCHEDULE_ENABLED=true` 后向 Dagster reconciliation job 传递 `UPSERT/DISABLE` 意图；默认关闭且不阻断发布。
+  - 尝试启动本地 Airbyte/Dagster 数据面，发现 compose 使用的 `airbyte/airbyte:latest` 与 `dagster/dagster:latest` 均拉取失败。
+  - 已启动并验证基础依赖 `postgres`、`redis`、`keycloak`、`minio`；未启动 Trino，避免占用后端 `8080`。
+- 创建/修改的文件：
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/client/AirbyteSyncDriver.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/client/DagsterScheduleClient.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/dto/AirbyteConnectorDefinitionDTO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/dto/AirbyteConnectorSpecDTO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/api/DataSourceController.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/DataSourceService.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/impl/DataSourceServiceImpl.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/impl/SyncTaskServiceImpl.java`
+  - `onelake-app/bootstrap/src/main/resources/application.yml`
+
+## 会话：2026-06-20
+
+### 阶段 20：Integration → Catalog 联动进展检查与下一步计划
+- **状态：** in_progress
+- 执行的操作：
+  - 读取既有 `task_plan.md`、`findings.md`、`progress.md`，延续数据集成闭环规划上下文。
+  - 检查 `module-catalog` 的 Controller、Service、Entity、Repository、OpenMetadata 同步服务与事件 handler。
+  - 检查前端 `CatalogAPI`、`CatalogSearch`、`AssetDetail`、`LineageGraph` 的真实 API 与 mock 使用状态。
+  - 查询本地 Postgres：`integration.table.loaded` 事件已发布并被 `catalog` consumer 消费，但 `catalog.asset` 为 0 条。
+  - 确认当前缺口是 Catalog handler 只刷新已存在资产，不会在采集成功后自动 upsert 新资产。
+- 创建/修改的文件：
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 21：Integration → Catalog 最小可见闭环实现
+- **状态：** complete
+- 执行的操作：
+  - 新增 `AssetDTO`，Catalog API 改为返回前端可用 DTO，不再直接返回 JPA Entity。
+  - 改造 `SyncRunEventHandler`，消费 `integration.table.loaded` 时自动 upsert `catalog.asset`；失败事件仍不改资产新鲜度。
+  - 为 `catalog.asset.tags` 增加 jsonb 写入 cast，避免字符串写入 jsonb 报错。
+  - `CatalogSearch` 从 mock 资产数组切换到 `CatalogAPI.listAssets()`；未调整页面样式和布局。
+  - 新增 `SyncRunEventHandlerTest` 覆盖首次建档、重复刷新、失败不建档。
+  - 运行 `mvn -q -pl module-catalog -am test`、`pnpm --dir onelake-app/web-console exec tsc --noEmit`、`pnpm --dir onelake-app/web-console build`。
+  - 浏览器打开 `/catalog/search`，登录后页面进入真实 API 数据状态；当前本地 `catalog.asset` 为空，因此显示空态。
+- 遇到的错误：
+  - `mvn -q -pl module-catalog -am test -Dtest=SyncRunEventHandlerTest` 首次因 `-am` 上游 `module-common` 无同名测试失败；改用 `-Dsurefire.failIfNoSpecifiedTests=false` 后通过。
+- 创建/修改的文件：
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/AssetDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/api/CatalogController.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/domain/entity/Asset.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/event/SyncRunEventHandler.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/CatalogService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/event/SyncRunEventHandlerTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/catalog/CatalogSearch.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/integration/DatasourceList.tsx`
+
+### 阶段 17：数据面阻断项修正
+- **状态：** complete
+- **开始时间：** 2026-06-17 CST
+- 执行的操作：
+  - 查阅 Airbyte 官方文档，确认本地 Airbyte 应通过 `abctl local install --port 8000` 部署，Docker Compose 已不再是支持路径。
+  - 查阅 Dagster 官方 Docker Compose 部署文档，确认 Dagster 需要 webserver、daemon、code location 和 Postgres 多容器部署，不是单个 `dagster/dagster` 镜像。
+  - 修改 `docker-compose.yml`：删除无效 Airbyte 单镜像服务；新增 `dagster-user-code`、`dagster-webserver`、`dagster-daemon` 和 Dagster Postgres healthcheck。
+  - 新增 `onelake-app/dagster/` 最小 Dagster repo，包含后端默认调用的 `onelake_sync_task_schedule_reconcile` job。
+  - 新增 `scripts/airbyte-local.sh`，通过 `abctl` 管理 Airbyte install/status/credentials/uninstall。
+  - 更新 `Makefile`，新增 `up-core`、`dagster-up`、`airbyte-up` 等数据面入口。
+  - 更新 `RTK.md`，明确 Airbyte 不再由 Compose 管理。
+  - 使用 Homebrew 安装 `abctl v0.30.4`，并信任 Airbyte 官方 tap。
+  - 执行 `make dagster-up`，本地构建并启动 Dagster webserver、daemon、code location 和 Postgres；GraphQL 可查询到 `onelake` repository 与 `onelake-loc` location。
+  - 通过 GraphQL 提交 `onelake_sync_task_schedule_reconcile` smoke run，run 从 `QUEUED` 被 daemon 接走并最终 `SUCCESS`。
+  - 执行 `make airbyte-up`，`abctl` 成功创建 kind 集群，但下载 Airbyte Helm chart index 时失败：`https://airbytehq.github.io/charts/index.yaml` TLS 连接 `SSL_ERROR_SYSCALL` / `EOF`。
+  - 已执行 `make airbyte-down` 清理失败后的 kind 集群，并为 `scripts/airbyte-local.sh` 增加 chart index 预检，避免后续在网络不通时先创建半成品集群。
+  - 2026-06-17 追加复核时网络已恢复，Airbyte 已通过 `abctl` 完成部署；`make airbyte-status` 显示 Helm release 已 deployed，`http://localhost:8000` 返回 200。
+- 创建/修改的文件：
+  - `RTK.md`
+  - `onelake-app/docker-compose.yml`
+  - `onelake-app/Makefile`
+  - `onelake-app/dagster/Dockerfile_dagster`
+  - `onelake-app/dagster/Dockerfile_user_code`
+  - `onelake-app/dagster/dagster.yaml`
+  - `onelake-app/dagster/workspace.yaml`
+  - `onelake-app/dagster/definitions.py`
+  - `onelake-app/scripts/airbyte-local.sh`
+
+### 阶段 18：数据集成全链路实施现状复核
+- **状态：** complete
+- **开始时间：** 2026-06-17 CST
+- 执行的操作：
+  - 复核 `SyncTaskController`、`SyncTaskServiceImpl`、`AirbyteSyncDriver`、`DagsterScheduleClient`、`DataSourceController` 和 `DataSourceServiceImpl`。
+  - 确认采集任务控制面已覆盖 create/list/get/update/delete/enable/disable/dry-run/trigger/reconcile/run detail/logs/cancel。
+  - 复核前端 `IntegrationAPI`、`SyncTaskWizard`、`SyncTaskDetail`、`DatasourceList` 调用点，确认创建、发布、试跑、触发、日志、取消和 Airbyte 配置区已接真实接口。
+  - 执行 `make airbyte-status`、`kubectl get pods -n airbyte-abctl`、`curl -I http://localhost:8000/`，确认 Airbyte 本地入口可访问。
+  - 执行 `docker compose ps dagster-*`、`curl http://localhost:3000/server_info`，确认 Dagster webserver/daemon/code-location 可运行。
+  - 检查 `8080`/`5173`/`3000` 监听状态，确认当前只有 Dagster 3000 监听，后端和前端未启动。
+  - 运行 `mvn -q -pl module-integration -am test`。
+- 创建/修改的文件：
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+  - `docs/采集任务创建流程闭环迭代实施计划.md`
+  - `docs/IMPLEMENTATION_STATUS.md`
+
+### 阶段 19：真实端到端联调闭环收口
+- **状态：** complete
+- **开始时间：** 2026-06-17 CST
+- 执行的操作：
+  - 为本地源库创建 `onelake_src.public.codex_orders` 测试表和 3 行数据，为目标库准备 `onelake_lake.ods_airbyte` schema。
+  - 接入 Airbyte 2.1 OAuth client credentials，后端运行时通过 `AIRBYTE_CLIENT_ID`/`AIRBYTE_CLIENT_SECRET` 获取 Bearer token。
+  - 修复 Airbyte workspace-scoped API：definition spec 与 connection list 请求带 `workspaceId`。
+  - 新增 `sync_task.source_table`，并贯穿后端 VO/entity/DTO/mapper/service、Flyway V5、前端任务类型和创建向导 payload。
+  - 修复发布阶段 Airbyte connection 创建：优先使用 `/sources/discover_schema` 返回的 catalog，并按 `targetTable` 设置目标 namespace 与 alias。
+  - 修复 Airbyte 2.x nested attempt 统计解析，reconcile 可回写 `rowsRead/rowsWritten`。
+  - 重启后端并执行真实 API 链路：创建数据源 -> 探查 columns -> dry-run -> 创建任务 -> enable -> trigger -> reconcile -> 目标库查数。
+- 端到端验证证据：
+  - 任务 `5bad1992-f737-4e51-a794-60962d041eed` 发布后绑定 Airbyte connection `de595738-f95a-49fd-a3fc-c38fc181f6f8`。
+  - run `b582f99c-f602-4dac-b2b1-72abd7e9c3a7` 触发 Airbyte job `2`，最终 `SUCCEEDED`。
+  - `onelake_lake.ods_airbyte.codex_orders` 查询到 3 行：Alice、Bob、Carol。
+  - 重新 reconcile 后 OneLake run 返回 `rowsRead=3`、`rowsWritten=3`。
+- 创建/修改的文件：
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/client/AirbyteSyncDriver.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/api/vo/CreateSyncTaskVO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/api/vo/UpdateSyncTaskVO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/domain/entity/SyncTask.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/dto/SyncTaskDTO.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/mapper/SyncTaskMapper.java`
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/impl/SyncTaskServiceImpl.java`
+  - `onelake-app/bootstrap/src/main/resources/application.yml`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/integration/V5__sync_task_source_table.sql`
+  - `onelake-app/web-console/src/pages/integration/SyncTaskWizard.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/module-integration/src/test/java/com/onelake/integration/client/AirbyteSyncDriverTest.java`
+
 ## 测试结果
 | 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
 |------|------|---------|---------|------|
@@ -235,6 +398,22 @@
 | 前端构建（创建表单错误提示视觉优化） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仍有大 chunk 警告 | 通过 |
 | diff 空白检查（创建表单错误提示视觉优化） | `git diff --check` | 无尾随空白/补丁格式问题 | 无输出，退出码 0 | 通过 |
 | 浏览器冒烟（创建表单错误提示视觉优化） | `http://localhost:5173/integration/sync-tasks/new` | 向导可渲染且不出现页面内错误框 | 页面进入新建采集任务向导；无 `Schema 探查失败` 内联错误框；控制台无 error | 通过 |
+| module-integration 测试（阶段 16） | `mvn -q -pl module-integration -am test` | 编译和测试通过 | 退出码 0；仅有预期校验/容错测试日志 | 通过 |
+| 全工程跳测编译（阶段 16） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译通过 | 无错误输出，退出码 0 | 通过 |
+| 前端构建（阶段 16） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仍有大 chunk 警告 | 通过 |
+| diff 空白检查（阶段 16） | `git diff --check` | 无尾随空白/补丁格式问题 | 无输出，退出码 0 | 通过 |
+| 数据面基础依赖启动 | `docker compose up -d postgres redis keycloak minio` | 基础依赖可运行 | Postgres/Redis/MinIO healthy；Keycloak running | 通过 |
+| Airbyte/Dagster 数据面启动 | `docker compose up -d airbyte dagster` | Airbyte/Dagster 可运行 | 镜像 `airbyte/airbyte:latest`、`dagster/dagster:latest` 拉取失败 | 阻塞 |
+| Dagster 数据面启动（阶段 17） | `make dagster-up` | Dagster webserver/daemon/code-location 可运行 | 四个 Dagster 容器运行；`/server_info` 返回 1.13.9 | 通过 |
+| Dagster GraphQL repository 验证（阶段 17） | `curl -X POST http://localhost:3000/graphql ...` | 可看到后端默认 repo/location | 返回 `onelake` / `onelake-loc` | 通过 |
+| Dagster reconciliation job 触发（阶段 17） | `launchRun(onelake_sync_task_schedule_reconcile)` | run 可被 daemon 执行 | runId `0f606866-e7f7-4d19-aae4-32a83c142635` 最终 `SUCCESS` | 通过 |
+| abctl 安装（阶段 17） | `brew tap airbytehq/tap && brew trust airbytehq/tap && brew install abctl` | abctl 可用 | `abctl version` 返回 `v0.30.4` | 通过 |
+| Airbyte 数据面入口（阶段 17） | `AIRBYTE_LOW_RESOURCE_MODE=true make airbyte-up` | Airbyte 安装或给出明确阻塞 | chart index `https://airbytehq.github.io/charts/index.yaml` TLS 连接失败；脚本预检阻止创建半成品集群 | 阻塞 |
+| Airbyte 半成品清理（阶段 17） | `make airbyte-down` + 端口/容器检查 | 无残留 Airbyte 容器或 8000 监听 | `docker ps --filter name=airbyte` 为空，`lsof :8000` 无监听 | 通过 |
+| Airbyte 数据面复核（阶段 18） | `make airbyte-status` + `kubectl get pods -n airbyte-abctl` + `curl -I http://localhost:8000/` | Airbyte 本地入口可访问 | Helm release `airbyte-abctl` 2.1.0 / `ingress-nginx` 4.15.1 deployed；核心 pod Ready；HTTP 200 | 通过 |
+| Dagster 数据面复核（阶段 18） | `docker compose ps dagster-*` + `curl http://localhost:3000/server_info` | Dagster webserver/daemon/code-location 可运行 | 4 个 Dagster 容器 Up；server_info 返回 `1.13.9` | 通过 |
+| 控制面/前端端口复核（阶段 18） | `lsof -nP -iTCP:8080 -sTCP:LISTEN` / `lsof -nP -iTCP:5173 -sTCP:LISTEN` | 确认是否具备浏览器全链路验证条件 | 8080/5173 当前无监听；3000 为 Dagster | 待启动 |
+| module-integration 测试（阶段 18） | `mvn -q -pl module-integration -am test` | 后端集成模块测试通过 | 退出码 0；仅预期校验/容错日志 | 通过 |
 | 全工程跳测编译（Schema 探查接口修复） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 无错误输出，退出码 0 | 通过 |
 | module-quality 测试（告警命名冲突修复） | `mvn -q -pl module-quality -am test` | common/quality 依赖链编译和测试通过 | 退出码 0；仅 JVM CDS warning | 通过 |
 | 后端健康检查（Schema 探查接口修复） | `curl -sf http://localhost:8080/actuator/health` | 后端可用 | 返回 `status: UP`，db/redis 均 UP | 通过 |
@@ -251,6 +430,190 @@
 | 前端构建（发布错误提示修复） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仍有大 chunk 警告 | 通过 |
 | 浏览器复测（发布错误提示修复） | `/integration/sync-tasks/new` 点击发布 | toast 显示后端业务错误 | 显示 `数据源未配置 airbyteSourceId，无法发布采集任务`，不再显示 `Request failed with status code 400` | 通过 |
 | 测试数据清理 | 删除 `ods_customers_100k_incremental` 草稿任务 | 清理测试副作用 | 数据库查询无剩余 sync_task | 通过 |
+| module-integration 测试（数据面执行闭环第一批） | `mvn -q -pl module-integration -am test` | 编译和测试通过 | 退出码 0；仅有预期校验/容错日志 | 通过 |
+| 前端构建（数据面执行闭环第一批） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仍有大 chunk 警告 | 通过 |
+| module-integration 测试（真实端到端收口） | `mvn -q -pl module-integration -am test` | 编译和测试通过 | 退出码 0；新增 Airbyte OAuth/workspace/catalog/stats 单测通过 | 通过 |
+| 前端构建（真实端到端收口） | `pnpm --dir web-console build` | TypeScript 与 Vite 构建通过 | 构建成功；仍有大 chunk 警告 | 通过 |
+| diff 空白检查（真实端到端收口） | `git diff --check` | 无尾随空白/补丁格式问题 | 无输出，退出码 0 | 通过 |
+| 后端健康检查（真实端到端收口） | `curl -sS http://localhost:8080/actuator/health` | 后端可用 | 返回 `status: UP`，db/redis 均 UP | 通过 |
+| 数据集成真实 E2E | 创建数据源 -> 探查 -> dry-run -> 创建任务 -> enable -> trigger -> reconcile | 源表 3 行同步到目标库，run 终态成功且行数回写 | Airbyte job `2` 成功；目标 `ods_airbyte.codex_orders` 3 行；run `rowsRead=3`、`rowsWritten=3` | 通过 |
+| Integration -> Catalog 最小闭环 E2E | MySQL 源表 `ods.ods_customers_100k` -> Airbyte job 6 -> Catalog | run 成功、目标库有数据、Catalog 自动建档 | run `b1dbe486-3ec3-4e01-9623-22d77e76d959` 成功，`rowsRead=9`、`rowsWritten=9`；目标库 9 行；Catalog 资产 `ods.ods_customers_100k` 自动创建并在目录搜索页显示 | 通过 |
+| Integration -> Catalog 第二轮 E2E | 同一任务进程级重启后触发 Airbyte job 8 | 事件携带字段映射，Catalog 写入 schema 与血缘 | run `fa739e86-10d0-44c1-9461-b120a74c363c` 成功，`rowsRead=10`、`rowsWritten=10`；事件 payload `fieldMapping=20`；Catalog asset `columns=20`；`lineage_edge.column_level=20` | 通过 |
+| Catalog API schema 验证 | `GET /api/v1/catalog/assets/{id}` | 返回资产字段 schema | 返回 `ods.ods_customers_100k`，`columns.length=20`，包含 `id/customer_no/full_name/...` | 通过 |
+| Catalog 详情页 Schema 验证 | `/catalog/assets/79188368-ceea-42c9-8235-2f8212646d0e` 点击 `Schema` tab | 页面展示真实字段表 | 页面展示 20 个字段；修复 `DetailPageLayout` 后 tab 可切换 | 通过 |
+| 低数据量吞吐展示修复 | `GET /api/v1/integration/sync-tasks/runs/fa739e86-10d0-44c1-9461-b120a74c363c` + 任务详情页 | 10 行 / 约 30 秒不再显示 0/s | API 返回 `throughputRows=0.3248...`；任务详情页显示 `0.32/s` | 通过 |
+| module-security 测试（创建任务触发 PII） | `mvn -q -pl module-security -am test` | 事件处理和字段驱动 PII 扫描测试通过 | 退出码 0；新增 handler/service 单测通过 | 通过 |
+| module-integration 测试（创建事件 payload） | `mvn -q -pl module-integration -am test` | 创建任务事件 payload 测试通过 | 退出码 0；新增 fieldMapping 断言通过 | 通过 |
+| 全工程跳测编译（创建任务触发 PII） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 无错误输出，退出码 0 | 通过 |
+| security V4 本地迁移 | `psql < security/V4__pii_scan_record_unique_fqn.sql` | 清理重复记录并创建唯一索引 | `DELETE 10`；`CREATE INDEX` | 通过 |
+| 后端健康检查（创建任务触发 PII） | `curl -sf http://localhost:8080/actuator/health` | 后端重启后可用 | 返回 `status: UP`，db/redis 均 UP | 通过 |
+| 创建任务自动触发 PII E2E | `POST /api/v1/integration/sync-tasks` 创建 `codex_pii_scan_20260620223345` | 事件发布并由 Security 消费，按 fieldMapping 写入 PII 记录 | 事件 `PUBLISHED`，`fieldMapping=5`；`security` consumer 已消费；生成 `phone_hash/email_hash/id_card_hash/full_name` 4 条 PII 记录 | 通过 |
+| Security/Catalog 测试（PII 反哺 Catalog） | `mvn -q -pl module-security,module-catalog -am test` | Security 发布 PII 事件、Catalog 合并字段标签测试通过 | 退出码 0；新增 `PiiDetectedEventHandlerTest` 与 table.loaded 保留 PII 标签测试通过 | 通过 |
+| 全工程跳测编译（PII 反哺 Catalog） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 无错误输出，退出码 0 | 通过 |
+| 后端干净重启（PII 反哺 Catalog） | 停止旧 8080 进程后启动 `screen onelake-backend` | 新代码进入运行进程 | 新 PID `71313`，健康检查 `UP` | 通过 |
+| 创建任务 -> Security -> Catalog E2E | `POST /api/v1/integration/sync-tasks` 创建 `codex_pii_catalog_20260620224545` | PII detected 事件发布并被 Catalog 消费，资产字段带 PII 标签 | `security.pii.detected` 为 `PUBLISHED`，`detectionCount=4`；`catalog` consumer 已消费；Catalog 资产表级 `classification=L4`，字段含 `piiType/suggestLevel` | 通过 |
+| Catalog API 字段安全标签验证 | `GET /api/v1/catalog/assets/127801dd-d90f-4a5c-9e21-ce19f0d52527` | API 返回字段级 PII 标签 | 返回 `phone_hash/email_hash/id_card_hash/full_name`，分别带 `piiType` 与 `suggestLevel` | 通过 |
+| 前端构建（Catalog 字段级 PII 标签） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| Catalog 详情页字段级 PII 浏览器验证 | `/catalog/assets/127801dd-d90f-4a5c-9e21-ce19f0d52527` Schema tab | 前端显示 API 返回的 `piiType/suggestLevel` | 表头包含 `PII类型`、`建议密级`；行显示 `手机号/邮箱/身份证/姓名` 和 L3/L4 建议密级 | 通过 |
+| 数据质量后端 API/DB 状态检查 | `GET /api/v1/quality/rules`、`GET /api/v1/quality/alerts`、查询 `quality.*` 表 | 确认真实现和数据基线 | API 返回空数组；`quality.rule/run_result/score_snapshot/alert` 均为 0 条 | 通过 |
+| 数据质量页面浏览器检查 | `/quality/rules`、`/quality/results`、`/quality/gate` | 页面可进入且 UI 结构完整 | 三页均可打开，无控制台错误；规则/结果/门禁 UI 完整，但数据和动作均为 mock/本地提示 | 通过 |
+| module-quality 测试（质量最小闭环） | `mvn -q -pl module-quality -am test` | 规则创建、试跑、告警和事件发布单测通过 | 退出码 0；新增 `QualityServiceTest` 通过 | 通过 |
+| 前端构建（质量最小闭环） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| quality V2 本地迁移 | `psql < quality/V2__quality_rule_target_column_schedule.sql` | 规则表补齐字段和索引 | `ALTER TABLE` x2；`CREATE INDEX` | 通过 |
+| 全工程跳测编译（质量最小闭环） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 无错误输出，退出码 0 | 通过 |
+| 后端健康检查（质量最小闭环） | `curl -sS http://localhost:8080/actuator/health` | 后端重启后可用 | 返回 `status: UP` | 通过 |
+| 质量规则真实 API E2E | 创建 `RANGE` 规则并调用 `/quality/rules/{id}/run` | 规则、运行结果、告警和事件完整落地 | 规则 `0b95c483-6add-4705-9c03-2af512829d73`；结果 `passRate=96.00`、`failedRows=32`；告警 1 条；`quality.check.failed` 为 `PUBLISHED` | 通过 |
+| 质量页面浏览器验证 | `/quality/rules`、`/quality/results` | 页面展示真实规则和运行结果 | 规则页显示目标资产、字段、表达式和 96% 最近通过率；结果页显示失败 32 行和 3 条异常样例；控制台无 error | 通过 |
+| module-quality 测试（质量门禁处理） | `mvn -q -pl module-quality -am test` | 告警 DTO 和关闭告警租户校验相关代码编译/测试通过 | 退出码 0；新增跨租户关闭拒绝断言通过 | 通过 |
+| 全工程跳测编译（质量门禁处理） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 无错误输出，退出码 0 | 通过 |
+| 前端构建（质量门禁处理） | `pnpm build` | TypeScript 与 Vite 构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| 后端健康检查（质量门禁处理） | `curl -sS http://localhost:8080/actuator/health` | 后端重启后可用 | 返回 `status: UP` | 通过 |
+| 质量门禁真实 API E2E | 清理开放告警 -> 试跑质量规则 -> 查询开放告警 | 告警 DTO 带规则字段和最新失败样例 | 开放告警 `70453798-c138-4b7e-a023-3a4e69cf1790`，`targetColumn=id_card_hash`，`failedRows=32`，`sampleCount=3` | 通过 |
+| 质量门禁浏览器点击验证 | `/quality/gate` 选择“降级为告警”并点击“应用” | 前端调用 closeAlert，待处理告警关闭 | 页面从真实失败告警切换为“暂无质量门禁失败”；后端 `GET /quality/alerts` 返回空数组；控制台 0 error | 通过 |
+
+### 阶段 24：创建采集任务后自动触发目标表 PII 扫描
+- **状态：** complete
+- **开始时间：** 2026-06-20 CST
+- **完成时间：** 2026-06-20 22:34 CST
+- 执行的操作：
+  - 复核 `SyncTaskServiceImpl#create` 的 `integration.sync_task.created` 事件 payload。
+  - 复核 `SyncTaskCreatedEventHandler` 与 `PiiScanServiceImpl` 当前自动扫描链路。
+  - 将 `integration.sync_task.created` payload 扩展为结构化 Map，新增 `taskId` 与 `fieldMapping`，保留 `sourceTable/targetTable/tenantId`。
+  - `SyncTaskCreatedEventHandler` 解析事件中的 `fieldMapping`，调用字段驱动的 PII 扫描服务。
+  - `PiiScanServiceImpl` 新增字段映射扫描入口，并扩展手机号、邮箱、身份证、姓名、银行卡、客户编号等命名规则。
+  - `PiiScanRecordRepository` 增加 `existsByTenantIdAndFqn` 查重；新增 security V4 迁移，清理历史重复记录并创建 `tenant_id + fqn` 唯一索引。
+  - 补齐 `module-security` 事件处理与扫描服务单测，补齐 `module-integration` 创建事件 payload 测试。
+  - 手工应用本地测试库 security V4 迁移；历史重复 PII 记录清理 10 条，唯一索引创建成功。
+  - 全工程跳测安装后重启本地 backend，并通过真实 API 创建测试采集任务验证事件和扫描记录。
+- 创建/修改的文件：
+  - `onelake-app/module-integration/src/main/java/com/onelake/integration/service/impl/SyncTaskServiceImpl.java`
+  - `onelake-app/module-integration/src/test/java/com/onelake/integration/service/impl/SyncTaskServiceImplTest.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/event/SyncTaskCreatedEventHandler.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/repository/PiiScanRecordRepository.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/PiiScanService.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/impl/PiiScanServiceImpl.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/event/SyncTaskCreatedEventHandlerTest.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/service/impl/PiiScanServiceImplTest.java`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/security/V4__pii_scan_record_unique_fqn.sql`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 26：Catalog 前端接入字段级 PII 标签
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 检查 Catalog API、前端类型和 `AssetDetail` 页面，确认 API 已返回 `piiType/suggestLevel`，但前端未完整展示。
+  - 将 `AssetColumn.piiType` 调整为兼容后端中文 PII 类型的字符串，并新增 `suggestLevel` 字段。
+  - 在资产详情 Schema 表格增加 `PII类型` 与 `建议密级` 列，复用现有 `ClassificationBadge` 展示建议密级。
+  - 运行前端构建。
+  - 浏览器登录开发账号后打开真实资产详情页，验证字段级 PII 信息可见。
+- 创建/修改的文件：
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/web-console/src/pages/catalog/AssetDetail.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 27：数据质量模块真实化实施计划与 UI 完整性检查
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 读取 `module-quality` Controller、Service、Entity、Flyway 表结构。
+  - 读取质量模块前端页面、路由、API 封装和类型定义。
+  - 查询本地后端 API 和 PostgreSQL，确认当前质量规则、运行结果、评分快照和告警均为空。
+  - 使用浏览器打开 `/quality/rules`、`/quality/results`、`/quality/gate`，检查页面结构、控件、表格、弹窗和交互。
+  - 形成 UI 完整性判断和后续实施计划。
+- 创建/修改的文件：
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 25：PII 扫描结果反哺 Catalog 字段安全标签
+- **状态：** complete
+- **开始时间：** 2026-06-20 CST
+- **完成时间：** 2026-06-20 22:47 CST
+- 执行的操作：
+  - 新增公共事件名 `security.pii.detected`。
+  - `PiiScanServiceImpl` 在新增 PII 扫描记录后发布字段检测结果事件。
+  - 新增 `PiiDetectedEventHandler`，Catalog 消费 PII 检测事件后预登记或更新资产字段安全标签。
+  - `SyncRunEventHandler` 在处理 `integration.table.loaded` 时合并已有 PII 标签，避免真实字段 schema 刷新覆盖安全分类。
+  - Catalog `AssetColumnDTO` 增加 `piiType/suggestLevel`，后端 API 可直接返回字段级 PII 标签；未修改前端 UI。
+  - 补充 Security 和 Catalog 单元测试。
+  - 处理一次本地验证偏差：首次重启时旧 DevTools 进程未退出，新进程因 8080 占用启动失败；清理旧 PID 后用新进程复测通过。
+- 创建/修改的文件：
+  - `onelake-app/module-common/src/main/java/com/onelake/common/outbox/DomainEvents.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/impl/PiiScanServiceImpl.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/service/impl/PiiScanServiceImplTest.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/event/PiiDetectedEventHandler.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/event/SyncRunEventHandler.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/AssetDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/CatalogService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/event/PiiDetectedEventHandlerTest.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/event/SyncRunEventHandlerTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 28：数据质量规则与稽核结果最小闭环实施
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 扩展质量规则实体和迁移，新增目标字段 `targetColumn` 与调度策略 `schedule`。
+  - 为 `quality.run_result.sample` 补齐 `jsonb` 写入映射。
+  - 新增质量规则创建 VO、规则 DTO、运行结果 DTO，Controller 返回前端友好的 DTO。
+  - `QualityService` 新增规则创建校验、规则列表/详情 DTO 转换、规则试跑、结果记录、告警创建和 `quality.check.*` 事件发布。
+  - `QualityAPI` 补齐规则创建、试跑、按目标查询、近期结果和告警接口。
+  - `QualityRules` 从 mock 切换为真实 API，创建弹窗资产/字段来自 Catalog，试跑按钮调用后端；未修改样式。
+  - `QualityResults` 从 mock 切换为真实规则与运行结果 API，展示通过率、失败行数、趋势和异常样例；未修改样式。
+  - 手工应用本地 quality V2 迁移，执行后端测试、前端构建、全工程跳测编译和后端重启。
+  - 使用真实 API 创建质量规则并执行试跑，验证运行结果、告警和 outbox 事件发布。
+  - 使用浏览器验证 `/quality/rules` 与 `/quality/results` 已展示真实数据。
+- 创建/修改的文件：
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/domain/entity/Rule.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/domain/entity/RunResult.java`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/quality/V2__quality_rule_target_column_schedule.sql`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/api/vo/CreateQualityRuleVO.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/dto/QualityRuleDTO.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/dto/QualityRunResultDTO.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/repository/RuleRepository.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/repository/RunResultRepository.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/service/QualityService.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/api/QualityController.java`
+  - `onelake-app/module-quality/src/test/java/com/onelake/quality/service/QualityServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/quality/QualityRules.tsx`
+  - `onelake-app/web-console/src/pages/quality/QualityResults.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 29：数据质量门禁失败处理最小闭环实施
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 新增 `QualityAlertDTO`，开放告警接口返回规则、字段、最近结果和异常样例摘要。
+  - `QualityAlertRepository` 改为按创建时间倒序查询开放告警。
+  - `QualityService#closeAlert` 增加租户隔离校验。
+  - `QualityController#alerts` 改为返回 `QualityAlertDTO`。
+  - `QualityAPI` 增加 `getRule` 与 `closeAlert`。
+  - 扩展前端 `QualityAlert` 类型，支持后端返回的质量门禁上下文字段。
+  - `GateFailed` 页面移除 mock 结果和 mock 审批记录依赖，改为加载真实开放告警。
+  - `GateFailed` 页面处理动作接入后端关闭告警；`block` 保持阻断状态不关闭告警。
+  - 将页面内消息调用切换为 AntD `App.useApp()`，避免浏览器产生 static message context 警告。
+  - 运行后端测试、全工程跳测编译、前端构建、后端重启、真实 API E2E 和浏览器点击验证。
+- 创建/修改的文件：
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/dto/QualityAlertDTO.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/repository/QualityAlertRepository.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/service/QualityService.java`
+  - `onelake-app/module-quality/src/main/java/com/onelake/quality/api/QualityController.java`
+  - `onelake-app/module-quality/src/test/java/com/onelake/quality/service/QualityServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/web-console/src/pages/quality/GateFailed.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
 
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
@@ -268,13 +631,15 @@
 | 2026-06-16 10:25 CST | PII 扫描消费失败：`security.pii_scan_record` 表不存在 | 1 | 手工应用 security V2 建表 |
 | 2026-06-16 10:26 CST | security V3 种子数据使用非法 UUID `pppppppp-...` | 1 | 改为合法 UUID 前缀 `99999999-...` 并重新应用 |
 | 2026-06-16 10:40 CST | 发布失败 toast 显示 `Request failed with status code 400` | 1 | 全局 axios 错误拦截器读取 `ApiResponse.message` 后复测通过 |
+| 2026-06-16 CST | 阶段 15 首次后端测试失败：既有测试仍假设 trigger 只 save 一次且 reconcile 只读 `getJobStatus` | 1 | 更新测试契约为 `QUEUED -> RUNNING` 双阶段落库和 `AirbyteJobSnapshot` 回写 |
+| 2026-06-16 CST | dry-run 单测 payload 自带 `airbyteConnectionId` 导致进入 connection 检查并默认失败 | 1 | 改为无 connection、具备动态创建配置的 dry-run 用例 |
 
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 8 已完成 |
-| 我要去哪里？ | 可进入 dry-run、run logs/cancel、Airbyte source/destination 动态创建或 Dagster 调度注册 |
-| 目标是什么？ | 推进采集任务创建流程闭环的下一轮开发 |
+| 我在哪里？ | 阶段 15 已完成 |
+| 我要去哪里？ | 下一步进入 Dagster 调度注册、Airbyte connector definition 自动发现/表单 schema、真实本地数据面联调 |
+| 目标是什么？ | 让数据集成从控制面创建进入可发布、可试跑、可触发、可回写、可诊断的完整闭环 |
 | 我学到了什么？ | 见 `findings.md` |
 | 我做了什么？ | 见上方记录 |
 

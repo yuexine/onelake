@@ -43,6 +43,7 @@
         <testcontainers.version>1.20.1</testcontainers.version>
         <redisson.version>3.32.0</redisson.version>
         <lombok.version>1.18.34</lombok.version>
+        <jsqlparser.version>4.9</jsqlparser.version>
     </properties>
 
     <dependencyManagement>
@@ -112,6 +113,11 @@
                 <groupId>org.testcontainers</groupId>
                 <artifactId>postgresql</artifactId>
                 <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.jsqlparser</groupId>
+                <artifactId>jsqlparser</artifactId>
+                <version>${jsqlparser.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

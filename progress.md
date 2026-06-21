@@ -740,6 +740,27 @@
   - `findings.md`
   - `progress.md`
 
+### 阶段 35：SQL 安全网关 parser 校验底座
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 在父 POM 增加 `jsqlparser.version` 与 dependencyManagement。
+  - `module-common` 引入 JSqlParser，并新增 `ReadOnlySqlValidator`。
+  - 校验器用 AST 解析替代字符串关键字匹配，要求单语句且只允许只读查询类语句。
+  - 补充 `ReadOnlySqlValidatorTest` 覆盖 SELECT/WITH、SHOW、DESCRIBE、EXPLAIN SELECT、多语句、写操作、CTAS、SELECT INTO 和无效 SQL。
+  - SQL 工作台和 SQL API 调试服务改为共用 `ReadOnlySqlValidator`。
+  - 运行 common、catalog、dataservice 模块测试。
+- 创建/修改的文件：
+  - `onelake-app/pom.xml`
+  - `onelake-app/module-common/pom.xml`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/sql/ReadOnlySqlValidator.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/sql/ReadOnlySqlValidatorTest.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/SqlApiRuntimeService.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|

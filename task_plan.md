@@ -289,6 +289,15 @@
 - [x] 运行 `module-catalog` 测试、前端 TypeScript 检查和 diff 空白检查
 - **状态：** complete
 
+### 阶段 35：SQL 安全网关 parser 校验底座
+- [x] 引入 JSqlParser 作为共享 SQL parser 依赖
+- [x] 在 `module-common` 新增 `ReadOnlySqlValidator`，统一只读和单语句校验
+- [x] 校验器仅允许 `SELECT/WITH`、`SHOW`、`DESCRIBE` 和 `EXPLAIN SELECT`
+- [x] 拒绝多语句、写操作、CTAS、`SELECT INTO` 和解析失败 SQL
+- [x] SQL 工作台和 SQL API 调试共用 parser 校验器，保留原业务错误码与文案
+- [x] 补充 common 单测并运行 common、catalog、dataservice 模块测试
+- **状态：** complete
+
 ## 关键问题
 1. 当前 `module-integration` 已落库和暴露的能力边界是什么？
 2. 前端数据集成页面实际需要哪些后端接口和异步状态？

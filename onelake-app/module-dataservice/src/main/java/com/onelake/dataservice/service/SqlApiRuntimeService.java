@@ -2,6 +2,7 @@ package com.onelake.dataservice.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.sql.ReadOnlySqlValidator;
 import com.onelake.dataservice.domain.entity.ApiDefinition;
 import com.onelake.dataservice.dto.SqlApiDebugResultDTO;
 import com.onelake.dataservice.repository.ApiDefinitionRepository;
@@ -18,7 +19,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
@@ -148,31 +148,12 @@ public class SqlApiRuntimeService {
     }
 
     private void validateReadOnly(String sql) {
-        String normalized = stripLeadingComments(sql).trim().toLowerCase(Locale.ROOT);
-        boolean allowed = normalized.startsWith("select ")
-            || normalized.startsWith("with ")
-            || normalized.startsWith("show ")
-            || normalized.startsWith("describe ")
-            || normalized.startsWith("desc ")
-            || normalized.startsWith("explain ");
-        if (!allowed) {
-            throw new BizException(40050, "SQL API 调试仅允许只读查询");
-        }
-        String withoutTrailingSemicolon = normalized.endsWith(";")
-            ? normalized.substring(0, normalized.length() - 1)
-            : normalized;
-        if (withoutTrailingSemicolon.contains(";")) {
-            throw new BizException(40050, "SQL API 调试不允许一次提交多条语句");
-        }
-        String padded = " " + withoutTrailingSemicolon + " ";
-        for (String keyword : List.of(
-            " insert ", " update ", " delete ", " merge ", " create ", " drop ",
-            " alter ", " truncate ", " grant ", " revoke ", " call ", " execute "
-        )) {
-            if (padded.contains(keyword)) {
-                throw new BizException(40050, "SQL API 调试仅允许只读查询");
-            }
-        }
+        ReadOnlySqlValidator.requireSingleReadOnlyStatement(
+            sql,
+            40050,
+            "SQL API 调试仅允许只读查询",
+            "SQL API 调试不允许一次提交多条语句"
+        );
     }
 
     private String normalizeSql(String sql) {
@@ -180,25 +161,6 @@ public class SqlApiRuntimeService {
             throw new BizException(40051, "SQL API 草稿没有可调试 SQL");
         }
         return sql.trim();
-    }
-
-    private String stripLeadingComments(String sql) {
-        String current = sql;
-        boolean changed;
-        do {
-            changed = false;
-            current = current.stripLeading();
-            if (current.startsWith("--")) {
-                int end = current.indexOf('\n');
-                current = end >= 0 ? current.substring(end + 1) : "";
-                changed = true;
-            } else if (current.startsWith("/*")) {
-                int end = current.indexOf("*/");
-                current = end >= 0 ? current.substring(end + 2) : "";
-                changed = true;
-            }
-        } while (changed);
-        return current;
     }
 
     private boolean isIdentifierStart(char ch) {

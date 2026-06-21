@@ -219,6 +219,13 @@
 - 查询成功、失败、取消路径都会保留已采集到的 Trino query id 和扫描量；如果 JDBC 未暴露 progress stats，则字段保持空，不再伪造扫描量。
 - 当前 `estimate` 仍未接 Trino `EXPLAIN` 或 resource group 阈值控制；安全网关仍是字符串级只读校验，SQL parser、Catalog 授权和 Security 脱敏仍是下一轮 P0。
 
+## 2026-06-21 SQL 安全网关 parser 校验底座发现
+- SQL 工作台和 SQL API 调试已从字符串关键字校验切到共享 `ReadOnlySqlValidator`，底层使用 JSqlParser 解析语句结构。
+- 新校验器要求解析结果恰好一条语句，并只允许 `Select`、`ShowStatement`、`DescribeStatement` 和 `ExplainStatement` 包裹的 Select。
+- `CREATE TABLE AS SELECT`、`INSERT ... SELECT`、`DROP`、多语句、`SELECT INTO`、无效 SQL 都会在连接 Trino 前失败。
+- SQL API 调试中的 `:param` 命名参数当前可被 JSqlParser 4.9 正常解析；已有缺参数单测仍在 bind 阶段返回业务错误。
+- 本轮仍未实现执行前 Catalog 资产授权，也未接 Security 模块字段脱敏和密级策略；parser 只是 P0 安全网关底座。
+
 ## 技术决策
 | 决策 | 理由 |
 |------|------|

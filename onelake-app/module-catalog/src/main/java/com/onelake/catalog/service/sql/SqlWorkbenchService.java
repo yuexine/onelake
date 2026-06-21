@@ -12,6 +12,7 @@ import com.onelake.catalog.repository.sql.SavedQueryRepository;
 import com.onelake.catalog.repository.sql.SqlQueryHistoryRepository;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.sql.ReadOnlySqlValidator;
 import io.trino.jdbc.QueryStats;
 import io.trino.jdbc.TrinoStatement;
 import jakarta.annotation.PreDestroy;
@@ -348,32 +349,12 @@ public class SqlWorkbenchService {
     }
 
     private void validateReadOnly(String sql) {
-        String normalized = stripLeadingComments(sql).trim().toLowerCase(Locale.ROOT);
-        boolean allowed = normalized.startsWith("select ")
-            || normalized.startsWith("with ")
-            || normalized.startsWith("show ")
-            || normalized.startsWith("describe ")
-            || normalized.startsWith("desc ")
-            || normalized.startsWith("explain ");
-        if (!allowed) {
-            throw new BizException(40040, "SQL 工作台仅允许只读查询");
-        }
-        String withoutTrailingSemicolon = normalized.endsWith(";")
-            ? normalized.substring(0, normalized.length() - 1)
-            : normalized;
-        if (withoutTrailingSemicolon.contains(";")) {
-            throw new BizException(40040, "SQL 工作台不允许一次提交多条语句");
-        }
-        List<String> forbidden = List.of(
-            " insert ", " update ", " delete ", " merge ", " create ", " drop ",
-            " alter ", " truncate ", " grant ", " revoke ", " call ", " execute "
+        ReadOnlySqlValidator.requireSingleReadOnlyStatement(
+            sql,
+            40040,
+            "SQL 工作台仅允许只读查询",
+            "SQL 工作台不允许一次提交多条语句"
         );
-        String padded = " " + withoutTrailingSemicolon + " ";
-        for (String keyword : forbidden) {
-            if (padded.contains(keyword)) {
-                throw new BizException(40040, "SQL 工作台仅允许只读查询");
-            }
-        }
     }
 
     private String normalizeSql(String sql) {
@@ -385,25 +366,6 @@ public class SqlWorkbenchService {
             throw new BizException(40043, "SQL 长度不能超过 100000 字符");
         }
         return normalized;
-    }
-
-    private String stripLeadingComments(String sql) {
-        String current = sql;
-        boolean changed;
-        do {
-            changed = false;
-            current = current.stripLeading();
-            if (current.startsWith("--")) {
-                int end = current.indexOf('\n');
-                current = end >= 0 ? current.substring(end + 1) : "";
-                changed = true;
-            } else if (current.startsWith("/*")) {
-                int end = current.indexOf("*/");
-                current = end >= 0 ? current.substring(end + 2) : "";
-                changed = true;
-            }
-        } while (changed);
-        return current;
     }
 
     private String engineOf(String engine) {

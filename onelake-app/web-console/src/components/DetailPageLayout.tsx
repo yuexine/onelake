@@ -7,6 +7,7 @@
 import { Tabs, Space, Typography, Breadcrumb } from 'antd';
 import { Link } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { useState } from 'react';
 
 const { Text } = Typography;
 
@@ -35,6 +36,16 @@ export function DetailPageLayout({
   title, subtitle, status, icon, breadcrumb, tabs, activeTab, onTabChange,
   actions = [], meta = [], rightExtra,
 }: Props) {
+  const [innerActiveTab, setInnerActiveTab] = useState(tabs[0]?.key);
+  const currentActiveTab = activeTab || innerActiveTab || tabs[0]?.key;
+
+  const handleTabChange = (key: string) => {
+    if (!activeTab) {
+      setInnerActiveTab(key);
+    }
+    onTabChange?.(key);
+  };
+
   return (
     <div className="ol-anim-fade">
       {breadcrumb && breadcrumb.length > 0 && (
@@ -83,9 +94,9 @@ export function DetailPageLayout({
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Tabs
-            activeKey={activeTab || tabs[0]?.key}
-            onChange={onTabChange}
-            destroyInactiveTabPane={false}
+            activeKey={currentActiveTab}
+            onChange={handleTabChange}
+            destroyOnHidden={false}
             items={tabs.map((t) => ({
               key: t.key,
               label: t.badge != null ? (

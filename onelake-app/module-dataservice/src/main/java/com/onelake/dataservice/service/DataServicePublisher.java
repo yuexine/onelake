@@ -42,10 +42,19 @@ public class DataServicePublisher {
     private String postgrestEndpoint;
 
     @Transactional
+    public ApiDefinition createDraft(ApiDefinition def) {
+        validateDefinition(def);
+        def.setStatus("DRAFT");
+        def.setTenantId(TenantContext.getTenantId());
+        ApiDefinition saved = apiRepo.save(def);
+        audit.audit("CREATE_DRAFT", "api", saved.getId().toString(),
+            Map.of("path", saved.getApiPath(), "view", saved.getViewName(), "sourceFqn", String.valueOf(saved.getSourceFqn())));
+        return saved;
+    }
+
+    @Transactional
     public ApiDefinition publish(ApiDefinition def) {
-        if (def.getViewName() == null || def.getSelectSql() == null) {
-            throw new BizException(40001, "viewName/selectSql 必填");
-        }
+        validateDefinition(def);
         // 1) 物化/暴露视图（PostgREST 会据此自动出 REST 端点）
         jdbc.execute("CREATE OR REPLACE VIEW dataservice_api." + def.getViewName() + " AS " + def.getSelectSql());
         jdbc.execute("GRANT SELECT ON dataservice_api." + def.getViewName() + " TO web_anon");
@@ -63,6 +72,14 @@ public class DataServicePublisher {
         audit.audit("PUBLISH", "api", def.getId().toString(),
             Map.of("path", def.getApiPath(), "view", def.getViewName()));
         return def;
+    }
+
+    private void validateDefinition(ApiDefinition def) {
+        if (def.getApiPath() == null || def.getApiPath().isBlank()
+            || def.getViewName() == null || def.getViewName().isBlank()
+            || def.getSelectSql() == null || def.getSelectSql().isBlank()) {
+            throw new BizException(40001, "apiPath/viewName/selectSql 必填");
+        }
     }
 
     private void registerRoute(ApiDefinition def) {
@@ -96,7 +113,8 @@ public class DataServicePublisher {
 
     @Transactional(readOnly = true)
     public ApiDefinition get(UUID id) {
-        return apiRepo.findById(id).orElseThrow(() -> new BizException(40400, "API 不存在"));
+        return apiRepo.findByTenantIdAndId(TenantContext.getTenantId(), id)
+            .orElseThrow(() -> new BizException(40400, "API 不存在"));
     }
 
     @Transactional

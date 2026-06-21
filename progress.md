@@ -470,6 +470,22 @@
 | 后端健康检查（质量门禁处理） | `curl -sS http://localhost:8080/actuator/health` | 后端重启后可用 | 返回 `status: UP` | 通过 |
 | 质量门禁真实 API E2E | 清理开放告警 -> 试跑质量规则 -> 查询开放告警 | 告警 DTO 带规则字段和最新失败样例 | 开放告警 `70453798-c138-4b7e-a023-3a4e69cf1790`，`targetColumn=id_card_hash`，`failedRows=32`，`sampleCount=3` | 通过 |
 | 质量门禁浏览器点击验证 | `/quality/gate` 选择“降级为告警”并点击“应用” | 前端调用 closeAlert，待处理告警关闭 | 页面从真实失败告警切换为“暂无质量门禁失败”；后端 `GET /quality/alerts` 返回空数组；控制台 0 error | 通过 |
+| module-catalog 测试（SQL 工作台现状检查） | `mvn -q -pl module-catalog -am test -Djacoco.skip=true` | SQL 工作台与 Catalog 相关单测通过 | 退出码 0；仅 JVM CDS warning 和预期测试日志 | 通过 |
+| 前端类型检查（SQL 工作台现状检查） | `pnpm exec tsc --noEmit` | SQL 工作台前端 API/类型契约通过 TypeScript 检查 | 退出码 0 | 通过 |
+| module-catalog 测试（SQL 查询生命周期） | `mvn -q -pl module-catalog -am test -Djacoco.skip=true` | SQL 工作台查询生命周期改动不破坏 Catalog 模块测试 | 退出码 0；仅 JVM CDS warning 和预期测试日志 | 通过 |
+| 全工程跳测编译（SQL 查询生命周期） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 退出码 0 | 通过 |
+| 前端类型检查（SQL 查询生命周期） | `pnpm exec tsc --noEmit` | 异步查询 API、状态枚举和页面状态机通过 TS 检查 | 退出码 0 | 通过 |
+| 前端构建（SQL 查询生命周期） | `pnpm build` | TypeScript 与 Vite 生产构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| diff 空白检查（SQL 查询生命周期） | `git diff --check` | 无尾随空白/补丁格式问题 | 无输出，退出码 0 | 通过 |
+| module-dataservice 测试（SQL 到 API 草稿） | `mvn -q -pl module-dataservice -am test -Djacoco.skip=true` | 数据服务草稿接口相关代码编译/测试通过 | 退出码 0；仅 JVM CDS warning | 通过 |
+| 全工程跳测编译（SQL 到 API 草稿） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 退出码 0 | 通过 |
+| 前端类型检查（SQL 到 API 草稿） | `pnpm exec tsc --noEmit` | SQL 工作台、API 向导、API 市场/详情真实 API 接入通过 TS 检查 | 退出码 0 | 通过 |
+| 前端构建（SQL 到 API 草稿） | `pnpm build` | TypeScript 与 Vite 生产构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| module-dataservice 测试（SQL API 调试运行） | `mvn -q -pl module-dataservice -am test -Djacoco.skip=true` | Trino 调试服务安全校验单测和模块编译通过 | 退出码 0；仅 JVM CDS warning | 通过 |
+| 全工程跳测编译（SQL API 调试运行） | `mvn -q install -DskipTests -Djacoco.skip=true` | 全模块编译安装通过 | 退出码 0 | 通过 |
+| 前端类型检查（SQL API 调试运行） | `pnpm exec tsc --noEmit` | API 详情调试区真实请求接入通过 TS 检查 | 退出码 0 | 通过 |
+| 前端构建（SQL API 调试运行） | `pnpm build` | TypeScript 与 Vite 生产构建通过 | 构建成功；仅有既有 chunk size warning | 通过 |
+| diff 空白检查（SQL API 调试运行） | `git diff --check` | 无尾随空白/补丁格式问题 | 无输出，退出码 0 | 通过 |
 
 ### 阶段 24：创建采集任务后自动触发目标表 PII 扫描
 - **状态：** complete
@@ -518,6 +534,92 @@
 ### 阶段 27：数据质量模块真实化实施计划与 UI 完整性检查
 - **状态：** complete
 - **开始时间：** 2026-06-21 CST
+
+### 阶段 30：SQL 工作台开发现状检查与后续计划
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 读取 `RTK.md`、规划文件、SQL 工作台后端 Controller/Service/DTO/Entity/Repository、Flyway V5、前端 `/lakehouse/sql` 页面、API 封装、类型和 Trino 配置。
+  - 确认 SQL 工作台已具备 Trino JDBC 同步执行、只读校验、结果预览、查询历史和保存查询；不是纯 mock。
+  - 识别当前缺口：真实扫描量估算、异步查询与取消、资产/字段权限、SQL AST 安全、表树字段层级、发布为 API/加入流水线上下文传递、Spark 文案与后端能力一致性。
+  - 运行后端 `module-catalog` 测试和前端 TypeScript 检查。
+- 创建/修改的文件：
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 31：SQL 工作台查询生命周期最小闭环
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - `SqlWorkbenchController` 新增异步提交、状态查询、取消查询接口，并保留同步执行接口。
+  - `SqlWorkbenchService` 新增内存运行态、短期结果保留、租户隔离校验和 JDBC Statement 取消逻辑。
+  - Trino 结果预览达到上限后截断返回，不再为了精确总行数消费完整结果集。
+  - 前端 `SqlWorkbenchAPI` 增加 `submit/query/cancel`。
+  - `SqlWorkbench` 页面运行 SQL 改为提交后轮询，查询中可取消；移除暂未支持的 Spark 选项，默认 SQL 改为 `SHOW SCHEMAS`。
+  - 表树点击会生成 `SELECT * FROM <fqn> LIMIT 100`，方便从资产进入查询。
+  - 运行后端模块测试、全工程跳测编译、前端类型检查和 diff 空白检查。
+  - 运行前端生产构建；构建通过，仅保留既有 chunk size warning。
+- 创建/修改的文件：
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/api/sql/SqlWorkbenchController.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/repository/sql/SqlQueryHistoryRepository.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/bootstrap/src/main/resources/application.yml`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 32：SQL 工作台到 API 草稿联动
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 识别现有数据服务发布器是 PostgREST/Postgres 视图发布链路，不能直接发布 Trino SQL。
+  - `DataServiceController` 新增 `/draft` 接口，`DataServicePublisher#createDraft` 保存 DRAFT API 并写审计，不触发 APISIX/PostgREST。
+  - `DataserviceAPI` 增加 `createDraft`，并将 list/get/publish/offline 改为解包后的类型契约。
+  - SQL 工作台“发布为 API”通过 router state 携带 SQL、来源资产和结果字段进入 API 向导。
+  - API 向导接收 SQL 工作台上下文，预填 API 路径、视图名、SQL、参数和返回字段；保存草稿调用真实后端。
+  - API 市场与详情页接真实 `DataserviceAPI.listApis/getApi`，失败时回退 mock。
+  - 运行数据服务模块测试、全工程跳测编译、前端类型检查和前端构建。
+- 创建/修改的文件：
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/api/DataServiceController.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/DataServicePublisher.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/pages/dataservice/ApiWizard.tsx`
+  - `onelake-app/web-console/src/pages/dataservice/ApiMarket.tsx`
+  - `onelake-app/web-console/src/pages/dataservice/ApiDetail.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 33：SQL API 草稿 Trino 调试运行
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 为 `module-dataservice` 增加 Trino JDBC 依赖。
+  - 新增 `SqlApiDebugResultDTO` 和 `SqlApiRuntimeService`。
+  - `SqlApiRuntimeService` 支持按租户读取 API 草稿、只读 SQL 校验、`:param` 命名参数绑定、Trino PreparedStatement 执行和预览结果截断。
+  - `ApiDefinitionRepository` 新增 `findByTenantIdAndId`，`DataServicePublisher#get` 改为租户隔离查询。
+  - `DataServiceController` 新增 `POST /api/v1/dataservice/apis/{id}/debug`。
+  - API 详情页调试区从 mock 响应改为 JSON 参数输入和真实调试请求。
+  - 新增 `SqlApiRuntimeServiceTest`，覆盖缺少命名参数和写 SQL 在连接 Trino 前被拒绝。
+  - 运行数据服务模块测试、全工程跳测编译、前端类型检查、前端构建和 diff 空白检查。
+- 创建/修改的文件：
+  - `onelake-app/module-dataservice/pom.xml`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/api/DataServiceController.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/dto/SqlApiDebugResultDTO.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/repository/ApiDefinitionRepository.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/DataServicePublisher.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/SqlApiRuntimeService.java`
+  - `onelake-app/module-dataservice/src/test/java/com/onelake/dataservice/service/SqlApiRuntimeServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/dataservice/ApiDetail.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
 - 执行的操作：
   - 读取 `module-quality` Controller、Service、Entity、Flyway 表结构。
   - 读取质量模块前端页面、路由、API 封装和类型定义。
@@ -611,6 +713,29 @@
   - `onelake-app/web-console/src/api/index.ts`
   - `onelake-app/web-console/src/types/index.ts`
   - `onelake-app/web-console/src/pages/quality/GateFailed.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 34：SQL 工作台真实边界与 Trino 观测收口
+- **状态：** complete
+- **开始时间：** 2026-06-21 CST
+- 执行的操作：
+  - 移除 SQL 工作台表树 Catalog 加载失败时的 `lakehouseAssets` mock fallback。
+  - 增加表树真实 loading/error/empty 状态，失败可重试，真实空数据不再伪装成样例表。
+  - 为查询结果和查询历史 DTO 增加 `trinoQueryId`，并同步前端类型。
+  - 新增 `catalog/V6__sql_query_history_trino_query_id.sql`，为历史表补 `trino_query_id` 字段和索引。
+  - 在 `SqlWorkbenchService` 中接入 Trino JDBC progress monitor，采集 query id 与扫描字节数。
+  - 查询成功、失败、取消均写回已采集到的 Trino query id 和 scan bytes；采集不到时保持空值。
+  - 运行后端模块测试、前端 TypeScript 检查和 diff 空白检查。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/catalog/V6__sql_query_history_trino_query_id.sql`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/domain/entity/sql/SqlQueryHistory.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/sql/SqlExecuteResultDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/sql/SqlQueryHistoryDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
   - `task_plan.md`
   - `findings.md`
   - `progress.md`

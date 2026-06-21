@@ -7,6 +7,7 @@ import java.util.UUID;
 public record SqlExecuteResultDTO(
     UUID historyId,
     String status,
+    String trinoQueryId,
     List<SqlColumnDTO> columns,
     List<Map<String, Object>> rows,
     Long durationMs,

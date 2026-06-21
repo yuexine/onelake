@@ -11,12 +11,14 @@ import com.onelake.common.api.ApiResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/lakehouse/sql")
@@ -33,6 +35,21 @@ public class SqlWorkbenchController {
     @PostMapping("/execute")
     public ApiResponse<SqlExecuteResultDTO> execute(@Valid @RequestBody SqlExecuteRequest request) {
         return ApiResponse.ok(service.execute(request));
+    }
+
+    @PostMapping("/queries")
+    public ApiResponse<SqlExecuteResultDTO> submit(@Valid @RequestBody SqlExecuteRequest request) {
+        return ApiResponse.ok(service.submit(request));
+    }
+
+    @GetMapping("/queries/{id}")
+    public ApiResponse<SqlExecuteResultDTO> query(@PathVariable UUID id) {
+        return ApiResponse.ok(service.query(id));
+    }
+
+    @PostMapping("/queries/{id}/cancel")
+    public ApiResponse<SqlExecuteResultDTO> cancel(@PathVariable UUID id) {
+        return ApiResponse.ok(service.cancel(id));
     }
 
     @GetMapping("/history")

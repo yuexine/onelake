@@ -143,7 +143,8 @@ export interface SqlColumn {
 
 export interface SqlExecuteResult {
   historyId: UUID;
-  status: 'SUCCEEDED' | 'FAILED';
+  status: 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  trinoQueryId?: string;
   columns: SqlColumn[];
   rows: Record<string, unknown>[];
   durationMs?: number;
@@ -157,6 +158,7 @@ export interface SqlQueryHistory {
   id: UUID;
   runner: string;
   at: string;
+  trinoQueryId?: string;
   scanBytes?: number;
   durationMs?: number;
   ok: boolean;

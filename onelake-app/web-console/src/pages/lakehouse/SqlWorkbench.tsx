@@ -6,10 +6,10 @@ import { Row, Col, Tree, Space, Button, Select, Tag, Table, Alert, Tabs, Tooltip
 import {
   PlayCircleOutlined, FormatPainterOutlined, SaveOutlined,
   ApiOutlined, ClusterOutlined, CodeOutlined, DatabaseOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { lakehouseAssets } from '../../mock';
 import Editor from '@monaco-editor/react';
 import { PageHeader, SectionCard } from '../../components';
 import { CatalogAPI, SqlWorkbenchAPI } from '../../api';
@@ -80,9 +80,10 @@ function TableTreeTitle({ fqn }: { fqn: string }) {
 
 export default function SqlWorkbench() {
   const navigate = useNavigate();
-  const [sql, setSql] = useState(`SELECT * FROM dwd_order_df
-WHERE dt = '2026-06-14'`);
-  const [assets, setAssets] = useState<Asset[]>(lakehouseAssets);
+  const [sql, setSql] = useState('SHOW SCHEMAS');
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetLoading, setAssetLoading] = useState(true);
+  const [assetError, setAssetError] = useState<string>();
   const [history, setHistory] = useState<SqlQueryHistory[]>([]);
   const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
   const [result, setResult] = useState<SqlExecuteResult>();
@@ -91,11 +92,20 @@ WHERE dt = '2026-06-14'`);
   const [estimateMessage, setEstimateMessage] = useState('运行前将进行只读校验；扫描量以执行引擎返回为准');
   const [queryError, setQueryError] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const [currentQueryId, setCurrentQueryId] = useState<string>();
+  const [cancelling, setCancelling] = useState(false);
+  const [selectedAssetFqn, setSelectedAssetFqn] = useState<string>();
 
   const loadAssets = () => {
+    setAssetLoading(true);
+    setAssetError(undefined);
     CatalogAPI.listAssets()
       .then((items) => setAssets(normalizeCatalogAssets(items)))
-      .catch(() => setAssets(lakehouseAssets));
+      .catch((e) => {
+        setAssets([]);
+        setAssetError(e.message || 'Catalog 资产加载失败');
+      })
+      .finally(() => setAssetLoading(false));
   };
 
   const loadHistory = () => {
@@ -116,24 +126,86 @@ WHERE dt = '2026-06-14'`);
     loadSavedQueries();
   }, []);
 
+  useEffect(() => {
+    if (!currentQueryId || !loading) return undefined;
+    const timer = window.setInterval(() => {
+      SqlWorkbenchAPI.query(currentQueryId)
+        .then((data) => {
+          setResult(data);
+          if (data.status === 'RUNNING') return;
+          setCurrentQueryId(undefined);
+          setLoading(false);
+          setCancelling(false);
+          loadHistory();
+          if (data.status === 'SUCCEEDED') {
+            message.success(`SQL 已完成，返回 ${data.rows.length} 行预览`);
+          } else if (data.status === 'CANCELLED') {
+            message.info('SQL 查询已取消');
+          } else {
+            setQueryError(data.error || 'SQL 执行失败');
+            message.error(data.error || 'SQL 执行失败');
+          }
+        })
+        .catch((e) => {
+          setCurrentQueryId(undefined);
+          setLoading(false);
+          setCancelling(false);
+          setQueryError(e.message || '查询状态获取失败');
+          message.error(e.message || '查询状态获取失败');
+          loadHistory();
+        });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [currentQueryId, loading]);
+
   const executeSql = (nextSql = sql) => {
     setLoading(true);
     setQueryError(undefined);
+    setCancelling(false);
     SqlWorkbenchAPI.estimate({ sql: nextSql, engine, resourceGroup })
       .then((estimate) => setEstimateMessage(estimate.message))
-      .then(() => SqlWorkbenchAPI.execute({ sql: nextSql, engine, resourceGroup }))
+      .then(() => SqlWorkbenchAPI.submit({ sql: nextSql, engine, resourceGroup }))
       .then((data) => {
         setResult(data);
-        message.success(`SQL 已完成，返回 ${data.rows.length} 行预览`);
+        setCurrentQueryId(data.historyId);
+        message.loading({ content: 'SQL 查询已提交，正在执行', key: 'sql-running', duration: 1.5 });
       })
       .catch((e) => {
+        setCurrentQueryId(undefined);
         setQueryError(e.message || 'SQL 执行失败');
         message.error(e.message || 'SQL 执行失败');
-      })
-      .finally(() => {
         setLoading(false);
         loadHistory();
       });
+  };
+
+  const cancelCurrentQuery = () => {
+    if (!currentQueryId) return;
+    setCancelling(true);
+    SqlWorkbenchAPI.cancel(currentQueryId)
+      .then((data) => {
+        setResult(data);
+        setCurrentQueryId(undefined);
+        setLoading(false);
+        setCancelling(false);
+        message.info('SQL 查询已取消');
+        loadHistory();
+      })
+      .catch((e) => {
+        setCancelling(false);
+        message.error(e.message || '取消查询失败');
+      });
+  };
+
+  const openApiWizard = (nextSql = sql) => {
+    navigate('/dataservice/apis/new', {
+      state: {
+        from: 'sql-workbench',
+        sql: nextSql,
+        sourceFqn: selectedAssetFqn,
+        columns: result?.columns || [],
+      },
+    });
   };
 
   const saveCurrentQuery = () => {
@@ -204,7 +276,7 @@ WHERE dt = '2026-06-14'`);
             ))}
           </Space>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {result ? `预览 ${result.rows.length} / ${result.rowCount ?? result.rows.length} 行${result.truncated ? '（已截断）' : ''}` : '尚未运行'}
+            {result ? `预览 ${result.rows.length} 行${result.truncated ? '（已截断）' : ''}` : '尚未运行'}
           </Text>
         </div>
 
@@ -231,7 +303,7 @@ WHERE dt = '2026-06-14'`);
           <Text type="secondary" style={{ fontSize: 12 }}>结果可保存为模型、API 或流水线节点</Text>
           <Space size={8}>
             <Button size="small" icon={<SaveOutlined />} onClick={() => message.success('已另存为模型')}>另存为模型</Button>
-            <Button size="small" icon={<ApiOutlined />} onClick={() => navigate('/dataservice/apis/new')}>发布为 API</Button>
+            <Button size="small" icon={<ApiOutlined />} onClick={() => openApiWizard()}>发布为 API</Button>
             <Button size="small" icon={<ClusterOutlined />} onClick={() => navigate('/orchestration/pipelines/new')}>加入流水线</Button>
           </Space>
         </div>
@@ -255,7 +327,7 @@ WHERE dt = '2026-06-14'`);
             }}>{o ? '✓ 成功' : '✗ 失败'}</span>
           ) },
           { title: 'SQL', dataIndex: 'sql', ellipsis: true, render: (s: string) => <Text code style={{ fontSize: 11 }}>{s}</Text> },
-          { title: '操作', render: (_: unknown, row: SqlQueryHistory) => <Space><a className="ol-link" onClick={() => { setSql(row.sql); executeSql(row.sql); }}>重新运行</a><a className="ol-link" onClick={() => navigate('/dataservice/apis/new')}>发布为 API</a></Space> },
+          { title: '操作', render: (_: unknown, row: SqlQueryHistory) => <Space><a className="ol-link" onClick={() => { setSql(row.sql); executeSql(row.sql); }}>重新运行</a><a className="ol-link" onClick={() => openApiWizard(row.sql)}>发布为 API</a></Space> },
         ]} />
     ) },
     { key: 'saved', label: '保存的查询', children: (
@@ -277,12 +349,11 @@ WHERE dt = '2026-06-14'`);
         icon={<CodeOutlined />}
         title="SQL 工作台"
         subtitle={<span className="ol-chip">湖仓 · L2-4</span>}
-        description="Trino / Spark 双引擎，支持表树、SQL 编辑、结果图表、查询历史"
+        description="Trino 交互式查询，支持表树、SQL 编辑、结果图表、查询历史"
         actions={
           <>
             <Select value={engine} onChange={setEngine} options={[
               { label: '自动路由 → Trino', value: 'auto' },
-              { label: 'Spark', value: 'spark' },
             ]} style={{ width: 180 }} />
             <Select value={resourceGroup} onChange={setResourceGroup} options={[
               { label: '资源组: 默认', value: 'rg-default' },
@@ -295,9 +366,36 @@ WHERE dt = '2026-06-14'`);
       <Row gutter={16}>
         <Col xs={24} lg={5}>
           <SectionCard title="表树" icon={<DatabaseOutlined />} padded="sm">
+            {assetError && (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 10, borderRadius: 6 }}
+                message={<span style={{ fontSize: 12 }}>{assetError}</span>}
+                action={<Button size="small" onClick={loadAssets}>重试</Button>}
+              />
+            )}
+            {!assetError && !assetLoading && assets.length === 0 && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 10, borderRadius: 6 }}
+                message={<span style={{ fontSize: 12 }}>Catalog 暂无可查询表</span>}
+              />
+            )}
+            {assetLoading && (
+              <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--ol-ink-3)' }}>正在加载 Catalog 资产...</div>
+            )}
             <Tree
               blockNode
               style={{ fontSize: 13 }}
+              onSelect={(_, info) => {
+                const asset = assets.find((a) => a.id === info.node.key);
+                if (asset) {
+                  setSelectedAssetFqn(asset.fqn);
+                  setSql(`SELECT * FROM ${asset.fqn}\nLIMIT 100`);
+                }
+              }}
               treeData={assets.map((a) => ({
                 title: <TableTreeTitle fqn={a.fqn} />,
                 key: a.id,
@@ -314,6 +412,9 @@ WHERE dt = '2026-06-14'`);
               <Space>
                 <Tooltip title="格式化"><Button size="small" icon={<FormatPainterOutlined />} /></Tooltip>
                 <Tooltip title="保存查询"><Button size="small" icon={<SaveOutlined />} onClick={saveCurrentQuery} /></Tooltip>
+                {currentQueryId && (
+                  <Button size="small" icon={<StopOutlined />} loading={cancelling} onClick={cancelCurrentQuery}>取消</Button>
+                )}
                 <Button type="primary" size="small" icon={<PlayCircleOutlined />} loading={loading} onClick={() => executeSql()}>运行</Button>
               </Space>
             }

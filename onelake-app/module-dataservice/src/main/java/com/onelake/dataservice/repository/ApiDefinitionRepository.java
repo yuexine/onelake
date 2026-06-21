@@ -9,5 +9,6 @@ import java.util.UUID;
 
 public interface ApiDefinitionRepository extends JpaRepository<ApiDefinition, UUID> {
     List<ApiDefinition> findByTenantId(UUID tenantId);
+    Optional<ApiDefinition> findByTenantIdAndId(UUID tenantId, UUID id);
     Optional<ApiDefinition> findByApiPath(String apiPath);
 }

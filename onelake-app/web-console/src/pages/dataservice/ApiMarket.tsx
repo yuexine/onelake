@@ -4,19 +4,29 @@
 import { Table, Tag, Space, Button, Input, Select, message, Typography } from 'antd';
 import { PlusOutlined, CloudOutlined, ApiOutlined, TeamOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 import { apis } from '../../mock';
+import { DataserviceAPI } from '../../api';
 import { ClassificationBadge, StatusBadge, PageHeader, SectionCard, FilterBar, StateView } from '../../components';
+import type { ApiDefinition } from '../../types';
 
 const { Text } = Typography;
 
 export default function ApiMarket() {
   const navigate = useNavigate();
+  const [apiList, setApiList] = useState<ApiDefinition[]>(apis);
+
+  useEffect(() => {
+    DataserviceAPI.listApis()
+      .then(setApiList)
+      .catch(() => setApiList(apis));
+  }, []);
 
   const counts = {
-    total: apis.length,
-    published: apis.filter((a) => a.status === 'PUBLISHED').length,
-    deprecated: apis.filter((a) => a.status === 'DEPRECATED').length,
-    subscribers: apis.reduce((sum, a) => sum + (a.subscriberCount || 0), 0),
+    total: apiList.length,
+    published: apiList.filter((a) => a.status === 'PUBLISHED').length,
+    deprecated: apiList.filter((a) => a.status === 'DEPRECATED').length,
+    subscribers: apiList.reduce((sum, a) => sum + (a.subscriberCount || 0), 0),
   };
 
   return (
@@ -50,13 +60,13 @@ export default function ApiMarket() {
               options={['L1', 'L2', 'L3', 'L4'].map((v) => ({ label: v, value: v }))} />
           </>
         }
-        summary={<span className="ol-quiet" style={{ fontSize: 12 }}>共 {apis.length} 条</span>}
+        summary={<span className="ol-quiet" style={{ fontSize: 12 }}>共 {apiList.length} 条</span>}
       />
 
       <SectionCard title="API 列表" icon={<ApiOutlined />} flatBody>
         <Table
           rowKey="id"
-          dataSource={apis}
+          dataSource={apiList}
           size="middle"
           pagination={{ pageSize: 20 }}
           locale={{

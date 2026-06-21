@@ -1,5 +1,6 @@
 import { http } from './http';
 import type {
+  ApiDefinition,
   Asset,
   DataSource,
   QualityAlert,
@@ -252,6 +253,15 @@ export const SqlWorkbenchAPI = {
   execute: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
     unwrap<SqlExecuteResult>(http.post('/lakehouse/sql/execute', payload)),
 
+  submit: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
+    unwrap<SqlExecuteResult>(http.post('/lakehouse/sql/queries', payload)),
+
+  query: (id: string) =>
+    unwrap<SqlExecuteResult>(http.get(`/lakehouse/sql/queries/${id}`)),
+
+  cancel: (id: string) =>
+    unwrap<SqlExecuteResult>(http.post(`/lakehouse/sql/queries/${id}/cancel`)),
+
   history: () =>
     unwrap<SqlQueryHistory[]>(http.get('/lakehouse/sql/history')),
 
@@ -295,8 +305,18 @@ export const SecurityAPI = {
 };
 
 export const DataserviceAPI = {
-  listApis: () => http.get('/dataservice/apis'),
-  getApi: (id: string) => http.get(`/dataservice/apis/${id}`),
-  publishApi: (id: string) => http.post(`/dataservice/apis/${id}/publish`),
-  offlineApi: (id: string) => http.post(`/dataservice/apis/${id}/offline`),
+  listApis: () => unwrap<ApiDefinition[]>(http.get('/dataservice/apis')),
+  getApi: (id: string) => unwrap<ApiDefinition>(http.get(`/dataservice/apis/${id}`)),
+  createDraft: (payload: Partial<ApiDefinition>) =>
+    unwrap<ApiDefinition>(http.post('/dataservice/apis/draft', payload)),
+  debugApi: (id: string, params: Record<string, unknown>) =>
+    unwrap<{
+      columns: { name: string; type: string }[];
+      rows: Record<string, unknown>[];
+      durationMs: number;
+      rowCount: number;
+      truncated: boolean;
+    }>(http.post(`/dataservice/apis/${id}/debug`, params)),
+  publishApi: (id: string) => unwrap<ApiDefinition>(http.post(`/dataservice/apis/${id}/publish`)),
+  offlineApi: (id: string) => unwrap<void>(http.post(`/dataservice/apis/${id}/offline`)),
 };

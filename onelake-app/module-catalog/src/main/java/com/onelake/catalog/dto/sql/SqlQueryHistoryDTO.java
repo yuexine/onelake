@@ -7,6 +7,7 @@ public record SqlQueryHistoryDTO(
     UUID id,
     String runner,
     Instant at,
+    String trinoQueryId,
     Long scanBytes,
     Long durationMs,
     boolean ok,

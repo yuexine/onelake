@@ -40,6 +40,9 @@ public class SqlQueryHistory {
     @Column(nullable = false, length = 16)
     private String status;
 
+    @Column(length = 128)
+    private String trinoQueryId;
+
     private Long durationMs;
 
     private Long scanBytes;

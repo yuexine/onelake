@@ -12,6 +12,9 @@ import com.onelake.catalog.repository.sql.SavedQueryRepository;
 import com.onelake.catalog.repository.sql.SqlQueryHistoryRepository;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import io.trino.jdbc.QueryStats;
+import io.trino.jdbc.TrinoStatement;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -20,16 +23,22 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @Service
 @RequiredArgsConstructor
@@ -37,9 +46,13 @@ public class SqlWorkbenchService {
 
     private static final String STATUS_SUCCEEDED = "SUCCEEDED";
     private static final String STATUS_FAILED = "FAILED";
+    private static final String STATUS_RUNNING = "RUNNING";
+    private static final String STATUS_CANCELLED = "CANCELLED";
 
     private final SqlQueryHistoryRepository historyRepo;
     private final SavedQueryRepository savedQueryRepo;
+    private final Map<UUID, QueryTask> queryTasks = new ConcurrentHashMap<>();
+    private final ExecutorService queryExecutor = Executors.newCachedThreadPool();
 
     @Value("${onelake.dataplane.trino.jdbc-url:jdbc:trino://localhost:18080/iceberg}")
     private String trinoJdbcUrl;
@@ -58,6 +71,14 @@ public class SqlWorkbenchService {
 
     @Value("${onelake.dataplane.trino.scan-threshold-bytes:1099511627776}")
     private long scanThresholdBytes;
+
+    @Value("${onelake.dataplane.trino.result-retention-minutes:15}")
+    private long resultRetentionMinutes;
+
+    @PreDestroy
+    public void shutdown() {
+        queryExecutor.shutdownNow();
+    }
 
     @Transactional(readOnly = true)
     public List<SqlQueryHistoryDTO> history() {
@@ -117,14 +138,17 @@ public class SqlWorkbenchService {
         String engine = engineOf(request.engine());
         SqlQueryHistory history = createHistory(sql, engine, request.resourceGroup());
         Instant started = Instant.now();
+        QueryTask task = QueryTask.direct(history.getId(), sql, engine, request.resourceGroup(), started);
         try {
             validateReadOnly(sql);
             if (!"TRINO".equals(engine)) {
                 throw new BizException(40042, "当前仅支持 Trino 查询执行");
             }
-            SqlExecuteResultDTO result = executeTrino(sql, history.getId(), started);
+            SqlExecuteResultDTO result = executeTrino(task);
             history.setStatus(STATUS_SUCCEEDED);
             history.setDurationMs(result.durationMs());
+            history.setTrinoQueryId(result.trinoQueryId());
+            history.setScanBytes(result.scanBytes());
             history.setRowCount(result.rowCount());
             historyRepo.save(history);
             return result;
@@ -132,6 +156,8 @@ public class SqlWorkbenchService {
             String message = rootMessage(e);
             history.setStatus(STATUS_FAILED);
             history.setDurationMs(Duration.between(started, Instant.now()).toMillis());
+            history.setTrinoQueryId(task.trinoQueryId);
+            history.setScanBytes(task.scanBytes);
             history.setErrorCode(e instanceof BizException biz ? String.valueOf(biz.getCode()) : "SQL_EXECUTION_FAILED");
             history.setErrorMessage(message);
             historyRepo.save(history);
@@ -142,7 +168,117 @@ public class SqlWorkbenchService {
         }
     }
 
-    private SqlExecuteResultDTO executeTrino(String sql, UUID historyId, Instant started) throws Exception {
+    public SqlExecuteResultDTO submit(SqlExecuteRequest request) {
+        cleanupFinishedTasks();
+        String sql = normalizeSql(request.sql());
+        String engine = engineOf(request.engine());
+        SqlQueryHistory history = createHistory(sql, engine, request.resourceGroup());
+        QueryTask task = new QueryTask(
+            history.getId(),
+            sql,
+            engine,
+            request.resourceGroup(),
+            TenantContext.getTenantId(),
+            TenantContext.getUserId(),
+            runnerName(),
+            Instant.now()
+        );
+        queryTasks.put(history.getId(), task);
+        task.future = queryExecutor.submit(() -> runAsync(task));
+        return runningResult(task);
+    }
+
+    @Transactional(readOnly = true)
+    public SqlExecuteResultDTO query(UUID id) {
+        QueryTask task = queryTasks.get(id);
+        if (task != null) {
+            ensureTaskTenant(task);
+            SqlExecuteResultDTO result = task.result;
+            return result != null ? result : runningResult(task);
+        }
+        SqlQueryHistory history = historyRepo.findByTenantIdAndId(TenantContext.getTenantId(), id)
+            .orElseThrow(() -> new BizException(40404, "SQL 查询不存在"));
+        return historyResult(history);
+    }
+
+    public SqlExecuteResultDTO cancel(UUID id) {
+        QueryTask task = queryTasks.get(id);
+        if (task == null) {
+            SqlQueryHistory history = historyRepo.findByTenantIdAndId(TenantContext.getTenantId(), id)
+                .orElseThrow(() -> new BizException(40404, "SQL 查询不存在"));
+            if (STATUS_RUNNING.equals(history.getStatus())) {
+                markCancelled(history, Instant.now());
+                historyRepo.save(history);
+                return historyResult(history);
+            }
+            return historyResult(history);
+        }
+        ensureTaskTenant(task);
+        task.cancelRequested = true;
+        Statement statement = task.statement;
+        if (statement != null) {
+            try {
+                statement.cancel();
+            } catch (SQLException ignored) {
+                // The worker will persist the final cancellation/failure state.
+            }
+        }
+        Future<?> future = task.future;
+        if (future != null) {
+            future.cancel(true);
+        }
+        markTaskCancelled(task);
+        return task.result;
+    }
+
+    private void runAsync(QueryTask task) {
+        TenantContext.setTenantId(task.tenantId);
+        TenantContext.setUserId(task.userId);
+        TenantContext.setUsername(task.username);
+        try {
+            validateReadOnly(task.sql);
+            if (!"TRINO".equals(task.engine)) {
+                throw new BizException(40042, "当前仅支持 Trino 查询执行");
+            }
+            SqlExecuteResultDTO result = executeTrino(task);
+            if (task.cancelRequested || Thread.currentThread().isInterrupted()) {
+                markTaskCancelled(task);
+            } else {
+                task.result = result;
+                task.finishedAt = Instant.now();
+                historyRepo.findByTenantIdAndId(task.tenantId, task.historyId).ifPresent(history -> {
+                    history.setStatus(STATUS_SUCCEEDED);
+                    history.setDurationMs(result.durationMs());
+                    history.setTrinoQueryId(result.trinoQueryId());
+                    history.setScanBytes(result.scanBytes());
+                    history.setRowCount(result.rowCount());
+                    historyRepo.save(history);
+                });
+            }
+        } catch (Exception e) {
+            if (task.cancelRequested || Thread.currentThread().isInterrupted()) {
+                markTaskCancelled(task);
+            } else {
+                String message = rootMessage(e);
+                long durationMs = Duration.between(task.startedAt, Instant.now()).toMillis();
+                task.result = failedResult(task, durationMs, message);
+                task.finishedAt = Instant.now();
+                historyRepo.findByTenantIdAndId(task.tenantId, task.historyId).ifPresent(history -> {
+                    history.setStatus(STATUS_FAILED);
+                    history.setDurationMs(durationMs);
+                    history.setTrinoQueryId(task.trinoQueryId);
+                    history.setScanBytes(task.scanBytes);
+                    history.setErrorCode(e instanceof BizException biz ? String.valueOf(biz.getCode()) : "SQL_EXECUTION_FAILED");
+                    history.setErrorMessage(message);
+                    historyRepo.save(history);
+                });
+            }
+        } finally {
+            TenantContext.clear();
+        }
+    }
+
+    private SqlExecuteResultDTO executeTrino(QueryTask task) throws Exception {
         Class.forName("io.trino.jdbc.TrinoDriver");
         Properties properties = new Properties();
         properties.setProperty("user", trinoUser);
@@ -152,7 +288,9 @@ public class SqlWorkbenchService {
         try (var connection = DriverManager.getConnection(trinoJdbcUrl, properties);
              Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(timeoutSeconds);
-            try (ResultSet rs = statement.executeQuery(sql)) {
+            task.statement = statement;
+            attachProgressMonitor(statement, task);
+            try (ResultSet rs = statement.executeQuery(task.sql)) {
                 ResultSetMetaData meta = rs.getMetaData();
                 List<SqlExecuteResultDTO.SqlColumnDTO> columns = new ArrayList<>();
                 for (int i = 1; i <= meta.getColumnCount(); i++) {
@@ -163,11 +301,11 @@ public class SqlWorkbenchService {
                 }
 
                 List<Map<String, Object>> rows = new ArrayList<>();
-                long totalRows = 0;
+                boolean truncated = false;
                 while (rs.next()) {
-                    totalRows++;
                     if (rows.size() >= maxRows) {
-                        continue;
+                        truncated = true;
+                        break;
                     }
                     Map<String, Object> row = new LinkedHashMap<>();
                     for (int i = 1; i <= meta.getColumnCount(); i++) {
@@ -175,18 +313,22 @@ public class SqlWorkbenchService {
                     }
                     rows.add(row);
                 }
-                long durationMs = Duration.between(started, Instant.now()).toMillis();
+                long durationMs = Duration.between(task.startedAt, Instant.now()).toMillis();
                 return new SqlExecuteResultDTO(
-                    historyId,
+                    task.historyId,
                     STATUS_SUCCEEDED,
+                    task.trinoQueryId,
                     columns,
                     rows,
                     durationMs,
-                    null,
-                    totalRows,
-                    totalRows > rows.size(),
+                    task.scanBytes,
+                    (long) rows.size(),
+                    truncated,
                     null
                 );
+            } finally {
+                clearProgressMonitor(statement);
+                task.statement = null;
             }
         }
     }
@@ -276,6 +418,7 @@ public class SqlWorkbenchService {
             history.getId(),
             history.getRunner(),
             history.getCreatedAt(),
+            history.getTrinoQueryId(),
             history.getScanBytes(),
             history.getDurationMs(),
             STATUS_SUCCEEDED.equals(history.getStatus()),
@@ -318,5 +461,176 @@ public class SqlWorkbenchService {
             return String.format(Locale.ROOT, "%.2f GB", bytes / 1_073_741_824.0);
         }
         return bytes + " B";
+    }
+
+    private void attachProgressMonitor(Statement statement, QueryTask task) {
+        try {
+            statement.unwrap(TrinoStatement.class).setProgressMonitor(stats -> updateTaskStats(task, stats));
+        } catch (SQLException ignored) {
+            // Non-Trino wrappers can still execute; stats stay empty in that case.
+        }
+    }
+
+    private void clearProgressMonitor(Statement statement) {
+        try {
+            statement.unwrap(TrinoStatement.class).clearProgressMonitor();
+        } catch (SQLException ignored) {
+            // Best-effort cleanup only.
+        }
+    }
+
+    private void updateTaskStats(QueryTask task, QueryStats stats) {
+        if (stats == null) {
+            return;
+        }
+        task.trinoQueryId = stats.getQueryId();
+        long scanBytes = Math.max(stats.getProcessedBytes(), stats.getPhysicalInputBytes());
+        if (scanBytes > 0) {
+            task.scanBytes = scanBytes;
+        }
+    }
+
+    private SqlExecuteResultDTO runningResult(UUID historyId) {
+        return new SqlExecuteResultDTO(historyId, STATUS_RUNNING, null, List.of(), List.of(), null, null, null, false, null);
+    }
+
+    private SqlExecuteResultDTO runningResult(QueryTask task) {
+        return new SqlExecuteResultDTO(
+            task.historyId,
+            STATUS_RUNNING,
+            task.trinoQueryId,
+            List.of(),
+            List.of(),
+            null,
+            task.scanBytes,
+            null,
+            false,
+            null
+        );
+    }
+
+    private SqlExecuteResultDTO failedResult(QueryTask task, long durationMs, String message) {
+        return new SqlExecuteResultDTO(
+            task.historyId,
+            STATUS_FAILED,
+            task.trinoQueryId,
+            List.of(),
+            List.of(),
+            durationMs,
+            task.scanBytes,
+            null,
+            false,
+            message
+        );
+    }
+
+    private SqlExecuteResultDTO cancelledResult(QueryTask task, long durationMs) {
+        return new SqlExecuteResultDTO(
+            task.historyId,
+            STATUS_CANCELLED,
+            task.trinoQueryId,
+            List.of(),
+            List.of(),
+            durationMs,
+            task.scanBytes,
+            null,
+            false,
+            "查询已取消"
+        );
+    }
+
+    private SqlExecuteResultDTO historyResult(SqlQueryHistory history) {
+        return new SqlExecuteResultDTO(
+            history.getId(),
+            history.getStatus(),
+            history.getTrinoQueryId(),
+            List.of(),
+            List.of(),
+            history.getDurationMs(),
+            history.getScanBytes(),
+            history.getRowCount(),
+            false,
+            history.getErrorMessage()
+        );
+    }
+
+    private void markTaskCancelled(QueryTask task) {
+        if (STATUS_CANCELLED.equals(task.result == null ? null : task.result.status())) {
+            return;
+        }
+        Instant finishedAt = Instant.now();
+        long durationMs = Duration.between(task.startedAt, finishedAt).toMillis();
+        task.result = cancelledResult(task, durationMs);
+        task.finishedAt = finishedAt;
+        historyRepo.findByTenantIdAndId(task.tenantId, task.historyId).ifPresent(history -> {
+            markCancelled(history, finishedAt);
+            history.setTrinoQueryId(task.trinoQueryId);
+            history.setScanBytes(task.scanBytes);
+            historyRepo.save(history);
+        });
+    }
+
+    private void markCancelled(SqlQueryHistory history, Instant finishedAt) {
+        history.setStatus(STATUS_CANCELLED);
+        history.setDurationMs(Duration.between(history.getCreatedAt(), finishedAt).toMillis());
+        history.setErrorCode("SQL_QUERY_CANCELLED");
+        history.setErrorMessage("查询已取消");
+    }
+
+    private void cleanupFinishedTasks() {
+        Instant cutoff = Instant.now().minus(Duration.ofMinutes(resultRetentionMinutes));
+        queryTasks.values().stream()
+            .filter(task -> task.finishedAt != null && task.finishedAt.isBefore(cutoff))
+            .sorted(Comparator.comparing(task -> task.finishedAt))
+            .map(task -> task.historyId)
+            .forEach(queryTasks::remove);
+    }
+
+    private void ensureTaskTenant(QueryTask task) {
+        if (!TenantContext.getTenantId().equals(task.tenantId)) {
+            throw new BizException(40404, "SQL 查询不存在");
+        }
+    }
+
+    private static final class QueryTask {
+        private final UUID historyId;
+        private final String sql;
+        private final String engine;
+        private final String resourceGroup;
+        private final UUID tenantId;
+        private final UUID userId;
+        private final String username;
+        private final Instant startedAt;
+        private volatile Statement statement;
+        private volatile Future<?> future;
+        private volatile boolean cancelRequested;
+        private volatile String trinoQueryId;
+        private volatile Long scanBytes;
+        private volatile SqlExecuteResultDTO result;
+        private volatile Instant finishedAt;
+
+        private QueryTask(
+            UUID historyId,
+            String sql,
+            String engine,
+            String resourceGroup,
+            UUID tenantId,
+            UUID userId,
+            String username,
+            Instant startedAt
+        ) {
+            this.historyId = historyId;
+            this.sql = sql;
+            this.engine = engine;
+            this.resourceGroup = resourceGroup;
+            this.tenantId = tenantId;
+            this.userId = userId;
+            this.username = username;
+            this.startedAt = startedAt;
+        }
+
+        private static QueryTask direct(UUID historyId, String sql, String engine, String resourceGroup, Instant startedAt) {
+            return new QueryTask(historyId, sql, engine, resourceGroup, null, null, null, startedAt);
+        }
     }
 }

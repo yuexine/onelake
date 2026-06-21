@@ -9,26 +9,72 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons';
 import { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { lakehouseAssets } from '../../mock';
+import { DataserviceAPI } from '../../api';
 import { ClassificationBadge, SectionCard } from '../../components';
 
 const { Text } = Typography;
 
+function paramsFromSql(sql: string) {
+  return Array.from(sql.matchAll(/:([a-zA-Z_][a-zA-Z0-9_]*)/g))
+    .map((match) => match[1])
+    .filter((name, index, all) => all.indexOf(name) === index)
+    .map((name) => ({ name, type: 'STRING', required: true }));
+}
+
 export default function ApiWizard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [sp] = useSearchParams();
   const [step, setStep] = useState(0);
-  const sourceFqn = sp.get('sourceFqn');
-  const [params] = useState<any[]>([
-    { name: 'order_id', type: 'BIGINT', required: true },
-    { name: 'dt', type: 'DATE', required: false },
-  ]);
-  const [returns] = useState<any[]>([
-    { name: 'order_id', type: 'BIGINT' },
-    { name: 'phone', type: 'STRING', classification: 'L3', masked: true },
-    { name: 'amount', type: 'DECIMAL' },
-  ]);
+  const [saving, setSaving] = useState(false);
+  const incoming = (location.state || {}) as {
+    from?: string;
+    sql?: string;
+    sourceFqn?: string;
+    columns?: { name: string; type: string }[];
+  };
+  const sourceFqn = sp.get('sourceFqn') || incoming.sourceFqn;
+  const initialSql = incoming.sql || 'SELECT order_id, phone, amount FROM ads.ads_sales_df WHERE order_id = :order_id';
+  const [draft, setDraft] = useState({
+    apiPath: `/sql/${(sourceFqn || 'query').split('.').pop() || 'query'}`,
+    viewName: `v_${((sourceFqn || 'sql_query').split('.').pop() || 'sql_query').replace(/[^a-zA-Z0-9_]/g, '_')}`,
+    sourceFqn,
+    sourceMode: incoming.sql ? 'sql' : 'table',
+    selectSql: initialSql,
+    qpsLimit: 50,
+  });
+  const [params] = useState<any[]>(() => {
+    const extracted = paramsFromSql(initialSql);
+    return extracted.length > 0 ? extracted : [];
+  });
+  const [returns] = useState<any[]>(() => (
+    incoming.columns && incoming.columns.length > 0
+      ? incoming.columns.map((column) => ({ name: column.name, type: column.type }))
+      : [
+          { name: 'order_id', type: 'BIGINT' },
+          { name: 'phone', type: 'STRING', classification: 'L3', masked: true },
+          { name: 'amount', type: 'DECIMAL' },
+        ]
+  ));
+
+  const saveDraft = () => {
+    setSaving(true);
+    DataserviceAPI.createDraft({
+      apiPath: draft.apiPath,
+      viewName: draft.viewName,
+      selectSql: draft.selectSql,
+      sourceFqn: draft.sourceFqn,
+      qpsLimit: draft.qpsLimit,
+    })
+      .then((api) => {
+        message.success('API 草稿已保存');
+        navigate(`/dataservice/apis/${api.id}`);
+      })
+      .catch((e) => message.error(e.message || 'API 草稿保存失败'))
+      .finally(() => setSaving(false));
+  };
 
   const steps = [
     { title: '选数据源', icon: <DatabaseOutlined /> },
@@ -65,16 +111,32 @@ export default function ApiWizard() {
       <SectionCard title={<span style={{ fontSize: 14, fontWeight: 600 }}>{`第 ${step + 1} 步 · ${steps[step].title}`}</span>} style={{ minHeight: 320 }}>
         <div key={step} className="ol-anim-fade" style={{ maxWidth: 820 }}>
           {step === 0 && (
-            <Form layout="vertical" requiredMark="optional">
+            <Form
+              layout="vertical"
+              requiredMark="optional"
+              initialValues={draft}
+              onValuesChange={(_, values) => setDraft((prev) => ({ ...prev, ...values }))}
+            >
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <Form.Item label="API 路径" name="apiPath" required>
+                  <Input placeholder="/sql/orders" />
+                </Form.Item>
+                <Form.Item label="视图名" name="viewName" required>
+                  <Input placeholder="v_orders" />
+                </Form.Item>
+              </div>
               <Form.Item label="来源（可从资产详情/SQL 工作台带参进入）" required>
-                <Select defaultValue={sourceFqn || 'a-1'}
-                  options={lakehouseAssets.map((a) => ({ label: `${a.fqn} (${a.description || ''})`, value: a.id }))} />
+                <Select
+                  value={draft.sourceFqn}
+                  onChange={(value) => setDraft((prev) => ({ ...prev, sourceFqn: value }))}
+                  options={lakehouseAssets.map((a) => ({ label: `${a.fqn} (${a.description || ''})`, value: a.fqn }))}
+                />
               </Form.Item>
-              <Form.Item label="来源方式">
-                <Select options={[{ label: '选表 / 模型', value: 'table' }, { label: '粘贴 SQL', value: 'sql' }]} defaultValue="table" />
+              <Form.Item label="来源方式" name="sourceMode">
+                <Select options={[{ label: '选表 / 模型', value: 'table' }, { label: '粘贴 SQL', value: 'sql' }]} />
               </Form.Item>
-              <Form.Item label="SQL">
-                <Input.TextArea defaultValue={'SELECT order_id, phone, amount FROM ads.ads_sales_df WHERE order_id = :order_id'} rows={4} style={{ fontFamily: 'monospace', fontSize: 12 }} />
+              <Form.Item label="SQL" name="selectSql" required>
+                <Input.TextArea rows={4} style={{ fontFamily: 'monospace', fontSize: 12 }} />
               </Form.Item>
             </Form>
           )}
@@ -179,14 +241,14 @@ export default function ApiWizard() {
             ) : (
               <Button onClick={() => setStep(step - 1)}><ArrowLeftOutlined /> 上一步</Button>
             )}
-            <Button onClick={() => message.success('已保存草稿')}>保存草稿</Button>
+            <Button loading={saving} onClick={saveDraft}>保存草稿</Button>
           </Space>
           <Space>
             {step < 4 && (
               <Button type="primary" onClick={() => setStep(step + 1)}>下一步 <ArrowRightOutlined /></Button>
             )}
             {step === 4 && (
-              <Button type="primary" icon={<CheckOutlined />} onClick={() => { message.success('API 已发布'); navigate('/dataservice/apis'); }}>发布</Button>
+              <Button type="primary" icon={<CheckOutlined />} loading={saving} onClick={saveDraft}>保存 API 草稿</Button>
             )}
           </Space>
         </div>

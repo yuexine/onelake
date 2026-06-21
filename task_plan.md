@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-阶段 27
+阶段 33
 
 ## 各阶段
 
@@ -241,6 +241,52 @@
 - [x] 移除 Gate 页 mock 审批记录依赖，避免展示伪造处理记录
 - [x] 保持现有前端样式与布局体系，仅做 API 对接和真实数据替换
 - [x] 运行后端单测、前端构建、后端重启、真实 API E2E 与浏览器点击验证
+- **状态：** complete
+
+### 阶段 30：SQL 工作台开发现状检查与后续计划
+- [x] 检查 SQL 工作台后端 Controller、Service、DTO、Entity、Repository 和 Flyway 迁移
+- [x] 检查 Trino JDBC 配置、Docker 端口映射和 module-catalog 依赖
+- [x] 检查前端 `/lakehouse/sql` 页面、API 封装、历史/保存查询/表树/结果区交互
+- [x] 检查 SQL 工作台与数据服务发布、编排流水线的衔接边界
+- [x] 运行 `module-catalog` 测试和前端 TypeScript 检查
+- [x] 输出后续迭代计划
+- **状态：** complete
+
+### 阶段 31：SQL 工作台查询生命周期最小闭环
+- [x] 后端新增异步提交、查询状态、取消查询接口，保留旧同步执行接口兼容
+- [x] 后端运行态增加租户隔离校验，查询完成结果短期保留，取消时同步取消 JDBC Statement
+- [x] 前端运行 SQL 改为提交后轮询状态，支持取消当前查询
+- [x] 前端移除暂未支持的 Spark 选项，默认 SQL 改为 `SHOW SCHEMAS`
+- [x] 表树点击生成 `SELECT * FROM <fqn> LIMIT 100`
+- [x] 运行后端模块测试、全工程跳测编译、前端 TypeScript 检查和 diff 空白检查
+- **状态：** complete
+
+### 阶段 32：SQL 工作台到 API 草稿联动
+- [x] 数据服务后端新增 API 草稿创建接口，避免 Trino SQL 误走 PostgREST 发布链路
+- [x] SQL 工作台“发布为 API”携带当前 SQL、来源资产和结果字段跳转 API 向导
+- [x] API 构建向导接收 SQL 工作台上下文并预填 API 路径、视图名、SQL、参数和返回字段
+- [x] API 向导保存草稿调用真实后端 `DataserviceAPI.createDraft`
+- [x] API 市场和详情页接真实数据服务 API，失败时回退 mock
+- [x] 运行数据服务模块测试、全工程跳测编译、前端 TypeScript 检查和前端构建
+- **状态：** complete
+
+### 阶段 33：SQL API 草稿 Trino 调试运行
+- [x] 数据服务模块新增 Trino-backed API 调试服务，读取草稿 `selectSql` 执行预览
+- [x] 调试服务支持 `:param` 命名参数绑定到 PreparedStatement
+- [x] 调试服务保留只读 SQL 与单语句校验，缺参数/写 SQL 在连接 Trino 前失败
+- [x] 数据服务 Controller 新增 `POST /api/v1/dataservice/apis/{id}/debug`
+- [x] API 详情页调试区从 mock 响应切到真实 `DataserviceAPI.debugApi`
+- [x] 补充调试服务单测并运行数据服务模块测试、全工程跳测编译、前端 TypeScript 检查、前端构建和 diff 空白检查
+- **状态：** complete
+
+### 阶段 34：SQL 工作台真实边界与 Trino 观测收口
+- [x] 表树移除 Catalog 加载失败时的 mock fallback，失败显示真实错误和重试，空结果显示真实空态
+- [x] 查询结果与历史 DTO 增加 `trinoQueryId`
+- [x] `catalog.sql_query_history` 增加 `trino_query_id` 字段和索引
+- [x] Trino JDBC Statement 接入 progress monitor，采集 query id 与 processed/physical input bytes
+- [x] 查询成功、失败、取消时写回 Trino query id 与 scan bytes
+- [x] 前端类型补齐 `trinoQueryId`，保持现有 SQL 工作台 UI 结构不变
+- [x] 运行 `module-catalog` 测试、前端 TypeScript 检查和 diff 空白检查
 - **状态：** complete
 
 ## 关键问题

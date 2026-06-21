@@ -172,6 +172,53 @@
 - 前端没有改样式和布局，仅替换数据来源、接入 loading/empty 状态和后端动作；`message` 调用已改为 AntD provider 版本，浏览器验证不再产生 static message 警告。
 - 本地实证结果：试跑规则生成开放告警 `70453798-c138-4b7e-a023-3a4e69cf1790` 后，浏览器 `/quality/gate` 展示真实目标表 `ods.codex_pii_catalog_20260620224545`、字段 `id_card_hash`、失败 32 行和 3 条异常样例；点击“降级为告警/应用”后页面进入“暂无质量门禁失败”，后端开放告警列表为空。
 
+## 2026-06-21 SQL 工作台开发现状检查发现
+- SQL 工作台后端已落在 `module-catalog`：`SqlWorkbenchController` 暴露 `/api/v1/lakehouse/sql/estimate`、`/execute`、`/history`、`/saved-queries`，`SqlWorkbenchService` 负责只读校验、Trino JDBC 执行、查询历史和保存查询。
+- `catalog/V5__sql_workbench.sql` 已新增 `catalog.sql_query_history` 与 `catalog.saved_query`，具备租户隔离字段、执行人、SQL 文本、状态、耗时、扫描量、行数和错误信息。
+- 当前执行链路是真 Trino JDBC，不是纯 mock：默认 `TRINO_JDBC_URL=jdbc:trino://localhost:18080/iceberg`，`docker-compose.yml` 已将 Trino 映射到宿主 `18080`，避开 Spring Boot 的 `8080`。
+- 查询安全当前是字符串级只读校验：允许 `select/with/show/describe/desc/explain`，拒绝多语句和常见写操作关键字；尚未做 SQL AST 解析、Catalog 资产权限、字段级脱敏或行级策略。
+- `estimate` 目前只返回“已通过只读校验”，`estimatedScanBytes` 为空，`thresholdExceeded=false`；还没有接 Trino `EXPLAIN`、`QueryInfo` 或 resource group 的真实扫描量/成本估算。
+- `execute` 目前同步阻塞执行并最多返回 `maxRows` 行预览；超过预览上限时会继续遍历结果计算 `rowCount`，但没有服务端分页、异步 query id、取消、下载或结果缓存。
+- 历史记录只保存执行摘要与错误；成功记录未写 `scanBytes`，也没有 Trino query id、catalog/schema、输入输出资产、SQL 指纹、快照版本或审计事件。
+- 前端 `/lakehouse/sql` 已接真实 `CatalogAPI.listAssets()`、`SqlWorkbenchAPI.history()`、`savedQueries()`、`estimate()`、`execute()` 和 `saveQuery()`；Catalog 失败时仍 fallback 到 `lakehouseAssets` mock，表树没有 schema/字段层级，也没有点击表名插入 SQL。
+- 前端页面显示“Trino / Spark 双引擎”，但后端非 Trino 会返回“当前仅支持 Trino 查询执行”；Spark 选项目前会产生可预期失败，属于产品文案与后端边界不一致。
+- “发布为 API”和“加入流水线”目前只是前端导航，未把当前 SQL、参数、结果 schema 或上下文带到数据服务/编排模块；数据服务发布器本身直接拼接 `CREATE VIEW ... AS selectSql`，也缺少 SQL 工作台到受控发布的安全契约。
+- 验证结果：`mvn -q -pl module-catalog -am test -Djacoco.skip=true` 通过，`pnpm exec tsc --noEmit` 通过；本轮未启动完整 Trino/后端/前端做浏览器实跑。
+
+## 2026-06-21 SQL 工作台查询生命周期实施发现
+- 后端已新增 `POST /api/v1/lakehouse/sql/queries`、`GET /queries/{id}`、`POST /queries/{id}/cancel`，用于异步提交、轮询状态和取消查询；旧 `/execute` 同步接口保留兼容。
+- `SqlWorkbenchService` 使用内存运行态保存短期查询结果和 JDBC `Statement` 引用，取消时先调用 `Statement.cancel()`，再中断 Future，并把历史状态写为 `CANCELLED`。
+- 查询状态读取和取消都按 `TenantContext.tenantId` 校验，避免用户通过 query id 读取或取消其他租户的运行中查询。
+- Trino 结果预览不再为了精确总行数消费完整结果集，达到 `SQL_WORKBENCH_MAX_ROWS` 后直接截断返回，降低大结果查询拖垮工作台的风险。
+- 前端 SQL 工作台已改为提交后轮询：运行按钮提交 query，查询中显示 loading 和“取消”按钮，终态后刷新历史；取消成功显示 `SQL 查询已取消`。
+- 前端移除 Spark 选项，页面描述改为 Trino 交互式查询；默认 SQL 改为 `SHOW SCHEMAS`，表树点击会填入 `SELECT * FROM <fqn> LIMIT 100`。
+- 验证结果：`mvn -q -pl module-catalog -am test -Djacoco.skip=true`、`mvn -q install -DskipTests -Djacoco.skip=true`、`pnpm exec tsc --noEmit` 和 `git diff --check` 均通过。
+
+## 2026-06-21 SQL 工作台到 API 草稿联动实施发现
+- 现有数据服务发布器面向 PostgREST/PostgreSQL 视图，不能直接把 Trino/Iceberg SQL 用 `CREATE VIEW dataservice_api... AS <trino sql>` 发布；因此本轮新增 API 草稿创建链路，避免伪装成已发布 API。
+- `DataServiceController` 新增 `POST /api/v1/dataservice/apis/draft`，`DataServicePublisher#createDraft` 只校验 `apiPath/viewName/selectSql`、写入 `DRAFT` 状态和审计，不触发 APISIX/PostgREST 发布。
+- SQL 工作台“发布为 API”现在通过 React Router state 携带当前 SQL、来源资产 FQN 和结果列，避免把长 SQL 放进 URL。
+- API 构建向导接收 SQL 工作台上下文后预填 API 路径、视图名、来源、SQL、参数和返回字段；其中 `:param` 占位符会自动转成请求参数。
+- API 构建向导的保存草稿和最后一步按钮均调用真实 `DataserviceAPI.createDraft`，保存成功后进入 API 详情。
+- API 市场与 API 详情页已接 `DataserviceAPI.listApis/getApi`，失败时回退 mock；这样新建草稿在后端可用时能出现在数据服务页面。
+- 本轮仍未实现 Trino SQL 真实发布为在线 API；下一步应设计统一 SQL API 网关或 Trino-backed service runtime，而不是复用 PostgREST 视图发布器。
+
+## 2026-06-21 SQL API 草稿 Trino 调试运行实施发现
+- 数据服务模块新增 `SqlApiRuntimeService`，通过同一组 `onelake.dataplane.trino.*` 配置连接 Trino，用于调试 API 草稿中的 `selectSql`。
+- `POST /api/v1/dataservice/apis/{id}/debug` 会按当前租户读取 API 定义，执行只读 SQL 预览并返回 columns、rows、durationMs、rowCount、truncated。
+- 调试服务支持 `:param` 命名参数，执行前转为 PreparedStatement `?` 参数；缺少参数时返回业务错误，不连接 Trino。
+- 调试服务在连接 Trino 前执行只读/单语句校验，拒绝 `drop/insert/update/delete/create/alter` 等写操作；本轮新增单测覆盖缺参数和写 SQL。
+- API 详情页调试区已从本地假响应改为 JSON 参数输入 + `DataserviceAPI.debugApi` 真实请求，返回结果原样 JSON 展示。
+- 这仍是“开发者调试运行”，不是外部 API 网关：尚未接 AppKey 鉴权、订阅状态、限流、调用日志、动态脱敏、公开路由和参数 schema 校验。
+
+## 2026-06-21 SQL 工作台真实边界与 Trino 观测收口发现
+- `/lakehouse/sql` 表树已移除 Catalog 加载失败时的 `lakehouseAssets` mock fallback；失败时显示真实错误和重试，真实返回空数组时显示“Catalog 暂无可查询表”。
+- `SqlExecuteResultDTO` 与 `SqlQueryHistoryDTO` 已增加 `trinoQueryId`，前端类型同步补齐；页面结构和视觉布局未调整。
+- `catalog.sql_query_history` 新增 `trino_query_id` 字段与索引，后续可按 Trino query id 追踪执行引擎日志和 stats。
+- `SqlWorkbenchService` 已接入 Trino JDBC `setProgressMonitor`，运行中和结束态会尽量采集 `queryId`、`processedBytes/physicalInputBytes`，并写回 `scanBytes`。
+- 查询成功、失败、取消路径都会保留已采集到的 Trino query id 和扫描量；如果 JDBC 未暴露 progress stats，则字段保持空，不再伪造扫描量。
+- 当前 `estimate` 仍未接 Trino `EXPLAIN` 或 resource group 阈值控制；安全网关仍是字符串级只读校验，SQL parser、Catalog 授权和 Security 脱敏仍是下一轮 P0。
+
 ## 技术决策
 | 决策 | 理由 |
 |------|------|

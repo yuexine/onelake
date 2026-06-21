@@ -5,9 +5,11 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { Tabs, Tag, Space, Button, Typography, Input, Table, message } from 'antd';
 import { CloudOutlined, ApiOutlined, FileTextOutlined, CodeOutlined } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apis, apiVersions, subscriptions, apiCallTrend } from '../../mock';
+import { DataserviceAPI } from '../../api';
 import { DetailPageLayout, StatusBadge, ClassificationBadge, DangerConfirm, SectionCard, StatCard, useAsyncAction } from '../../components';
+import type { ApiDefinition } from '../../types';
 import ReactECharts from 'echarts-for-react';
 
 const { Text } = Typography;
@@ -15,9 +17,18 @@ const { Text } = Typography;
 export default function ApiDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const api = apis.find((a) => a.id === id) || apis[0];
+  const [api, setApi] = useState<ApiDefinition>(apis.find((a) => a.id === id) || apis[0]);
   const [offlineOpen, setOfflineOpen] = useState(false);
+  const [debugParams, setDebugParams] = useState('{\n  "order_id": 1001\n}');
+  const [debugResult, setDebugResult] = useState<Record<string, unknown>>();
   const { run, isLoading } = useAsyncAction();
+
+  useEffect(() => {
+    if (!id) return;
+    DataserviceAPI.getApi(id)
+      .then(setApi)
+      .catch(() => setApi(apis.find((a) => a.id === id) || apis[0]));
+  }, [id]);
 
   const tabs = [
     { key: 'doc', label: '文档', children: (
@@ -58,15 +69,27 @@ export default function ApiDetail() {
     ) },
     { key: 'debug', label: '调试', children: (
       <SectionCard title="在线调试" icon={<CodeOutlined />} flatBody>
-        <Space>
-          <Text style={{ fontSize: 13 }}>order_id =</Text>
-          <Input defaultValue="1001" style={{ width: 140 }} />
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Text style={{ fontSize: 13, color: 'var(--ol-ink-2)' }}>请求参数 JSON</Text>
+          <Input.TextArea
+            value={debugParams}
+            onChange={(e) => setDebugParams(e.target.value)}
+            rows={4}
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
           <Button
             type="primary"
             loading={isLoading('debug-send')}
             onClick={() => run('debug-send', async () => {
-              await new Promise((r) => setTimeout(r, 600));
-              return { order_id: 1001, phone: '138****8888', amount: 99.0 };
+              let params: Record<string, unknown>;
+              try {
+                params = debugParams.trim() ? JSON.parse(debugParams) : {};
+              } catch {
+                throw new Error('请求参数不是合法 JSON');
+              }
+              const data = await DataserviceAPI.debugApi(api.id, params);
+              setDebugResult(data);
+              return data;
             }, {
               successMsg: '200 OK · 响应正常',
               errorMsg: '调试失败，请检查 API 是否可用',
@@ -79,9 +102,7 @@ export default function ApiDetail() {
         <pre style={{
           marginTop: 12, padding: 14, background: 'var(--ol-ink)', color: 'var(--ol-card)',
           borderRadius: 8, fontSize: 12, fontFamily: 'monospace', lineHeight: 1.6,
-        }}>{
-          '200 OK:\n{"order_id": 1001, "phone": "138****8888", "amount": 99.0}\n\n(按调用方角色动态脱敏 L5-3.1.4)'
-        }</pre>
+        }}>{debugResult ? JSON.stringify(debugResult, null, 2) : '等待发送调试请求'}</pre>
       </SectionCard>
     ) },
     { key: 'subs', label: `订阅方`, badge: subscriptions.filter((s) => s.apiId === api.id).length, children: (

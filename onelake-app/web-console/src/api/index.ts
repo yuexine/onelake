@@ -1,5 +1,13 @@
 import { http } from './http';
-import type { DataSource, SyncRun, SyncTask } from '../types';
+import type {
+  Asset,
+  DataSource,
+  SavedQuery,
+  SqlExecuteResult,
+  SqlQueryHistory,
+  SyncRun,
+  SyncTask,
+} from '../types';
 
 export interface PageResult<T> {
   content: T[];
@@ -162,10 +170,29 @@ export const OrchestrationAPI = {
 };
 
 export const CatalogAPI = {
-  listAssets: (layer?: string) => http.get('/catalog/assets', { params: { layer } }),
-  getAsset: (id: string) => http.get(`/catalog/assets/${id}`),
-  downstream: (fqn: string) => http.get('/catalog/lineage/downstream', { params: { fqn } }),
-  sync: () => http.post('/catalog/sync'),
+  listAssets: (layer?: string) => unwrap<Asset[]>(http.get('/catalog/assets', { params: { layer } })),
+  getAsset: (id: string) => unwrap<Asset>(http.get(`/catalog/assets/${id}`)),
+  downstream: (fqn: string) => unwrap<string[]>(http.get('/catalog/lineage/downstream', { params: { fqn } })),
+  sync: () => unwrap<{ synced: number }>(http.post('/catalog/sync')),
+};
+
+export const SqlWorkbenchAPI = {
+  estimate: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
+    unwrap<{ engine: string; estimatedScanBytes?: number; thresholdExceeded: boolean; message: string }>(
+      http.post('/lakehouse/sql/estimate', payload),
+    ),
+
+  execute: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
+    unwrap<SqlExecuteResult>(http.post('/lakehouse/sql/execute', payload)),
+
+  history: () =>
+    unwrap<SqlQueryHistory[]>(http.get('/lakehouse/sql/history')),
+
+  savedQueries: () =>
+    unwrap<SavedQuery[]>(http.get('/lakehouse/sql/saved-queries')),
+
+  saveQuery: (payload: { name: string; sql: string; shared: boolean }) =>
+    unwrap<SavedQuery>(http.post('/lakehouse/sql/saved-queries', payload)),
 };
 
 export const ModelingAPI = {

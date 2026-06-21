@@ -7,13 +7,35 @@ import {
   PlayCircleOutlined, FormatPainterOutlined, SaveOutlined,
   ApiOutlined, ClusterOutlined, CodeOutlined, DatabaseOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { lakehouseAssets, sqlHistory, savedQueries } from '../../mock';
+import { lakehouseAssets } from '../../mock';
 import Editor from '@monaco-editor/react';
 import { PageHeader, SectionCard } from '../../components';
+import { CatalogAPI, SqlWorkbenchAPI } from '../../api';
+import type { Asset, SavedQuery, SqlExecuteResult, SqlQueryHistory } from '../../types';
+import { normalizeCatalogAssets } from './assetAdapter';
 
 const { Text } = Typography;
+
+function formatBytes(v?: number) {
+  if (v == null) return '-';
+  if (v >= 1e12) return `${(v / 1e12).toFixed(2)} TB`;
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)} MB`;
+  return `${v} B`;
+}
+
+function formatDuration(v?: number) {
+  if (v == null) return '-';
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`;
+}
+
+function cellText(value: unknown) {
+  if (value == null) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
 
 function TableTreeTitle({ fqn }: { fqn: string }) {
   const [layer = '', name = fqn] = fqn.split('.');
@@ -60,6 +82,78 @@ export default function SqlWorkbench() {
   const navigate = useNavigate();
   const [sql, setSql] = useState(`SELECT * FROM dwd_order_df
 WHERE dt = '2026-06-14'`);
+  const [assets, setAssets] = useState<Asset[]>(lakehouseAssets);
+  const [history, setHistory] = useState<SqlQueryHistory[]>([]);
+  const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
+  const [result, setResult] = useState<SqlExecuteResult>();
+  const [engine, setEngine] = useState('auto');
+  const [resourceGroup, setResourceGroup] = useState('rg-default');
+  const [estimateMessage, setEstimateMessage] = useState('运行前将进行只读校验；扫描量以执行引擎返回为准');
+  const [queryError, setQueryError] = useState<string>();
+  const [loading, setLoading] = useState(false);
+
+  const loadAssets = () => {
+    CatalogAPI.listAssets()
+      .then((items) => setAssets(normalizeCatalogAssets(items)))
+      .catch(() => setAssets(lakehouseAssets));
+  };
+
+  const loadHistory = () => {
+    SqlWorkbenchAPI.history()
+      .then(setHistory)
+      .catch((e) => message.error(e.message || '查询历史加载失败'));
+  };
+
+  const loadSavedQueries = () => {
+    SqlWorkbenchAPI.savedQueries()
+      .then(setSavedQueries)
+      .catch((e) => message.error(e.message || '保存查询加载失败'));
+  };
+
+  useEffect(() => {
+    loadAssets();
+    loadHistory();
+    loadSavedQueries();
+  }, []);
+
+  const executeSql = (nextSql = sql) => {
+    setLoading(true);
+    setQueryError(undefined);
+    SqlWorkbenchAPI.estimate({ sql: nextSql, engine, resourceGroup })
+      .then((estimate) => setEstimateMessage(estimate.message))
+      .then(() => SqlWorkbenchAPI.execute({ sql: nextSql, engine, resourceGroup }))
+      .then((data) => {
+        setResult(data);
+        message.success(`SQL 已完成，返回 ${data.rows.length} 行预览`);
+      })
+      .catch((e) => {
+        setQueryError(e.message || 'SQL 执行失败');
+        message.error(e.message || 'SQL 执行失败');
+      })
+      .finally(() => {
+        setLoading(false);
+        loadHistory();
+      });
+  };
+
+  const saveCurrentQuery = () => {
+    const name = window.prompt('保存查询名称', '未命名查询');
+    if (!name) return;
+    SqlWorkbenchAPI.saveQuery({ name, sql, shared: false })
+      .then((saved) => {
+        message.success(`已保存查询：${saved.name}`);
+        loadSavedQueries();
+      })
+      .catch((e) => message.error(e.message || '保存查询失败'));
+  };
+
+  const resultColumns = result?.columns.map((column) => ({
+    title: column.name,
+    dataIndex: column.name,
+    render: (value: unknown) => <span className="mono">{cellText(value)}</span>,
+  })) || [];
+
+  const resultRows = result?.rows.map((row, index) => ({ key: index, ...row })) || [];
 
   const tabs = [
     { key: 'result', label: '结果', children: (
@@ -84,9 +178,9 @@ WHERE dt = '2026-06-14'`);
         >
           <Space size={8} wrap>
             {[
-              { label: '耗时', value: '48s', intent: 'info' },
-              { label: '扫描', value: '12 GB', intent: 'neutral' },
-              { label: '行数', value: '12,000', intent: 'neutral' },
+              { label: '耗时', value: formatDuration(result?.durationMs), intent: 'info' },
+              { label: '扫描', value: formatBytes(result?.scanBytes), intent: 'neutral' },
+              { label: '行数', value: result?.rowCount == null ? '-' : result.rowCount.toLocaleString(), intent: 'neutral' },
             ].map((m) => (
               <span
                 key={m.label}
@@ -109,21 +203,18 @@ WHERE dt = '2026-06-14'`);
               </span>
             ))}
           </Space>
-          <Text type="secondary" style={{ fontSize: 12 }}>预览 2 / 12,000 行</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {result ? `预览 ${result.rows.length} / ${result.rowCount ?? result.rows.length} 行${result.truncated ? '（已截断）' : ''}` : '尚未运行'}
+          </Text>
         </div>
 
         <Table
           size="middle"
           pagination={false}
-          dataSource={[
-            { key: 1, order_id: 1001, amount: 99.0, dt: '2026-06-14' },
-            { key: 2, order_id: 1002, amount: 158.5, dt: '2026-06-14' },
-          ]}
-          columns={[
-            { title: 'order_id', dataIndex: 'order_id', render: (v: number) => <span className="mono tnum">{v}</span> },
-            { title: 'amount', dataIndex: 'amount', render: (v: number) => <span className="mono tnum">{v}</span> },
-            { title: 'dt', dataIndex: 'dt', render: (v: string) => <span className="mono">{v}</span> },
-          ]}
+          loading={loading}
+          dataSource={resultRows}
+          columns={resultColumns}
+          locale={{ emptyText: queryError || '暂无查询结果' }}
         />
 
         <div
@@ -150,12 +241,12 @@ WHERE dt = '2026-06-14'`);
       <div style={{ padding: 24, textAlign: 'center', color: 'var(--ol-ink-3)' }}>图表区（ECharts 可选）</div>
     ) },
     { key: 'history', label: '查询历史', children: (
-      <Table size="middle" rowKey="id" dataSource={sqlHistory}
+      <Table size="middle" rowKey="id" dataSource={history}
         columns={[
-          { title: '时间', dataIndex: 'at', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{t}</span> },
+          { title: '时间', dataIndex: 'at', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{new Date(t).toLocaleString()}</span> },
           { title: '运行人', dataIndex: 'runner' },
-          { title: '扫描量', dataIndex: 'scanBytes', render: (v: number) => <span className="mono">{(v / 1e9).toFixed(2)} GB</span> },
-          { title: '耗时', dataIndex: 'durationMs', render: (d: number) => d ? <span className="mono">{(d/1000).toFixed(1)}s</span> : '-' },
+          { title: '扫描量', dataIndex: 'scanBytes', render: (v?: number) => <span className="mono">{formatBytes(v)}</span> },
+          { title: '耗时', dataIndex: 'durationMs', render: (d?: number) => <span className="mono">{formatDuration(d)}</span> },
           { title: '状态', dataIndex: 'ok', render: (o: boolean) => (
             <span style={{
               padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
@@ -164,7 +255,7 @@ WHERE dt = '2026-06-14'`);
             }}>{o ? '✓ 成功' : '✗ 失败'}</span>
           ) },
           { title: 'SQL', dataIndex: 'sql', ellipsis: true, render: (s: string) => <Text code style={{ fontSize: 11 }}>{s}</Text> },
-          { title: '操作', render: () => <Space><a className="ol-link">重新运行</a><a className="ol-link" onClick={() => navigate('/dataservice/apis/new')}>发布为 API</a></Space> },
+          { title: '操作', render: (_: unknown, row: SqlQueryHistory) => <Space><a className="ol-link" onClick={() => { setSql(row.sql); executeSql(row.sql); }}>重新运行</a><a className="ol-link" onClick={() => navigate('/dataservice/apis/new')}>发布为 API</a></Space> },
         ]} />
     ) },
     { key: 'saved', label: '保存的查询', children: (
@@ -175,7 +266,7 @@ WHERE dt = '2026-06-14'`);
           { title: '共享', dataIndex: 'shared', render: (s: boolean) => (
             <Tag color={s ? 'processing' : 'default'} style={{ margin: 0 }}>{s ? '团队共享' : '私有'}</Tag>
           ) },
-          { title: '操作', render: () => <Space><a className="ol-link">重新运行</a><a className="ol-link">分享</a></Space> },
+          { title: '操作', render: (_: unknown, row: SavedQuery) => <Space><a className="ol-link" onClick={() => { setSql(row.sql); executeSql(row.sql); }}>重新运行</a><a className="ol-link" onClick={() => message.info('共享设置已进入后端保存范围')}>分享</a></Space> },
         ]} />
     ) },
   ];
@@ -189,11 +280,11 @@ WHERE dt = '2026-06-14'`);
         description="Trino / Spark 双引擎，支持表树、SQL 编辑、结果图表、查询历史"
         actions={
           <>
-            <Select defaultValue="auto" options={[
+            <Select value={engine} onChange={setEngine} options={[
               { label: '自动路由 → Trino', value: 'auto' },
               { label: 'Spark', value: 'spark' },
             ]} style={{ width: 180 }} />
-            <Select defaultValue="rg-default" options={[
+            <Select value={resourceGroup} onChange={setResourceGroup} options={[
               { label: '资源组: 默认', value: 'rg-default' },
               { label: '资源组: 大查询', value: 'rg-big' },
             ]} style={{ width: 160 }} />
@@ -207,7 +298,7 @@ WHERE dt = '2026-06-14'`);
             <Tree
               blockNode
               style={{ fontSize: 13 }}
-              treeData={lakehouseAssets.map((a) => ({
+              treeData={assets.map((a) => ({
                 title: <TableTreeTitle fqn={a.fqn} />,
                 key: a.id,
               }))}
@@ -222,7 +313,8 @@ WHERE dt = '2026-06-14'`);
             extra={
               <Space>
                 <Tooltip title="格式化"><Button size="small" icon={<FormatPainterOutlined />} /></Tooltip>
-                <Button type="primary" size="small" icon={<PlayCircleOutlined />} onClick={() => message.success('SQL 已提交，48s 完成')}>运行</Button>
+                <Tooltip title="保存查询"><Button size="small" icon={<SaveOutlined />} onClick={saveCurrentQuery} /></Tooltip>
+                <Button type="primary" size="small" icon={<PlayCircleOutlined />} loading={loading} onClick={() => executeSql()}>运行</Button>
               </Space>
             }
             padded="sm"
@@ -233,9 +325,9 @@ WHERE dt = '2026-06-14'`);
           </SectionCard>
 
           <Alert
-            type="warning" showIcon
+            type={queryError ? 'error' : 'warning'} showIcon
             style={{ marginTop: 12, borderRadius: 8 }}
-            message={<span style={{ fontSize: 13 }}>预估扫描 <Text code style={{ fontSize: 12 }}>1.2 TB</Text>，超阈值需确认</span>}
+            message={<span style={{ fontSize: 13 }}>{queryError || estimateMessage}</span>}
           />
 
           <SectionCard style={{ marginTop: 12 }} padded="none" bodyStyle={{ padding: 0 }}>

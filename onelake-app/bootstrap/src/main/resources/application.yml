@@ -85,6 +85,13 @@ onelake:
     openmetadata:
       base-url: ${OPENMETADATA_URL:http://localhost:8585/api/v1}
       token: ${OM_TOKEN:}
+    trino:
+      jdbc-url: ${TRINO_JDBC_URL:jdbc:trino://localhost:18080/iceberg}
+      user: ${TRINO_USER:onelake}
+      password: ${TRINO_PASSWORD:}
+      max-rows: ${SQL_WORKBENCH_MAX_ROWS:200}
+      timeout-seconds: ${SQL_WORKBENCH_TIMEOUT_SECONDS:30}
+      scan-threshold-bytes: ${SQL_WORKBENCH_SCAN_THRESHOLD_BYTES:1099511627776}
     apisix-admin:
       base-url: ${APISIX_ADMIN_URL:http://localhost:9180/apisix/admin}
       key: ${APISIX_ADMIN_KEY:edd1c9f034335f136f87ad84b625c8f1}

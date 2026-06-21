@@ -68,7 +68,7 @@ services:
 
   trino:
     image: trinodb/trino:451
-    ports: ["8080:8080"]
+    ports: ["18080:8080"]
     volumes: ["./trino/catalog:/etc/trino/catalog"]
     depends_on: [iceberg-rest]
 
@@ -316,7 +316,7 @@ def report_to_control_plane(context: RunStatusSensorContext):
 connector.name=iceberg
 iceberg.catalog.type=rest
 iceberg.rest-catalog.uri=http://iceberg-rest:8181
-fs.native-s3.enabled=true
+fs.s3.enabled=true
 s3.endpoint=http://minio:9000
 s3.path-style-access=true
 s3.aws-access-key=minio

@@ -134,6 +134,44 @@ export interface AssetColumn {
   stats?: { nullRate?: number; cardinality?: number; min?: string; max?: string };
 }
 
+export interface SqlColumn {
+  name: string;
+  type: string;
+}
+
+export interface SqlExecuteResult {
+  historyId: UUID;
+  status: 'SUCCEEDED' | 'FAILED';
+  columns: SqlColumn[];
+  rows: Record<string, unknown>[];
+  durationMs?: number;
+  scanBytes?: number;
+  rowCount?: number;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface SqlQueryHistory {
+  id: UUID;
+  runner: string;
+  at: string;
+  scanBytes?: number;
+  durationMs?: number;
+  ok: boolean;
+  status: string;
+  sql: string;
+  error?: string;
+}
+
+export interface SavedQuery {
+  id: UUID;
+  name: string;
+  owner: string;
+  shared: boolean;
+  sql: string;
+  updatedAt?: string;
+}
+
 export interface LineageEdge {
   upstreamFqn: string;
   downstreamFqn: string;

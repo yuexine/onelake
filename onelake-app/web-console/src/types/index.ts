@@ -231,12 +231,19 @@ export interface QualityAlert {
   id: UUID;
   ruleId?: UUID;
   level: 'INFO' | 'WARN' | 'CRITICAL';
-  source: string;
+  source?: string;
   message: string;
   status: 'OPEN' | 'ACK' | 'CLOSED';
   assignee?: string;
   relatedRunId?: UUID;
   createdAt: string;
+  targetFqn?: string;
+  targetColumn?: string;
+  ruleType?: QualityRule['ruleType'];
+  expression?: string;
+  passRate?: number;
+  failedRows?: number;
+  sample?: Record<string, unknown>[];
 }
 
 export interface Secret {

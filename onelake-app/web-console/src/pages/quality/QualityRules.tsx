@@ -3,9 +3,10 @@
  */
 import { Table, Tag, Space, Button, Modal, Form, Select, Input, Typography, message } from 'antd';
 import { PlusOutlined, SafetyOutlined, CheckCircleOutlined, WarningOutlined } from '@ant-design/icons';
-import { useState } from 'react';
-import { qualityRules } from '../../mock';
-import { ClassificationBadge, StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
+import { useEffect, useState } from 'react';
+import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
+import { CatalogAPI, QualityAPI } from '../../api';
+import type { Asset, QualityRule } from '../../types';
 
 const { Text } = Typography;
 
@@ -13,12 +14,69 @@ const RULE_LIBRARY = ['NOT_NULL', 'UNIQUE', 'RANGE', 'REGEX', 'ENUM', 'REFERENTI
 
 export default function QualityRules() {
   const [open, setOpen] = useState(false);
+  const [form] = Form.useForm();
+  const [rules, setRules] = useState<QualityRule[]>([]);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [selectedAssetFqn, setSelectedAssetFqn] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [runningId, setRunningId] = useState<string>();
+
+  const loadRules = async () => {
+    setLoading(true);
+    try {
+      setRules(await QualityAPI.listRules());
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '质量规则加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRules();
+    CatalogAPI.listAssets()
+      .then(setAssets)
+      .catch(() => message.warning('资产列表加载失败，请稍后重试'));
+  }, []);
+
+  const selectedAsset = assets.find((asset) => asset.fqn === selectedAssetFqn);
 
   const counts = {
-    total: qualityRules.length,
-    enabled: qualityRules.filter((r) => r.enabled).length,
-    block: qualityRules.filter((r) => r.severity === 'BLOCK').length,
-    highPass: qualityRules.filter((r) => (r.lastPassRate ?? 0) > 95).length,
+    total: rules.length,
+    enabled: rules.filter((r) => r.enabled).length,
+    block: rules.filter((r) => r.severity === 'BLOCK').length,
+    highPass: rules.filter((r) => (r.lastPassRate ?? 0) > 95).length,
+  };
+
+  const createRule = async () => {
+    const values = await form.validateFields();
+    setSaving(true);
+    try {
+      await QualityAPI.createRule(values);
+      message.success('规则已创建');
+      setOpen(false);
+      form.resetFields();
+      setSelectedAssetFqn(undefined);
+      await loadRules();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '规则创建失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runRule = async (rule: QualityRule) => {
+    setRunningId(rule.id);
+    try {
+      const result = await QualityAPI.runRule(rule.id);
+      message.success(result.passed ? '试跑通过' : `试跑未通过，失败 ${result.failedRows} 行`);
+      await loadRules();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '试跑失败');
+    } finally {
+      setRunningId(undefined);
+    }
   };
 
   return (
@@ -34,7 +92,8 @@ export default function QualityRules() {
       <SectionCard title="规则列表" icon={<SafetyOutlined />} flatBody>
         <Table
           rowKey="id"
-          dataSource={qualityRules}
+          dataSource={rules}
+          loading={loading}
           locale={{
             emptyText: (
               <StateView
@@ -67,10 +126,17 @@ export default function QualityRules() {
               }}>{v}%</span>
             ) : '-' },
             { title: '状态', dataIndex: 'enabled', width: 100, render: (e: boolean) => <StatusBadge status={e ? 'ACTIVE' : 'OFFLINE'} label={e ? '已启用' : '已停用'} /> },
-            { title: '操作', width: 140, render: () => (
+            { title: '操作', width: 140, render: (_: unknown, rule: QualityRule) => (
               <Space>
                 <Button size="small" type="link">编辑</Button>
-                <Button size="small" type="link">试跑</Button>
+                <Button
+                  size="small"
+                  type="link"
+                  loading={runningId === rule.id}
+                  onClick={() => runRule(rule)}
+                >
+                  试跑
+                </Button>
               </Space>
             ) },
           ]}
@@ -82,27 +148,37 @@ export default function QualityRules() {
         title="新建规则"
         onCancel={() => setOpen(false)}
         width={680}
-        onOk={() => { setOpen(false); message.success('规则已创建'); }}
+        onOk={createRule}
+        confirmLoading={saving}
       >
-        <Form layout="vertical">
-          <Form.Item label="绑定资产" required>
-            <Select options={[{ label: 'dwd.dwd_order_df', value: 'a-1' }]} />
+        <Form form={form} layout="vertical" initialValues={{ ruleType: 'NOT_NULL', severity: 'BLOCK', schedule: 'ON_PARTITION' }}>
+          <Form.Item label="绑定资产" name="targetFqn" rules={[{ required: true, message: '请选择资产' }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              onChange={(value) => {
+                setSelectedAssetFqn(value);
+                form.setFieldValue('targetColumn', undefined);
+              }}
+              options={assets.map((asset) => ({ label: asset.fqn, value: asset.fqn }))}
+            />
           </Form.Item>
-          <Form.Item label="字段">
-            <Select options={['order_id', 'amount', 'phone'].map((v) => ({ label: v, value: v }))} />
+          <Form.Item label="字段" name="targetColumn">
+            <Select
+              allowClear
+              options={(selectedAsset?.columns || []).map((column) => ({ label: column.name, value: column.name }))}
+              placeholder="不选择则绑定全表"
+            />
           </Form.Item>
-          <Form.Item label="规则库（卡片选择）" required>
-            <Space wrap>
-              {RULE_LIBRARY.map((r) => <Tag key={r} color="blue" style={{ cursor: 'pointer' }}>{r}</Tag>)}
-              <Tag color="default" style={{ cursor: 'pointer' }}>+ 自定义 SQL 规则</Tag>
-            </Space>
+          <Form.Item label="规则库（卡片选择）" name="ruleType" rules={[{ required: true, message: '请选择规则类型' }]}>
+            <Select options={RULE_LIBRARY.map((v) => ({ label: v, value: v }))} />
           </Form.Item>
-          <Form.Item label="阈值 / 表达式"><Input placeholder="0 ≤ amount ≤ 99999" /></Form.Item>
-          <Form.Item label="严重度">
+          <Form.Item label="阈值 / 表达式" name="expression" rules={[{ required: true, message: '请输入表达式' }]}><Input placeholder="0 ≤ amount ≤ 99999" /></Form.Item>
+          <Form.Item label="严重度" name="severity">
             <Select options={['BLOCK', 'WARN'].map((v) => ({ label: v, value: v }))} defaultValue="BLOCK" />
           </Form.Item>
-          <Form.Item label="绑定调度">
-            <Select options={[{ label: '随加工就绪触发', value: 'on' }, { label: 'CRON', value: 'cron' }]} />
+          <Form.Item label="绑定调度" name="schedule">
+            <Select options={[{ label: '随加工就绪触发', value: 'ON_PARTITION' }, { label: 'CRON', value: 'CRON' }]} />
           </Form.Item>
         </Form>
         <div className="ol-section" style={{ padding: 12, marginTop: 8, background: 'var(--ol-fill-soft)' }}>

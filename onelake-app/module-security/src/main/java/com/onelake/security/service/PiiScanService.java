@@ -3,6 +3,7 @@ package com.onelake.security.service;
 import com.onelake.security.domain.entity.PiiScanRecord;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -20,6 +21,9 @@ public interface PiiScanService {
 
     /** 对一张表做 PII 扫描，返回创建的扫描记录数（0 表示未发现敏感字段）。 */
     int enqueueScan(UUID tenantId, String tableFqn);
+
+    /** 基于真实字段列表对一张表做 PII 扫描。 */
+    int enqueueScan(UUID tenantId, String tableFqn, List<Map<String, Object>> columns);
 
     /** 列出待确认记录。 */
     List<PiiScanRecord> listPending(UUID tenantId);

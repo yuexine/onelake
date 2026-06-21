@@ -8,5 +8,6 @@ import java.util.UUID;
 
 public interface RuleRepository extends JpaRepository<Rule, UUID> {
     List<Rule> findByTenantId(UUID tenantId);
+    List<Rule> findByTenantIdOrderByCreatedAtDesc(UUID tenantId);
     List<Rule> findByTargetFqnAndEnabledTrue(String fqn);
 }

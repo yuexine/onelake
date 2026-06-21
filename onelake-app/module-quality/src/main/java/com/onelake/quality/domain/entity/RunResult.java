@@ -3,6 +3,7 @@ package com.onelake.quality.domain.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -19,6 +20,8 @@ public class RunResult {
     @Column(nullable = false) private Boolean passed;
     private BigDecimal passRate;
     private Long failedRows = 0L;
-    @Column(columnDefinition = "jsonb") private String sample;
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String sample;
     private Instant checkedAt = Instant.now();
 }

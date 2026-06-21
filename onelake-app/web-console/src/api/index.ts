@@ -2,6 +2,9 @@ import { http } from './http';
 import type {
   Asset,
   DataSource,
+  QualityAlert,
+  QualityRule,
+  QualityRunResult,
   SavedQuery,
   SqlExecuteResult,
   SqlQueryHistory,
@@ -202,9 +205,15 @@ export const ModelingAPI = {
 };
 
 export const QualityAPI = {
-  listRules: () => http.get('/quality/rules'),
-  openAlerts: () => http.get('/quality/alerts'),
-  recentResults: (ruleId: string) => http.get(`/quality/results/${ruleId}`),
+  listRules: () => unwrap<QualityRule[]>(http.get('/quality/rules')),
+  getRule: (ruleId: string) => unwrap<QualityRule>(http.get(`/quality/rules/${ruleId}`)),
+  createRule: (payload: Partial<QualityRule>) => unwrap<QualityRule>(http.post('/quality/rules', payload)),
+  runRule: (ruleId: string) => unwrap<QualityRunResult>(http.post(`/quality/rules/${ruleId}/run`)),
+  openAlerts: () => unwrap<QualityAlert[]>(http.get('/quality/alerts')),
+  closeAlert: (alertId: string) => unwrap<void>(http.post(`/quality/alerts/${alertId}/close`)),
+  recentResults: (ruleId: string) => unwrap<QualityRunResult[]>(http.get(`/quality/results/${ruleId}`)),
+  rulesByTarget: (fqn: string) =>
+    unwrap<QualityRule[]>(http.get('/quality/rules/by-target', { params: { fqn } })),
 };
 
 export const SecurityAPI = {

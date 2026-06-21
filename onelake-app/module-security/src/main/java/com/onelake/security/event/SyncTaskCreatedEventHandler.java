@@ -2,6 +2,7 @@ package com.onelake.security.event;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
@@ -10,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -46,12 +49,17 @@ public class SyncTaskCreatedEventHandler implements DomainEventHandler {
             }
 
             UUID tenantId = UUID.fromString(tenantIdRaw);
-            int detected = piiScanService.enqueueScan(tenantId, targetTable);
+            int detected = piiScanService.enqueueScan(tenantId, targetTable, fieldMappingOf(p.path("fieldMapping")));
             log.info("SyncTaskCreatedEventHandler: PII scan completed for syncTask={} target={} — {} sensitive fields detected",
                 name, targetTable, detected);
         } catch (Exception e) {
             log.error("SyncTaskCreatedEventHandler failed for event {}: {}", event.getId(), e.getMessage(), e);
             throw new RuntimeException(e);
         }
+    }
+
+    private List<Map<String, Object>> fieldMappingOf(JsonNode node) {
+        if (node == null || !node.isArray()) return List.of();
+        return objectMapper.convertValue(node, new TypeReference<>() {});
     }
 }

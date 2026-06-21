@@ -7,5 +7,5 @@ import java.util.List;
 import java.util.UUID;
 
 public interface QualityAlertRepository extends JpaRepository<Alert, UUID> {
-    List<Alert> findByTenantIdAndStatus(UUID tenantId, String status);
+    List<Alert> findByTenantIdAndStatusOrderByCreatedAtDesc(UUID tenantId, String status);
 }

@@ -1,9 +1,11 @@
 package com.onelake.quality.api;
 
 import com.onelake.common.api.ApiResponse;
-import com.onelake.quality.domain.entity.Alert;
-import com.onelake.quality.domain.entity.Rule;
+import com.onelake.quality.api.vo.CreateQualityRuleVO;
 import com.onelake.quality.domain.entity.RunResult;
+import com.onelake.quality.dto.QualityAlertDTO;
+import com.onelake.quality.dto.QualityRuleDTO;
+import com.onelake.quality.dto.QualityRunResultDTO;
 import com.onelake.quality.service.QualityService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -21,38 +23,44 @@ public class QualityController {
 
     @PostMapping("/rules")
     @PreAuthorize("hasRole('DE')")
-    public ApiResponse<Rule> create(@RequestBody Rule rule) {
+    public ApiResponse<QualityRuleDTO> create(@RequestBody CreateQualityRuleVO rule) {
         return ApiResponse.ok(service.createRule(rule));
     }
 
     @GetMapping("/rules/{id}")
-    public ApiResponse<Rule> get(@PathVariable UUID id) {
+    public ApiResponse<QualityRuleDTO> get(@PathVariable UUID id) {
         return ApiResponse.ok(service.getRule(id));
     }
 
     @GetMapping("/rules")
-    public ApiResponse<List<Rule>> list() {
+    public ApiResponse<List<QualityRuleDTO>> list() {
         return ApiResponse.ok(service.listRules());
     }
 
     @GetMapping("/rules/by-target")
-    public ApiResponse<List<Rule>> byTarget(@RequestParam String fqn) {
+    public ApiResponse<List<QualityRuleDTO>> byTarget(@RequestParam String fqn) {
         return ApiResponse.ok(service.rulesFor(fqn));
+    }
+
+    @PostMapping("/rules/{id}/run")
+    @PreAuthorize("hasAnyRole('DE','OPS')")
+    public ApiResponse<QualityRunResultDTO> run(@PathVariable UUID id) {
+        return ApiResponse.ok(service.runRule(id));
     }
 
     @PostMapping("/results")
     @PreAuthorize("hasRole('OPS')")
-    public ApiResponse<RunResult> record(@RequestBody RunResult r) {
+    public ApiResponse<QualityRunResultDTO> record(@RequestBody RunResult r) {
         return ApiResponse.ok(service.recordResult(r));
     }
 
     @GetMapping("/results/{ruleId}")
-    public ApiResponse<List<RunResult>> recent(@PathVariable UUID ruleId) {
+    public ApiResponse<List<QualityRunResultDTO>> recent(@PathVariable UUID ruleId) {
         return ApiResponse.ok(service.recentResults(ruleId));
     }
 
     @GetMapping("/alerts")
-    public ApiResponse<List<Alert>> alerts() {
+    public ApiResponse<List<QualityAlertDTO>> alerts() {
         return ApiResponse.ok(service.openAlerts());
     }
 

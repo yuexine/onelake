@@ -30,6 +30,7 @@ public final class DomainEvents {
     public static final String QUALITY_CHECK_FAILED = "quality.check.failed";
 
     public static final String SECURITY_CLASSIFICATION_ASSIGNED = "security.classification.assigned";
+    public static final String SECURITY_PII_DETECTED = "security.pii.detected";
     public static final String SECURITY_MASKING_POLICY_UPDATED = "security.masking_policy.updated";
     public static final String SECURITY_ACCESS_CHANGED = "security.access.changed";
 

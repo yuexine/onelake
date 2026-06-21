@@ -11,4 +11,6 @@ public interface PiiScanRecordRepository extends JpaRepository<PiiScanRecord, UU
     List<PiiScanRecord> findByTenantIdOrderByScannedAtDesc(UUID tenantId);
 
     List<PiiScanRecord> findByTenantIdAndStatus(UUID tenantId, PiiScanRecord.Status status);
+
+    boolean existsByTenantIdAndFqn(UUID tenantId, String fqn);
 }

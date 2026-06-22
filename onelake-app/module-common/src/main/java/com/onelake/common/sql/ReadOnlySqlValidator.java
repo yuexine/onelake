@@ -10,8 +10,11 @@ import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
+import net.sf.jsqlparser.util.TablesNamesFinder;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class ReadOnlySqlValidator {
 
@@ -39,6 +42,10 @@ public final class ReadOnlySqlValidator {
             throw new BizException(errorCode, readOnlyMessage);
         }
         return statement;
+    }
+
+    public static Set<String> referencedTables(Statement statement) {
+        return new LinkedHashSet<>(new TablesNamesFinder().getTables(statement));
     }
 
     private static boolean isReadOnly(Statement statement) {

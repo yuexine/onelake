@@ -9,4 +9,5 @@ import java.util.UUID;
 public interface AccessGrantRepository extends JpaRepository<AccessGrant, UUID> {
     List<AccessGrant> findBySubjectIdAndStatus(UUID subjectId, String status);
     List<AccessGrant> findBySubjectId(UUID subjectId);
+    List<AccessGrant> findByTenantIdAndSubjectIdAndStatus(UUID tenantId, UUID subjectId, String status);
 }

@@ -62,6 +62,19 @@ class ReadOnlySqlValidatorTest {
             .hasMessage("仅允许只读查询");
     }
 
+    @Test
+    void extractsReferencedTablesWithoutCteNames() {
+        var statement = ReadOnlySqlValidator.requireSingleReadOnlyStatement(
+            "WITH recent_orders AS (SELECT * FROM ods.orders) SELECT * FROM recent_orders JOIN dwd.users u ON recent_orders.user_id = u.id",
+            40040,
+            "仅允许只读查询",
+            "不允许一次提交多条语句"
+        );
+
+        assertThat(ReadOnlySqlValidator.referencedTables(statement))
+            .containsExactlyInAnyOrder("ods.orders", "dwd.users");
+    }
+
     private Object validate(String sql) {
         return ReadOnlySqlValidator.requireSingleReadOnlyStatement(
             sql,

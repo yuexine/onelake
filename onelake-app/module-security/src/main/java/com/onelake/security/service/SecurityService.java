@@ -1,11 +1,15 @@
 package com.onelake.security.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.security.domain.entity.*;
 import com.onelake.security.repository.*;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -14,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -51,11 +56,13 @@ public class SecurityService {
         return maskingRepo.save(p);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public List<AccessGrant> myGrants() {
+        UUID tenantId = TenantContext.getTenantId();
         UUID subjectId = TenantContext.getUserId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
         if (subjectId == null) throw new BizException(40100, "用户上下文缺失");
-        return grantRepo.findBySubjectId(subjectId);
+        return activeUnexpiredGrants(tenantId, subjectId);
     }
 
     @Transactional(readOnly = true)
@@ -76,10 +83,8 @@ public class SecurityService {
         if (subjectId == null) {
             throw new BizException(40100, "用户上下文缺失");
         }
-        Instant now = Instant.now();
-        Set<String> allowed = grantRepo.findByTenantIdAndSubjectIdAndStatus(tenantId, subjectId, "ACTIVE")
+        Set<String> allowed = activeUnexpiredGrants(tenantId, subjectId)
             .stream()
-            .filter(grant -> grant.getExpiresAt() == null || grant.getExpiresAt().isAfter(now))
             .filter(this::hasQueryPermission)
             .map(AccessGrant::getAssetFqn)
             .collect(Collectors.toSet());
@@ -286,12 +291,23 @@ public class SecurityService {
     /** 资产访问申请（提交进入审批中心）。 */
     @Transactional
     public ApprovalRequest applyAccess(String assetFqn, java.util.Map<String, Object> payload) {
+        UUID tenantId = TenantContext.getTenantId();
+        UUID applicantId = TenantContext.getUserId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (applicantId == null) throw new BizException(40100, "用户上下文缺失");
+        ApprovalRequest existing = approvalRepo
+            .findFirstByTenantIdAndApplicantIdAndTargetRefAndStatusOrderByCreatedAtDesc(tenantId, applicantId, assetFqn, "PENDING")
+            .orElse(null);
+        if (existing != null) {
+            return existing;
+        }
+
         ApprovalRequest req = new ApprovalRequest();
-        req.setTenantId(TenantContext.getTenantId());
+        req.setTenantId(tenantId);
         req.setRequestType("ACCESS");
-        req.setApplicantId(TenantContext.getUserId());
+        req.setApplicantId(applicantId);
         req.setTargetRef(assetFqn);
-        req.setPayload(com.onelake.common.util.JsonUtil.toJson(payload));
+        req.setPayload(JsonUtil.toJson(enrichAccessPayload(payload)));
         req.setStatus("PENDING");
         return approvalRepo.save(req);
     }
@@ -301,18 +317,40 @@ public class SecurityService {
     public AccessGrant approve(UUID approvalId, UUID approverId, String comment) {
         ApprovalRequest req = approvalRepo.findById(approvalId)
             .orElseThrow(() -> new BizException(40400, "审批单不存在"));
+        if (!"PENDING".equals(req.getStatus())) {
+            throw new BizException(40900, "审批单已处理");
+        }
+        Map<String, Object> payload = payloadMap(req.getPayload());
+        if (requiresSecondApproval(payload) && !firstApprovalDone(payload)) {
+            markApprovalStep(payload, "ASSET_OWNER", approverId, comment);
+            req.setPayload(JsonUtil.toJson(payload));
+            req.setComment(comment);
+            return null;
+        }
+        if (requiresSecondApproval(payload) && firstApprovalBySameApprover(payload, approverId)) {
+            throw new BizException(40910, "高危权限需第二审批人复核");
+        }
+        if (requiresSecondApproval(payload)) {
+            markApprovalStep(payload, "SECURITY_REVIEW", approverId, comment);
+            req.setPayload(JsonUtil.toJson(payload));
+        }
         req.setStatus("APPROVED");
         req.setApproverId(approverId);
         req.setComment(comment);
-        req.setDecidedAt(Instant.now());
+        Instant now = Instant.now();
+        req.setDecidedAt(now);
+
+        AccessPolicy accessPolicy = resolveAccessPolicy(req.getPayload(), now);
 
         AccessGrant g = new AccessGrant();
         g.setTenantId(req.getTenantId());
         g.setSubjectId(req.getApplicantId());
         g.setAssetFqn(req.getTargetRef());
-        g.setPermissions("{\"query\":true,\"download\":false,\"api\":true}");
+        g.setColumns(accessPolicy.columns());
+        g.setPermissions(JsonUtil.toJson(accessPolicy.permissions()));
         g.setStatus("ACTIVE");
-        g.setGrantedAt(Instant.now());
+        g.setGrantedAt(now);
+        g.setExpiresAt(accessPolicy.expiresAt());
         return grantRepo.save(g);
     }
 
@@ -320,8 +358,33 @@ public class SecurityService {
     public void reject(UUID approvalId, UUID approverId, String comment) {
         ApprovalRequest req = approvalRepo.findById(approvalId)
             .orElseThrow(() -> new BizException(40400, "审批单不存在"));
+        if (!"PENDING".equals(req.getStatus())) {
+            throw new BizException(40900, "审批单已处理");
+        }
         req.setStatus("REJECTED");
         req.setApproverId(approverId);
+        req.setComment(comment);
+        req.setDecidedAt(Instant.now());
+        Map<String, Object> payload = payloadMap(req.getPayload());
+        markPendingSteps(payload, "REJECTED", approverId, comment);
+        req.setPayload(JsonUtil.toJson(payload));
+    }
+
+    @Transactional
+    public void cancelMyApproval(UUID approvalId, String comment) {
+        UUID tenantId = TenantContext.getTenantId();
+        UUID applicantId = TenantContext.getUserId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (applicantId == null) throw new BizException(40100, "用户上下文缺失");
+        ApprovalRequest req = approvalRepo.findById(approvalId)
+            .orElseThrow(() -> new BizException(40400, "审批单不存在"));
+        if (!tenantId.equals(req.getTenantId()) || !applicantId.equals(req.getApplicantId())) {
+            throw new BizException(40300, "无权撤回该审批单");
+        }
+        if (!"PENDING".equals(req.getStatus())) {
+            throw new BizException(40900, "审批单已处理");
+        }
+        req.setStatus("CANCELED");
         req.setComment(comment);
         req.setDecidedAt(Instant.now());
     }
@@ -330,4 +393,365 @@ public class SecurityService {
     public List<ApprovalRequest> pendingApprovals() {
         return approvalRepo.findByTenantIdAndStatus(TenantContext.getTenantId(), "PENDING");
     }
+
+    @Transactional
+    public List<AccessGrant> listGrants(String status) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        expireTenantGrants(tenantId);
+        return grantRepo.findByTenantIdAndStatusInOrderByGrantedAtDesc(tenantId, grantStatuses(status));
+    }
+
+    @Transactional
+    public AccessGrant createGrant(UUID subjectId, String assetFqn, Map<String, Object> payload) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (subjectId == null) throw new BizException(40050, "授权用户不能为空");
+        if (assetFqn == null || assetFqn.isBlank()) throw new BizException(40050, "授权资产不能为空");
+        Instant now = Instant.now();
+        AccessPolicy accessPolicy = resolveAccessPolicy(JsonUtil.toJson(payload == null ? Map.of() : payload), now);
+        AccessGrant grant = new AccessGrant();
+        grant.setTenantId(tenantId);
+        grant.setSubjectId(subjectId);
+        grant.setAssetFqn(assetFqn.trim());
+        grant.setColumns(accessPolicy.columns());
+        grant.setPermissions(JsonUtil.toJson(accessPolicy.permissions()));
+        grant.setStatus("ACTIVE");
+        grant.setGrantedAt(now);
+        grant.setExpiresAt(accessPolicy.expiresAt());
+        return grantRepo.save(grant);
+    }
+
+    @Transactional
+    public AccessGrant revokeGrant(UUID grantId, String comment) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        AccessGrant grant = grantRepo.findByTenantIdAndId(tenantId, grantId)
+            .orElseThrow(() -> new BizException(40400, "授权不存在"));
+        grant.setStatus("REVOKED");
+        return grant;
+    }
+
+    @Transactional
+    public AccessGrant extendGrant(UUID grantId, int durationDays) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (durationDays < 1 || durationDays > 366) {
+            throw new BizException(40050, "延长期限需在 1 到 366 天之间");
+        }
+        AccessGrant grant = grantRepo.findByTenantIdAndId(tenantId, grantId)
+            .orElseThrow(() -> new BizException(40400, "授权不存在"));
+        if ("REVOKED".equals(grant.getStatus())) {
+            throw new BizException(40900, "授权已撤销");
+        }
+        Instant base = grant.getExpiresAt() != null && grant.getExpiresAt().isAfter(Instant.now())
+            ? grant.getExpiresAt()
+            : Instant.now();
+        grant.setStatus("ACTIVE");
+        grant.setExpiresAt(base.plus(Math.min(durationDays, 366), ChronoUnit.DAYS));
+        return grant;
+    }
+
+    @Transactional
+    public ApprovalRequest transferApproval(UUID approvalId, UUID nextApproverId, String comment) {
+        ApprovalRequest req = pendingApproval(approvalId);
+        Map<String, Object> payload = payloadMap(req.getPayload());
+        payload.put("assignedApproverId", nextApproverId == null ? null : nextApproverId.toString());
+        appendWorkflowEvent(payload, "TRANSFER", TenantContext.getUserId(), comment);
+        req.setPayload(JsonUtil.toJson(payload));
+        req.setComment(comment);
+        return req;
+    }
+
+    @Transactional
+    public ApprovalRequest addSign(UUID approvalId, String role, String comment) {
+        ApprovalRequest req = pendingApproval(approvalId);
+        Map<String, Object> payload = payloadMap(req.getPayload());
+        List<Map<String, Object>> chain = approvalChain(payload);
+        chain.add(new LinkedHashMap<>(Map.of(
+            "role", role == null || role.isBlank() ? "ADDITIONAL_REVIEW" : role,
+            "status", "PENDING"
+        )));
+        payload.put("approvalChain", chain);
+        appendWorkflowEvent(payload, "ADD_SIGN", TenantContext.getUserId(), comment);
+        req.setPayload(JsonUtil.toJson(payload));
+        req.setComment(comment);
+        return req;
+    }
+
+    @Transactional(readOnly = true)
+    public Page<ApprovalRequest> myApprovals(String status, Pageable pageable) {
+        UUID tenantId = TenantContext.getTenantId();
+        UUID applicantId = TenantContext.getUserId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (applicantId == null) throw new BizException(40100, "用户上下文缺失");
+        return approvalRepo.findByTenantIdAndApplicantIdAndStatusInOrderByCreatedAtDesc(
+            tenantId,
+            applicantId,
+            approvalStatuses(status),
+            pageable
+        );
+    }
+
+    @Transactional(readOnly = true)
+    public Page<ApprovalRequest> processedApprovals(String status, Pageable pageable) {
+        return approvalRepo.findByTenantIdAndStatusInOrderByDecidedAtDescCreatedAtDesc(
+            TenantContext.getTenantId(),
+            processedStatuses(status),
+            pageable
+        );
+    }
+
+    private List<String> processedStatuses(String status) {
+        return approvalStatuses(status, List.of("APPROVED", "REJECTED", "CANCELED"));
+    }
+
+    private List<String> approvalStatuses(String status) {
+        return approvalStatuses(status, List.of("PENDING", "APPROVED", "REJECTED", "CANCELED"));
+    }
+
+    private List<String> approvalStatuses(String status, List<String> allowed) {
+        if (status == null || status.isBlank() || "ALL".equalsIgnoreCase(status)) {
+            return allowed;
+        }
+        String normalized = status.trim().toUpperCase(Locale.ROOT);
+        if (!allowed.contains(normalized)) {
+            throw new BizException(40050, "审批状态不支持: " + status);
+        }
+        return List.of(normalized);
+    }
+
+    private List<AccessGrant> activeUnexpiredGrants(UUID tenantId, UUID subjectId) {
+        Instant now = Instant.now();
+        return grantRepo.findByTenantIdAndSubjectIdAndStatus(tenantId, subjectId, "ACTIVE")
+            .stream()
+            .filter(grant -> {
+                if (grant.getExpiresAt() == null || grant.getExpiresAt().isAfter(now)) {
+                    return true;
+                }
+                grant.setStatus("EXPIRED");
+                return false;
+            })
+            .toList();
+    }
+
+    private void expireTenantGrants(UUID tenantId) {
+        Instant now = Instant.now();
+        grantRepo.findByTenantIdAndStatus(tenantId, "ACTIVE").stream()
+            .filter(grant -> grant.getExpiresAt() != null && !grant.getExpiresAt().isAfter(now))
+            .forEach(grant -> grant.setStatus("EXPIRED"));
+    }
+
+    private List<String> grantStatuses(String status) {
+        List<String> allowed = List.of("ACTIVE", "EXPIRED", "REVOKED");
+        if (status == null || status.isBlank() || "ALL".equalsIgnoreCase(status)) {
+            return allowed;
+        }
+        String normalized = status.trim().toUpperCase(Locale.ROOT);
+        if (!allowed.contains(normalized)) {
+            throw new BizException(40050, "授权状态不支持: " + status);
+        }
+        return List.of(normalized);
+    }
+
+    private Map<String, Object> enrichAccessPayload(Map<String, Object> payload) {
+        Map<String, Object> enriched = new LinkedHashMap<>(payload == null ? Map.of() : payload);
+        Map<String, Object> permissions = objectMap(enriched.get("permissions"));
+        permissions.putIfAbsent("query", true);
+        permissions.putIfAbsent("download", false);
+        permissions.putIfAbsent("api", false);
+        enriched.put("permissions", permissions);
+        String riskLevel = resolveRiskLevel(enriched, permissions);
+        enriched.put("riskLevel", riskLevel);
+        enriched.putIfAbsent("approvalChain", defaultApprovalChain(riskLevel));
+        enriched.putIfAbsent("impactSummary", Map.of(
+            "assets", 1,
+            "apis", Boolean.TRUE.equals(permissions.get("api")) ? 1 : 0,
+            "subscribers", 0
+        ));
+        return enriched;
+    }
+
+    private String resolveRiskLevel(Map<String, Object> payload, Map<String, Object> permissions) {
+        int durationDays = numberValue(payload.get("durationDays"));
+        boolean elevated = Boolean.TRUE.equals(permissions.get("download")) || Boolean.TRUE.equals(permissions.get("api"));
+        if (Boolean.TRUE.equals(permissions.get("api")) || durationDays == 0 || durationDays > 90) {
+            return "HIGH";
+        }
+        return elevated ? "MEDIUM" : "LOW";
+    }
+
+    private List<Map<String, Object>> defaultApprovalChain(String riskLevel) {
+        List<Map<String, Object>> chain = new ArrayList<>();
+        chain.add(new LinkedHashMap<>(Map.of("role", "ASSET_OWNER", "status", "PENDING")));
+        if ("HIGH".equals(riskLevel)) {
+            chain.add(new LinkedHashMap<>(Map.of("role", "SECURITY_REVIEW", "status", "PENDING")));
+        }
+        return chain;
+    }
+
+    private boolean requiresSecondApproval(Map<String, Object> payload) {
+        return "HIGH".equals(String.valueOf(payload.getOrDefault("riskLevel", "LOW")));
+    }
+
+    private boolean firstApprovalDone(Map<String, Object> payload) {
+        return approvalChain(payload).stream()
+            .anyMatch(step -> "ASSET_OWNER".equals(step.get("role")) && "APPROVED".equals(step.get("status")));
+    }
+
+    private boolean firstApprovalBySameApprover(Map<String, Object> payload, UUID approverId) {
+        return approvalChain(payload).stream()
+            .filter(step -> "ASSET_OWNER".equals(step.get("role")))
+            .map(step -> String.valueOf(step.get("approverId")))
+            .anyMatch(approverId.toString()::equals);
+    }
+
+    private void markApprovalStep(Map<String, Object> payload, String role, UUID approverId, String comment) {
+        List<Map<String, Object>> chain = approvalChain(payload);
+        chain.stream()
+            .filter(step -> role.equals(step.get("role")) && !"APPROVED".equals(step.get("status")))
+            .findFirst()
+            .ifPresent(step -> {
+                step.put("status", "APPROVED");
+                step.put("approverId", approverId.toString());
+                step.put("comment", comment);
+                step.put("at", Instant.now().toString());
+            });
+        payload.put("approvalChain", chain);
+    }
+
+    private void markPendingSteps(Map<String, Object> payload, String status, UUID approverId, String comment) {
+        List<Map<String, Object>> chain = approvalChain(payload);
+        chain.stream()
+            .filter(step -> "PENDING".equals(step.get("status")))
+            .forEach(step -> {
+                step.put("status", status);
+                step.put("approverId", approverId.toString());
+                step.put("comment", comment);
+                step.put("at", Instant.now().toString());
+            });
+        payload.put("approvalChain", chain);
+    }
+
+    private void appendWorkflowEvent(Map<String, Object> payload, String action, UUID actorId, String comment) {
+        List<Map<String, Object>> events = listOfMaps(payload.get("workflowEvents"));
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("action", action);
+        event.put("actorId", actorId == null ? null : actorId.toString());
+        event.put("comment", comment);
+        event.put("at", Instant.now().toString());
+        events.add(event);
+        payload.put("workflowEvents", events);
+    }
+
+    private ApprovalRequest pendingApproval(UUID approvalId) {
+        ApprovalRequest req = approvalRepo.findById(approvalId)
+            .orElseThrow(() -> new BizException(40400, "审批单不存在"));
+        if (!"PENDING".equals(req.getStatus())) {
+            throw new BizException(40900, "审批单已处理");
+        }
+        return req;
+    }
+
+    private Map<String, Object> payloadMap(String payload) {
+        if (payload == null || payload.isBlank()) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            return JsonUtil.mapper().readValue(payload, new TypeReference<LinkedHashMap<String, Object>>() {});
+        } catch (Exception e) {
+            return new LinkedHashMap<>();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> objectMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((k, v) -> result.put(String.valueOf(k), v));
+            return result;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> approvalChain(Map<String, Object> payload) {
+        List<Map<String, Object>> chain = listOfMaps(payload.get("approvalChain"));
+        if (chain.isEmpty()) {
+            chain = defaultApprovalChain(String.valueOf(payload.getOrDefault("riskLevel", "LOW")));
+        }
+        return chain;
+    }
+
+    private List<Map<String, Object>> listOfMaps(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return new ArrayList<>();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                map.forEach((k, v) -> row.put(String.valueOf(k), v));
+                result.add(row);
+            }
+        }
+        return result;
+    }
+
+    private int numberValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String text && !text.isBlank()) {
+            try {
+                return Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private AccessPolicy resolveAccessPolicy(String payload, Instant grantedAt) {
+        Map<String, Boolean> permissions = new LinkedHashMap<>();
+        permissions.put("query", true);
+        permissions.put("download", false);
+        permissions.put("api", false);
+        String columns = null;
+        Instant expiresAt = null;
+
+        if (payload == null || payload.isBlank()) {
+            return new AccessPolicy(permissions, columns, expiresAt);
+        }
+
+        try {
+            JsonNode root = JsonUtil.parse(payload);
+            JsonNode permissionNode = root.path("permissions");
+            if (permissionNode.isMissingNode() || permissionNode.isNull()) {
+                permissionNode = root.path("requestedPermissions");
+            }
+            if (permissionNode.isObject()) {
+                permissions.put("query", permissionNode.path("query").asBoolean(true));
+                permissions.put("download", permissionNode.path("download").asBoolean(false));
+                permissions.put("api", permissionNode.path("api").asBoolean(false));
+            }
+            JsonNode columnsNode = root.path("columns");
+            if (columnsNode.isArray()) {
+                columns = JsonUtil.toJson(columnsNode);
+            }
+            int durationDays = root.path("durationDays").asInt(0);
+            if (durationDays > 0) {
+                expiresAt = grantedAt.plus(Math.min(durationDays, 366), ChronoUnit.DAYS);
+            }
+        } catch (IllegalStateException ignored) {
+            return new AccessPolicy(permissions, columns, expiresAt);
+        }
+        return new AccessPolicy(permissions, columns, expiresAt);
+    }
+
+    private record AccessPolicy(
+        Map<String, Boolean> permissions,
+        String columns,
+        Instant expiresAt
+    ) {}
 }

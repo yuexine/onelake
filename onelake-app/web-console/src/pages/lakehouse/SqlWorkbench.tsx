@@ -2,7 +2,7 @@
  * SQL 工作台（对应原型 §8.3.3 升级版）。
  *   表树 + Monaco SQL 编辑器 + 结果区
  */
-import { Row, Col, Tree, Space, Button, Select, Tag, Table, Alert, Tabs, Tooltip, message, Typography, Popconfirm, Dropdown, Input, Segmented, Modal, Form } from 'antd';
+import { Row, Col, Tree, Space, Button, Select, Tag, Table, Alert, Tabs, Tooltip, Typography, Popconfirm, Dropdown, Input, Segmented, Modal, Form, App as AntdApp, Checkbox } from 'antd';
 import {
   PlayCircleOutlined, FormatPainterOutlined, SaveOutlined,
   ApiOutlined, ClusterOutlined, CodeOutlined, DatabaseOutlined,
@@ -15,10 +15,10 @@ import Editor from '@monaco-editor/react';
 import { format as formatSqlText } from 'sql-formatter';
 import ReactECharts from 'echarts-for-react';
 import { PageHeader, SectionCard } from '../../components';
-import { CatalogAPI, OrchestrationAPI, SqlWorkbenchAPI } from '../../api';
+import { CatalogAPI, OrchestrationAPI, SecurityAPI, SqlWorkbenchAPI } from '../../api';
 import { BizError } from '../../api/http';
 import { getAuthUser, getValidAccessToken } from '../../auth/oidc';
-import type { Asset, QueryTemplate, QueryTemplatePlaceholder, SavedQuery, SqlExecuteResult, SqlQueryHistory } from '../../types';
+import type { AccessGrant, ApprovalRequest, Asset, QueryTemplate, QueryTemplatePlaceholder, SavedQuery, SqlExecuteResult, SqlQueryHistory } from '../../types';
 import { normalizeCatalogAssets } from './assetAdapter';
 
 const { Text } = Typography;
@@ -41,7 +41,8 @@ const SQL_ERROR_CATALOG: Record<string, ErrorHint> = {
   '40045': { title: '导出格式不支持', hint: '导出格式仅支持 csv 或 tsv。' },
   '40300': { title: '无权限', hint: '当前账号无权访问该资源，请联系管理员或在安全中心申请。' },
   '40302': { title: '无编辑权限', hint: '仅 owner 或被显式授予 EDIT 权限的用户可修改或删除该资源。' },
-  '40341': { title: 'Catalog 资产未登记或无权访问', hint: 'SQL 引用的表尚未纳入 Catalog，或当前账号缺少 query 授权。先完成资产登记后才能查询；已有资产可在安全中心申请访问权限。' },
+  '40340': { title: '缺少资产查询授权', hint: 'SQL 引用的资产已登记，但当前账号没有 query 授权。已有资产可在安全中心申请访问权限，或由管理员授予访问。' },
+  '40341': { title: 'Catalog 资产未登记', hint: 'SQL 引用的表尚未纳入 Catalog。请先完成资产登记，再重新执行查询。' },
   '40404': { title: '查询不存在', hint: '查询任务可能已过期或被清理，请重新运行。' },
   '40405': { title: '保存查询不存在' },
   '42901': { title: '并发查询数超限', hint: '当前账号已有过多运行中查询，请先取消已完成或长时间运行的查询再提交。' },
@@ -59,9 +60,24 @@ function resolveErrorHint(errorCode?: string, errorMessage?: string): ErrorHint 
   }
   if (!errorMessage) return undefined;
   if (errorMessage.includes('未登记到 Catalog')) return SQL_ERROR_CATALOG['40341'];
-  if (errorMessage.includes('无权查询资产')) return SQL_ERROR_CATALOG['40341'];
+  if (errorMessage.includes('无权查询资产')) return SQL_ERROR_CATALOG['40340'];
   if (errorMessage.includes('只读查询') || errorMessage.includes('不允许一次提交多条语句')) return SQL_ERROR_CATALOG['40040'];
   return undefined;
+}
+
+function formatSqlError(errorMessage: string, errorCode?: string) {
+  const hint = resolveErrorHint(errorCode, errorMessage);
+  return {
+    title: hint?.title || 'SQL 执行失败',
+    message: errorMessage,
+    hint: hint?.hint,
+  };
+}
+
+function deniedAssetFromError(errorMessage?: string) {
+  if (!errorMessage) return undefined;
+  const match = errorMessage.match(/无权查询资产:\s*([^\s，,；;]+)/);
+  return match?.[1];
 }
 
 function isNumericType(type?: string): boolean {
@@ -185,6 +201,38 @@ function hasProtectedResult(result?: SqlExecuteResult) {
   return Boolean(result.securityNotices?.length || result.maskedColumns?.length);
 }
 
+function formatTime(value?: string) {
+  return value ? new Date(value).toLocaleString() : '-';
+}
+
+function approvalReason(payload?: Record<string, unknown> | string, fallback?: string) {
+  if (fallback) return fallback;
+  if (!payload) return '-';
+  if (typeof payload === 'object') {
+    return typeof payload.reason === 'string' ? payload.reason : '-';
+  }
+  try {
+    const parsed = JSON.parse(payload);
+    return typeof parsed?.reason === 'string' ? parsed.reason : '-';
+  } catch {
+    return '-';
+  }
+}
+
+type GrantPermissionFlags = { query?: boolean; download?: boolean; api?: boolean };
+
+function grantPermissions(grant: AccessGrant): GrantPermissionFlags {
+  const raw = (grant as { permissions?: AccessGrant['permissions'] | string }).permissions;
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw as GrantPermissionFlags;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed as GrantPermissionFlags : {};
+  } catch {
+    return {};
+  }
+}
+
 function TableTreeTitle({ fqn }: { fqn: string }) {
   const [layer = '', name = fqn] = fqn.split('.');
   return (
@@ -237,6 +285,7 @@ function FieldTreeTitle({ name, type, classification }: { name: string; type: st
 }
 
 export default function SqlWorkbench() {
+  const { message } = AntdApp.useApp();
   const navigate = useNavigate();
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
@@ -271,7 +320,34 @@ export default function SqlWorkbench() {
   const [templateSearch, setTemplateSearch] = useState('');
   const [renderTarget, setRenderTarget] = useState<QueryTemplate | null>(null);
   const [renderForm] = Form.useForm<Record<string, string>>();
+  const [accessForm] = Form.useForm<Record<string, unknown>>();
   const [rendering, setRendering] = useState(false);
+  const [accessModalOpen, setAccessModalOpen] = useState(false);
+  const [accessTargetFqn, setAccessTargetFqn] = useState<string>();
+  const [accessApplying, setAccessApplying] = useState(false);
+  const [submittedApprovalId, setSubmittedApprovalId] = useState<string>();
+  const [myApprovalsOpen, setMyApprovalsOpen] = useState(false);
+  const [myApprovals, setMyApprovals] = useState<ApprovalRequest[]>([]);
+  const [myApprovalsLoading, setMyApprovalsLoading] = useState(false);
+  const [myApprovalsStatus, setMyApprovalsStatus] = useState<'ALL' | ApprovalRequest['status']>('ALL');
+  const [myApprovalsPage, setMyApprovalsPage] = useState(0);
+  const [myApprovalsSize, setMyApprovalsSize] = useState(10);
+  const [myApprovalsTotal, setMyApprovalsTotal] = useState(0);
+  const [myGrants, setMyGrants] = useState<AccessGrant[]>([]);
+  const [myGrantsLoading, setMyGrantsLoading] = useState(false);
+
+  const showQueryError = useCallback((errorMessage: string, errorCode?: string) => {
+    const formatted = formatSqlError(errorMessage, errorCode);
+    message.error({
+      duration: 4,
+      content: (
+        <span>
+          <span style={{ fontWeight: 600 }}>{formatted.title}</span>
+          <span>：{formatted.message}</span>
+        </span>
+      ),
+    });
+  }, [message]);
 
   const filteredAssets = useMemo(() => {
     const keyword = treeSearch.trim().toLowerCase();
@@ -372,6 +448,12 @@ export default function SqlWorkbench() {
   }, []);
 
   useEffect(() => {
+    if (myApprovalsOpen) {
+      loadMyApprovals(0, myApprovalsSize, myApprovalsStatus);
+    }
+  }, [myApprovalsStatus]);
+
+  useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
@@ -447,17 +529,18 @@ export default function SqlWorkbench() {
           } else {
             setQueryError(data.error || 'SQL 执行失败');
             setQueryErrorCode(data.errorCode);
-            message.error(data.error || 'SQL 执行失败');
+            showQueryError(data.error || 'SQL 执行失败', data.errorCode);
           }
         })
         .catch((e: Error) => {
           setCurrentQueryId(undefined);
           setLoading(false);
           setCancelling(false);
+          setResult(undefined);
           const code = e instanceof BizError ? e.code?.toString() : undefined;
           setQueryError(e.message || '查询状态获取失败');
           if (code) setQueryErrorCode(code);
-          message.error(e.message || '查询状态获取失败');
+          showQueryError(e.message || '查询状态获取失败', code);
           loadHistory();
         });
     }, 1500);
@@ -495,8 +578,10 @@ export default function SqlWorkbench() {
 
   const executeSql = (nextSql = sql) => {
     setLoading(true);
+    setResult(undefined);
     setQueryError(undefined);
     setQueryErrorCode(undefined);
+    setSubmittedApprovalId(undefined);
     setCancelling(false);
     SqlWorkbenchAPI.estimate({ sql: nextSql, engine, resourceGroup })
       .then((estimate) => {
@@ -516,10 +601,11 @@ export default function SqlWorkbench() {
       })
       .catch((e: Error) => {
         setCurrentQueryId(undefined);
+        setResult(undefined);
         const code = e instanceof BizError ? e.code?.toString() : undefined;
         setQueryError(e.message || 'SQL 执行失败');
         if (code) setQueryErrorCode(code);
-        message.error(e.message || 'SQL 执行失败');
+        showQueryError(e.message || 'SQL 执行失败', code);
         setLoading(false);
         loadHistory();
       });
@@ -800,7 +886,102 @@ export default function SqlWorkbench() {
 
   const resultRows = result?.rows.map((row, index) => ({ key: index, ...row })) || [];
   const protectedResult = hasProtectedResult(result);
-  const errorHint = resolveErrorHint(queryErrorCode, queryError);
+  const queryErrorView = queryError ? formatSqlError(queryError, queryErrorCode) : undefined;
+  const deniedAssetFqn = selectedAssetFqn || deniedAssetFromError(queryError);
+  const canApplyAccess = Boolean(queryErrorView && deniedAssetFqn && (queryErrorCode === '40340' || queryError?.includes('无权查询资产')));
+
+  const openAccessRequest = () => {
+    if (!deniedAssetFqn) return;
+    setAccessTargetFqn(deniedAssetFqn);
+    setAccessModalOpen(true);
+  };
+
+  const loadMyApprovals = (page = myApprovalsPage, size = myApprovalsSize, status = myApprovalsStatus) => {
+    setMyApprovalsLoading(true);
+    SecurityAPI.myApprovals({
+      status: status === 'ALL' ? undefined : status,
+      page,
+      size,
+    })
+      .then((data) => {
+        setMyApprovals(data.content);
+        setMyApprovalsPage(data.number);
+        setMyApprovalsSize(data.size);
+        setMyApprovalsTotal(data.totalElements);
+      })
+      .catch((e) => {
+        setMyApprovals([]);
+        setMyApprovalsTotal(0);
+        message.error(e?.message || '我的申请加载失败');
+      })
+      .finally(() => setMyApprovalsLoading(false));
+  };
+
+  const loadMyGrants = () => {
+    setMyGrantsLoading(true);
+    SecurityAPI.myGrants()
+      .then((items) => setMyGrants(items))
+      .catch((e) => {
+        setMyGrants([]);
+        message.error(e?.message || '我的授权加载失败');
+      })
+      .finally(() => setMyGrantsLoading(false));
+  };
+
+  const openMyApprovals = () => {
+    setMyApprovalsOpen(true);
+    loadMyGrants();
+    loadMyApprovals(0, myApprovalsSize, myApprovalsStatus);
+  };
+
+  const cancelMyApproval = (approval: ApprovalRequest) => {
+    setMyApprovalsLoading(true);
+    SecurityAPI.cancelApproval(approval.id, 'applicant-cancel')
+      .then(() => {
+        if (submittedApprovalId === approval.id) {
+          setSubmittedApprovalId(undefined);
+        }
+        message.success('已撤回访问申请');
+        loadMyGrants();
+        loadMyApprovals(0, myApprovalsSize, myApprovalsStatus);
+      })
+      .catch((e) => {
+        message.error(e?.message || '撤回申请失败');
+        setMyApprovalsLoading(false);
+      });
+  };
+
+  const submitAccessRequest = () => {
+    accessForm.validateFields()
+      .then((values) => {
+        const assetFqn = String(values.assetFqn || deniedAssetFqn);
+        setAccessApplying(true);
+        return SecurityAPI.applyAccess(assetFqn, {
+          reason: values.reason,
+          source: 'SQL_WORKBENCH',
+          sourcePath: '/lakehouse/sql',
+          sql,
+          permissions: {
+            query: true,
+            download: Boolean(values.download),
+            api: Boolean(values.api),
+          },
+          durationDays: Number(values.durationDays || 30),
+        });
+      })
+      .then((approval) => {
+        setSubmittedApprovalId(approval.id);
+        setAccessModalOpen(false);
+        loadMyGrants();
+        loadMyApprovals(0, myApprovalsSize, myApprovalsStatus);
+        message.success(`访问申请已提交或已存在：${approval.id}`);
+      })
+      .catch((e) => {
+        if (e?.errorFields) return;
+        message.error(e?.message || '访问申请提交失败');
+      })
+      .finally(() => setAccessApplying(false));
+  };
 
   const tabs = [
     { key: 'result', label: '结果', children: (
@@ -870,7 +1051,38 @@ export default function SqlWorkbench() {
           loading={loading}
           dataSource={resultRows}
           columns={resultColumns}
-          locale={{ emptyText: queryError || '暂无查询结果' }}
+          locale={{
+            emptyText: queryErrorView ? (
+              <div style={{ padding: '28px 16px', textAlign: 'center' }}>
+                <div style={{ color: 'var(--ol-error)', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                  {queryErrorView.title}
+                </div>
+                <div style={{ color: 'var(--ol-ink-2)', fontSize: 12, lineHeight: 1.6 }}>
+                  {queryErrorView.message}
+                </div>
+                {queryErrorView.hint && (
+                  <div style={{ color: 'var(--ol-ink-3)', fontSize: 12, lineHeight: 1.6, marginTop: 6 }}>
+                    {queryErrorView.hint}
+                  </div>
+                )}
+                {submittedApprovalId && (
+                  <div style={{ marginTop: 10, color: 'var(--ol-info)', fontSize: 12 }}>
+                    <div>
+                      访问申请已提交，审批单号：<span className="mono">{submittedApprovalId}</span>
+                    </div>
+                    <Button size="small" style={{ marginTop: 10 }} onClick={openMyApprovals}>
+                      查看我的权限
+                    </Button>
+                  </div>
+                )}
+                {canApplyAccess && !submittedApprovalId && (
+                  <Button size="small" type="primary" style={{ marginTop: 12 }} onClick={openAccessRequest}>
+                    申请访问
+                  </Button>
+                )}
+              </div>
+            ) : '暂无查询结果',
+          }}
         />
 
         <div
@@ -1146,6 +1358,9 @@ export default function SqlWorkbench() {
                 <Tooltip title="格式化"><Button size="small" icon={<FormatPainterOutlined />} onClick={formatSql} /></Tooltip>
                 <Tooltip title="保存查询 (Ctrl/Cmd+S)"><Button size="small" icon={<SaveOutlined />} onClick={saveCurrentQuery} /></Tooltip>
                 <Tooltip title="保存为模板"><Button size="small" icon={<FileTextOutlined />} onClick={saveCurrentAsTemplate} disabled={!sql.trim()} /></Tooltip>
+                <Tooltip title="查看我的授权和访问申请">
+                  <Button size="small" icon={<FileTextOutlined />} onClick={openMyApprovals}>我的权限</Button>
+                </Tooltip>
                 <Dropdown menu={{ items: [
                   { key: 'csv', label: '导出为 CSV', onClick: () => exportCurrentResult('csv'), disabled: exporting },
                   { key: 'tsv', label: '导出为 TSV', onClick: () => exportCurrentResult('tsv'), disabled: exporting },
@@ -1186,14 +1401,24 @@ export default function SqlWorkbench() {
                 theme="vs"
               />
             </div>
+            <div
+              style={{
+                marginTop: 8,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                color: queryError ? 'var(--ol-error)' : 'var(--ol-ink-3)',
+                fontSize: 12,
+                lineHeight: '18px',
+              }}
+            >
+              <span className="ol-truncate">
+                {queryError ? '上次运行失败，详情见结果区与查询历史' : estimateMessage}
+              </span>
+              {queryErrorCode && <Text type="secondary" className="mono" style={{ fontSize: 11 }}>code {queryErrorCode}</Text>}
+            </div>
           </SectionCard>
-
-          <Alert
-            type={queryError ? 'error' : 'warning'} showIcon
-            style={{ marginTop: 12, borderRadius: 8 }}
-            message={<span style={{ fontSize: 13 }}>{queryError ? (errorHint?.title ? `${errorHint.title}：${queryError}` : queryError) : estimateMessage}</span>}
-            description={errorHint?.hint ? <span style={{ fontSize: 12 }}>{errorHint.hint}</span> : undefined}
-          />
 
           <SectionCard style={{ marginTop: 12 }} padded="none" bodyStyle={{ padding: 0 }}>
             <div style={{ padding: '0 16px 14px' }}>
@@ -1204,6 +1429,189 @@ export default function SqlWorkbench() {
       </Row>
 
       <Modal
+        open={accessModalOpen}
+        title="申请资产访问"
+        okText="提交申请"
+        cancelText="取消"
+        confirmLoading={accessApplying}
+        onOk={submitAccessRequest}
+        onCancel={() => setAccessModalOpen(false)}
+        destroyOnHidden
+        afterOpenChange={(open) => {
+          if (open && accessTargetFqn) {
+            accessForm.setFieldsValue({
+              assetFqn: accessTargetFqn,
+              reason: 'SQL 工作台查询分析',
+              durationDays: 30,
+              download: false,
+              api: false,
+            });
+          }
+        }}
+      >
+        <Form form={accessForm} layout="vertical" preserve={false}>
+          <Form.Item name="assetFqn" label="申请资产">
+            <Input disabled />
+          </Form.Item>
+          <Form.Item
+            name="reason"
+            label="用途说明"
+            rules={[{ required: true, message: '请填写申请用途' }]}
+          >
+            <Input.TextArea rows={3} placeholder="说明查询用途、分析场景或业务背景" />
+          </Form.Item>
+          <Form.Item name="durationDays" label="有效期">
+            <Select
+              options={[
+                { label: '7 天', value: 7 },
+                { label: '30 天', value: 30 },
+                { label: '90 天', value: 90 },
+                { label: '长期', value: 0 },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item label="权限范围">
+            <Space direction="vertical" size={6}>
+              <Checkbox checked disabled>查询 query</Checkbox>
+              <Form.Item name="download" valuePropName="checked" noStyle>
+                <Checkbox>下载 download</Checkbox>
+              </Form.Item>
+              <Form.Item name="api" valuePropName="checked" noStyle>
+                <Checkbox>API 调用 api</Checkbox>
+              </Form.Item>
+            </Space>
+          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            message={<span style={{ fontSize: 12 }}>审批通过后会立即生成访问授权；若该资产已有待审批申请，将复用原审批单。</span>}
+          />
+        </Form>
+      </Modal>
+
+      <Modal
+        open={myApprovalsOpen}
+        title="我的权限"
+        footer={null}
+        width={980}
+        onCancel={() => setMyApprovalsOpen(false)}
+      >
+        <Tabs
+          items={[
+            {
+              key: 'grants',
+              label: `我的授权 (${myGrants.length})`,
+              children: (
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Button size="small" icon={<ThunderboltOutlined />} onClick={loadMyGrants} loading={myGrantsLoading}>
+                      刷新
+                    </Button>
+                  </div>
+                  <Table
+                    size="middle"
+                    rowKey="id"
+                    loading={myGrantsLoading}
+                    dataSource={myGrants}
+                    pagination={false}
+                    columns={[
+                      { title: '资产', dataIndex: 'assetFqn', render: (value: string) => <Text code style={{ fontSize: 12 }}>{value}</Text> },
+                      { title: '权限', width: 190, render: (_: unknown, row: AccessGrant) => {
+                        const permissions = grantPermissions(row);
+                        return (
+                          <Space size={6} wrap>
+                            {permissions.query && <Tag color="success" style={{ margin: 0 }}>query</Tag>}
+                            {permissions.download && <Tag color="processing" style={{ margin: 0 }}>download</Tag>}
+                            {permissions.api && <Tag color="purple" style={{ margin: 0 }}>api</Tag>}
+                          </Space>
+                        );
+                      } },
+                      { title: '状态', dataIndex: 'status', width: 100, render: (status: AccessGrant['status']) => (
+                        <Tag color={status === 'ACTIVE' ? 'success' : status === 'EXPIRED' ? 'warning' : 'default'} style={{ margin: 0 }}>
+                          {status}
+                        </Tag>
+                      ) },
+                      { title: '授权时间', dataIndex: 'grantedAt', width: 170, render: (value: string) => <span style={{ fontSize: 12 }}>{formatTime(value)}</span> },
+                      { title: '到期时间', dataIndex: 'expiresAt', width: 170, render: (value?: string) => <span style={{ fontSize: 12 }}>{value ? formatTime(value) : '长期'}</span> },
+                    ]}
+                  />
+                </Space>
+              ),
+            },
+            {
+              key: 'approvals',
+              label: `我的申请 (${myApprovalsTotal})`,
+              children: (
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                    <Select
+                      size="small"
+                      value={myApprovalsStatus}
+                      onChange={(value) => setMyApprovalsStatus(value as typeof myApprovalsStatus)}
+                      style={{ width: 140 }}
+                      options={[
+                        { label: '全部状态', value: 'ALL' },
+                        { label: '待审批', value: 'PENDING' },
+                        { label: '已通过', value: 'APPROVED' },
+                        { label: '已驳回', value: 'REJECTED' },
+                        { label: '已取消', value: 'CANCELED' },
+                      ]}
+                    />
+                    <Button size="small" icon={<ThunderboltOutlined />} onClick={() => loadMyApprovals(0, myApprovalsSize, myApprovalsStatus)} loading={myApprovalsLoading}>
+                      刷新
+                    </Button>
+                  </div>
+                  <Table
+                    size="middle"
+                    rowKey="id"
+                    loading={myApprovalsLoading}
+                    dataSource={myApprovals}
+                    pagination={{
+                      current: myApprovalsPage + 1,
+                      pageSize: myApprovalsSize,
+                      total: myApprovalsTotal,
+                      showSizeChanger: true,
+                      onChange: (page, size) => loadMyApprovals(page - 1, size, myApprovalsStatus),
+                    }}
+                    columns={[
+                      { title: '申请对象', dataIndex: 'targetRef', render: (value: string) => <Text code style={{ fontSize: 12 }}>{value}</Text> },
+                      { title: '状态', dataIndex: 'status', width: 110, render: (status: ApprovalRequest['status']) => (
+                        <Tag
+                          color={status === 'APPROVED' ? 'success' : status === 'REJECTED' ? 'error' : status === 'PENDING' ? 'processing' : 'default'}
+                          style={{ margin: 0 }}
+                        >
+                          {status}
+                        </Tag>
+                      ) },
+                      { title: '用途说明', ellipsis: true, render: (_: unknown, row: ApprovalRequest) => (
+                        <span style={{ color: 'var(--ol-ink-2)', fontSize: 12 }}>
+                          {approvalReason((row as { payload?: Record<string, unknown> | string }).payload, row.reason)}
+                        </span>
+                      ) },
+                      { title: '提交时间', dataIndex: 'createdAt', width: 170, render: (value: string) => <span style={{ fontSize: 12 }}>{formatTime(value)}</span> },
+                      { title: '决定时间', dataIndex: 'decidedAt', width: 170, render: (value?: string) => <span style={{ fontSize: 12 }}>{formatTime(value)}</span> },
+                      { title: '操作', width: 90, render: (_: unknown, row: ApprovalRequest) => (
+                        row.status === 'PENDING' ? (
+                          <Popconfirm
+                            title="撤回这条访问申请？"
+                            okText="撤回"
+                            cancelText="取消"
+                            onConfirm={() => cancelMyApproval(row)}
+                          >
+                            <Button size="small" danger>撤回</Button>
+                          </Popconfirm>
+                        ) : '-'
+                      ) },
+                    ]}
+                  />
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Modal>
+
+      <Modal
         open={!!renderTarget}
         title={renderTarget ? `使用模板：${renderTarget.name}` : ''}
         onCancel={() => { setRenderTarget(null); renderForm.resetFields(); }}
@@ -1211,7 +1619,7 @@ export default function SqlWorkbench() {
         okText="渲染并填入编辑器"
         cancelText="取消"
         confirmLoading={rendering}
-        destroyOnClose
+        destroyOnHidden
       >
         {renderTarget?.description && (
           <Alert type="info" showIcon style={{ marginBottom: 12 }} message={<span style={{ fontSize: 12 }}>{renderTarget.description}</span>} />

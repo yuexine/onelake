@@ -3,6 +3,8 @@ package com.onelake.security.domain.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -16,7 +18,9 @@ public class AccessGrant {
     @Column(nullable = false) private UUID tenantId;
     @Column(nullable = false) private UUID subjectId;
     @Column(nullable = false) private String assetFqn;
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb") private String columns;
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(nullable = false, columnDefinition = "jsonb") private String permissions;   // {query,download,api}
     @Column(nullable = false, length = 16) private String status = "ACTIVE";   // ACTIVE/EXPIRED/REVOKED
     private Instant grantedAt = Instant.now();

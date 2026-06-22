@@ -1,7 +1,9 @@
 import { http } from './http';
 import type {
   ApiDefinition,
+  AccessGrant,
   Asset,
+  ApprovalRequest,
   DataSource,
   QualityAlert,
   QualityRule,
@@ -347,10 +349,32 @@ export const SecurityAPI = {
   confirmPii: (recordIds: string[]) =>
     unwrap<void>(http.post('/security/pii-scan/confirm', recordIds)),
 
-  myGrants: () => http.get('/security/grants/me'),
-  pendingApprovals: () => http.get('/security/approvals/pending'),
+  myGrants: () => unwrap<AccessGrant[]>(http.get('/security/grants/me')),
+  listGrants: (params?: { status?: string }) =>
+    unwrap<AccessGrant[]>(http.get('/security/grants', { params })),
+  createGrant: (subjectId: string, assetFqn: string, payload: Record<string, unknown>) =>
+    unwrap<AccessGrant>(http.post('/security/grants', payload, { params: { subjectId, assetFqn } })),
+  revokeGrant: (grantId: string, comment?: string) =>
+    unwrap<AccessGrant>(http.post(`/security/grants/${grantId}/revoke`, undefined, { params: { comment } })),
+  extendGrant: (grantId: string, durationDays = 30) =>
+    unwrap<AccessGrant>(http.post(`/security/grants/${grantId}/extend`, undefined, { params: { durationDays } })),
+  myApprovals: (params?: { status?: string; page?: number; size?: number }) =>
+    unwrap<PageResult<ApprovalRequest>>(http.get('/security/approvals/me', { params })),
+  pendingApprovals: () => unwrap<ApprovalRequest[]>(http.get('/security/approvals/pending')),
+  processedApprovals: (params?: { status?: string; page?: number; size?: number }) =>
+    unwrap<PageResult<ApprovalRequest>>(http.get('/security/approvals/processed', { params })),
   applyAccess: (assetFqn: string, payload: Record<string, unknown>) =>
-    http.post('/security/approvals', payload, { params: { assetFqn } }),
+    unwrap<ApprovalRequest>(http.post('/security/approvals', payload, { params: { assetFqn } })),
+  approveApproval: (approvalId: string, comment?: string) =>
+    unwrap<AccessGrant | null>(http.post(`/security/approvals/${approvalId}/approve`, undefined, { params: { comment } })),
+  rejectApproval: (approvalId: string, comment?: string) =>
+    unwrap<void>(http.post(`/security/approvals/${approvalId}/reject`, undefined, { params: { comment } })),
+  cancelApproval: (approvalId: string, comment?: string) =>
+    unwrap<void>(http.post(`/security/approvals/${approvalId}/cancel`, undefined, { params: { comment } })),
+  transferApproval: (approvalId: string, nextApproverId?: string, comment?: string) =>
+    unwrap<ApprovalRequest>(http.post(`/security/approvals/${approvalId}/transfer`, undefined, { params: { nextApproverId, comment } })),
+  addSignApproval: (approvalId: string, role?: string, comment?: string) =>
+    unwrap<ApprovalRequest>(http.post(`/security/approvals/${approvalId}/add-sign`, undefined, { params: { role, comment } })),
 };
 
 export const DataserviceAPI = {

@@ -5,15 +5,16 @@
  *   - 快捷入口
  *   - 近期动态时间线
  */
-import { Col, Row, List, Tag, Typography, Space, Button, Drawer, Timeline } from 'antd';
+import { Col, Row, List, Tag, Typography, Space, Button, Drawer, Timeline, App as AntdApp } from 'antd';
 import { useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   DatabaseOutlined, CheckCircleOutlined, SyncOutlined, AlertOutlined,
   PlusOutlined, ArrowRightOutlined, DashboardOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { ApprovalRequest } from '../../types';
 import { PageHeader, SectionCard, StatCard } from '../../components';
+import { SecurityAPI } from '../../api';
 
 const { Text } = Typography;
 
@@ -27,17 +28,29 @@ const TODO_INTENT: Record<string, { bg: string; fg: string }> = {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { message } = AntdApp.useApp();
   const [drawer, setDrawer] = useState<ApprovalRequest | null>(null);
+  const [approvalTodos, setApprovalTodos] = useState<ApprovalRequest[]>([]);
 
-  const todos: { type: string; title: string; meta: string; action: () => void; payload?: ApprovalRequest }[] = [
-    { type: 'TASK', title: '采集任务 orders_sync 失败，请重跑', meta: 'AUTH_401', action: () => navigate('/integration/sync-tasks/st-001') },
-    { type: 'APPROVAL', title: '订阅申请待审批 · 王五', meta: '/api/order/detail', action: () => navigate('/system/approvals/ap-2088'),
-      payload: { id: 'ap-2088', requestType: 'SUBSCRIPTION', applicantId: 'u-4', applicantName: '王五', targetRef: '/api/order/detail', reason: '临时查询订单', status: 'PENDING', riskLevel: 'LOW', impactSummary: { apis: 1 }, createdAt: '', chain: [] } },
-    { type: 'ALERT', title: '质量门禁拦截 dwd_order_df amount 越界 32 行', meta: 'CRITICAL', action: () => navigate('/quality/gate') },
-    { type: 'APPROVAL', title: 'Schema 变更审批 users DROP age', meta: '破坏性', action: () => navigate('/integration/schema-change/sc-001'),
-      payload: { id: 'ap-2089', requestType: 'SCHEMA_CHANGE', applicantId: 'sys', applicantName: '系统', targetRef: 'ods.users (DROP COLUMN age)', reason: 'CDC 自动捕获', status: 'PENDING', riskLevel: 'HIGH', impactSummary: { assets: 2, apis: 1, subscribers: 18 }, createdAt: '', chain: [] } },
-    { type: 'SECURITY', title: '密级变更待确认 phone L2 → L3', meta: '影响 18 个订阅方', action: () => navigate('/security/masking') },
-  ];
+  useEffect(() => {
+    SecurityAPI.pendingApprovals()
+      .then(setApprovalTodos)
+      .catch((e) => {
+        setApprovalTodos([]);
+        message.error(e?.message || '审批待办加载失败');
+      });
+  }, []);
+
+  const todos: { type: string; title: string; meta: string; action: () => void; payload?: ApprovalRequest }[] = useMemo(
+    () => approvalTodos.map((approval) => ({
+      type: 'APPROVAL',
+      title: `${approval.requestType} 待审批 · ${(approval.applicantName || approval.applicantId).slice(0, 8)}`,
+      meta: approval.targetRef,
+      action: () => navigate(`/system/approvals/${approval.id}`),
+      payload: approval,
+    })),
+    [approvalTodos, navigate],
+  );
 
   const quickActions = [
     { name: '新建连接',     link: '/integration/datasources',     icon: <DatabaseOutlined /> },
@@ -54,7 +67,7 @@ export default function Dashboard() {
         icon={<DashboardOutlined />}
         title={`早上好，张三`}
         subtitle={<span className="ol-chip">工作台 · L0</span>}
-        description="今日待办 5 条、运行中任务 12 个、待处理告警 5 条"
+        description={`今日审批待办 ${todos.length} 条、运行中任务见顶部任务条`}
       />
 
       <div className="ol-grid-stats">
@@ -100,6 +113,7 @@ export default function Dashboard() {
           >
             <List
               dataSource={todos}
+              locale={{ emptyText: <div style={{ padding: 24, color: 'var(--ol-ink-3)', fontSize: 13 }}>暂无审批待办</div> }}
               renderItem={(t) => {
                 const intent = TODO_INTENT[t.type] || TODO_INTENT.SYSTEM;
                 return (

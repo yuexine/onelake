@@ -297,10 +297,11 @@ export interface MaskingPolicy {
 
 export interface AccessGrant {
   id: UUID;
+  tenantId?: UUID;
   subjectId: UUID;
   assetFqn: string;
-  columns?: string[];
-  permissions: { query?: boolean; download?: boolean; api?: boolean };
+  columns?: string[] | string;
+  permissions: { query?: boolean; download?: boolean; api?: boolean } | string;
   status: 'ACTIVE' | 'EXPIRED' | 'REVOKED';
   grantedAt: string;
   expiresAt?: string;
@@ -330,11 +331,12 @@ export interface ApprovalRequest {
   targetRef: string;
   targetType?: string;
   reason?: string;
-  payload?: Record<string, unknown>;
+  payload?: Record<string, unknown> | string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELED';
   approverId?: UUID;
   approverName?: string;
-  chain?: { role: string; user?: string; status: 'PENDING' | 'APPROVED' | 'REJECTED'; at?: string; comment?: string }[];
+  comment?: string;
+  chain?: { role: string; user?: string; approverId?: UUID; status: 'PENDING' | 'APPROVED' | 'REJECTED'; at?: string; comment?: string }[];
   riskLevel?: 'LOW' | 'MEDIUM' | 'HIGH';
   impactSummary?: { assets?: number; apis?: number; subscribers?: number };
   createdAt: string;

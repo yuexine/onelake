@@ -11,32 +11,33 @@
     "gen:api": "openapi --input http://localhost:8080/v3/api-docs --output src/api --client axios"
   },
   "dependencies": {
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0",
-    "antd": "^5.20.0",
-    "@ant-design/pro-components": "^2.7.0",
     "@ant-design/icons": "^5.4.0",
-    "@tanstack/react-query": "^5.51.0",
-    "react-router-dom": "^6.26.0",
-    "axios": "^1.7.0",
-    "zustand": "^4.5.0",
+    "@ant-design/pro-components": "^2.7.0",
     "@antv/x6": "^2.18.0",
     "@antv/x6-react-shape": "^2.1.7",
     "@monaco-editor/react": "^4.6.0",
+    "@tanstack/react-query": "^5.51.0",
+    "antd": "^5.20.0",
+    "axios": "^1.7.0",
     "dayjs": "^1.11.0",
     "echarts": "^5.5.0",
     "echarts-for-react": "^3.0.2",
-    "nprogress": "^0.2.0"
+    "nprogress": "^0.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-router-dom": "^6.26.0",
+    "sql-formatter": "^15.8.2",
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "vite": "^5.4.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "openapi-typescript-codegen": "^0.29.0",
+    "@types/nprogress": "^0.2.3",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "@types/nprogress": "^0.2.3",
+    "@vitejs/plugin-react": "^4.3.0",
     "eslint": "^9.8.0",
-    "prettier": "^3.3.0"
+    "openapi-typescript-codegen": "^0.29.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
   }
 }

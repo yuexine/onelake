@@ -106,9 +106,19 @@ onelake:
       user: ${TRINO_USER:onelake}
       password: ${TRINO_PASSWORD:}
       max-rows: ${SQL_WORKBENCH_MAX_ROWS:200}
+      max-interactive-rows: ${SQL_WORKBENCH_MAX_INTERACTIVE_ROWS:2000}
+      max-running-per-user: ${SQL_WORKBENCH_MAX_RUNNING_PER_USER:5}
+      task-timeout-minutes: ${SQL_WORKBENCH_TASK_TIMEOUT_MINUTES:30}
       timeout-seconds: ${SQL_WORKBENCH_TIMEOUT_SECONDS:30}
       scan-threshold-bytes: ${SQL_WORKBENCH_SCAN_THRESHOLD_BYTES:1099511627776}
       result-retention-minutes: ${SQL_WORKBENCH_RESULT_RETENTION_MINUTES:15}
+      export-max-rows: ${SQL_WORKBENCH_EXPORT_MAX_ROWS:50000}
+      pool:
+        max-size: ${TRINO_POOL_MAX_SIZE:10}
+        min-idle: ${TRINO_POOL_MIN_IDLE:2}
+        connection-timeout-ms: ${TRINO_POOL_CONNECTION_TIMEOUT_MS:5000}
+        idle-timeout-ms: ${TRINO_POOL_IDLE_TIMEOUT_MS:600000}
+        max-lifetime-ms: ${TRINO_POOL_MAX_LIFETIME_MS:1800000}
     apisix-admin:
       base-url: ${APISIX_ADMIN_URL:http://localhost:9180/apisix/admin}
       key: ${APISIX_ADMIN_KEY:edd1c9f034335f136f87ad84b625c8f1}

@@ -6,6 +6,7 @@ import java.util.UUID;
 public record SavedQueryDTO(
     UUID id,
     String name,
+    UUID ownerId,
     String owner,
     boolean shared,
     String sql,

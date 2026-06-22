@@ -14,7 +14,10 @@ public record SqlExecuteResultDTO(
     Long scanBytes,
     Long rowCount,
     boolean truncated,
-    String error
+    String error,
+    List<String> maskedColumns,
+    List<String> securityNotices,
+    String errorCode
 ) {
     public record SqlColumnDTO(
         String name,

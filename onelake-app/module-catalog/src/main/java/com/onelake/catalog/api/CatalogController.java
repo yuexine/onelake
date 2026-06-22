@@ -1,6 +1,7 @@
 package com.onelake.catalog.api;
 
 import com.onelake.catalog.dto.AssetDTO;
+import com.onelake.catalog.service.CatalogColumnRefreshService;
 import com.onelake.catalog.service.CatalogService;
 import com.onelake.catalog.service.CatalogSyncService;
 import com.onelake.common.api.ApiResponse;
@@ -20,6 +21,7 @@ public class CatalogController {
 
     private final CatalogService catalogService;
     private final CatalogSyncService syncService;
+    private final CatalogColumnRefreshService columnRefreshService;
 
     @GetMapping("/assets/{id}")
     public ApiResponse<AssetDTO> get(@PathVariable UUID id) {
@@ -41,5 +43,12 @@ public class CatalogController {
     public ApiResponse<Map<String, Object>> sync() {
         int n = syncService.syncTables();
         return ApiResponse.ok(Map.of("synced", n));
+    }
+
+    @PostMapping("/assets/refresh-columns")
+    @PreAuthorize("hasAnyRole('ADMIN','DE')")
+    public ApiResponse<Map<String, Object>> refreshColumns() {
+        int n = columnRefreshService.refreshMissingColumns();
+        return ApiResponse.ok(Map.of("refreshed", n));
     }
 }

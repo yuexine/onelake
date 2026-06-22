@@ -4,5 +4,6 @@ public record SqlEstimateDTO(
     String engine,
     Long estimatedScanBytes,
     boolean thresholdExceeded,
-    String message
+    String message,
+    String routeReason
 ) {}

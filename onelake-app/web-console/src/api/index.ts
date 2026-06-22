@@ -7,6 +7,9 @@ import type {
   QualityRule,
   QualityRunResult,
   SavedQuery,
+  QueryTemplate,
+  QueryTemplatePlaceholder,
+  Dag,
   SqlExecuteResult,
   SqlQueryHistory,
   SyncRun,
@@ -231,10 +234,12 @@ export const IntegrationAPI = {
 };
 
 export const OrchestrationAPI = {
-  listDags: () => http.get('/orchestration/dags'),
-  getDag: (id: string) => http.get(`/orchestration/dags/${id}`),
+  listDags: () => unwrap<Dag[]>(http.get('/orchestration/dags')),
+  getDag: (id: string) => unwrap<Dag>(http.get(`/orchestration/dags/${id}`)),
+  createDag: (payload: Partial<Dag> & { dagsterJob?: string; scheduleCron?: string; enabled?: boolean }) =>
+    unwrap<Dag>(http.post('/orchestration/dags', payload)),
   triggerDag: (id: string, trigger = 'MANUAL') =>
-    http.post<{ runId: string }>(`/orchestration/dags/${id}/run`, null, { params: { trigger } }),
+    unwrap<{ runId: string }>(http.post(`/orchestration/dags/${id}/run`, null, { params: { trigger } })),
 };
 
 export const CatalogAPI = {
@@ -242,18 +247,19 @@ export const CatalogAPI = {
   getAsset: (id: string) => unwrap<Asset>(http.get(`/catalog/assets/${id}`)),
   downstream: (fqn: string) => unwrap<string[]>(http.get('/catalog/lineage/downstream', { params: { fqn } })),
   sync: () => unwrap<{ synced: number }>(http.post('/catalog/sync')),
+  refreshColumns: () => unwrap<{ refreshed: number }>(http.post('/catalog/assets/refresh-columns')),
 };
 
 export const SqlWorkbenchAPI = {
   estimate: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
-    unwrap<{ engine: string; estimatedScanBytes?: number; thresholdExceeded: boolean; message: string }>(
+    unwrap<{ engine: string; estimatedScanBytes?: number; thresholdExceeded: boolean; message: string; routeReason?: string }>(
       http.post('/lakehouse/sql/estimate', payload),
     ),
 
-  execute: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
+  execute: (payload: { sql: string; engine?: string; resourceGroup?: string; confirmLargeQuery?: boolean; maxRows?: number }) =>
     unwrap<SqlExecuteResult>(http.post('/lakehouse/sql/execute', payload)),
 
-  submit: (payload: { sql: string; engine?: string; resourceGroup?: string }) =>
+  submit: (payload: { sql: string; engine?: string; resourceGroup?: string; confirmLargeQuery?: boolean; maxRows?: number }) =>
     unwrap<SqlExecuteResult>(http.post('/lakehouse/sql/queries', payload)),
 
   query: (id: string) =>
@@ -270,6 +276,49 @@ export const SqlWorkbenchAPI = {
 
   saveQuery: (payload: { name: string; sql: string; shared: boolean }) =>
     unwrap<SavedQuery>(http.post('/lakehouse/sql/saved-queries', payload)),
+
+  updateSavedQuery: (id: string, payload: { name: string; sql: string; shared: boolean }) =>
+    unwrap<SavedQuery>(http.put(`/lakehouse/sql/saved-queries/${id}`, payload)),
+
+  deleteSavedQuery: (id: string) =>
+    unwrap<void>(http.delete(`/lakehouse/sql/saved-queries/${id}`)),
+
+  export: (payload: { sql: string; engine?: string; resourceGroup?: string; confirmLargeQuery?: boolean; format: 'csv' | 'tsv'; maxRows?: number }) =>
+    http.post('/lakehouse/sql/export', payload, {
+      responseType: 'blob',
+      headers: { Accept: 'text/csv, text/tab-separated-values' },
+    }) as unknown as Promise<import('./http').AxiosResponse<Blob>>,
+
+  templates: () =>
+    unwrap<QueryTemplate[]>(http.get('/lakehouse/sql/templates')),
+
+  createTemplate: (payload: {
+    name: string;
+    category?: string;
+    description?: string;
+    sqlTemplate: string;
+    placeholders?: QueryTemplatePlaceholder[];
+    shared?: boolean;
+  }) =>
+    unwrap<QueryTemplate>(http.post('/lakehouse/sql/templates', payload)),
+
+  updateTemplate: (id: string, payload: {
+    name: string;
+    category?: string;
+    description?: string;
+    sqlTemplate: string;
+    placeholders?: QueryTemplatePlaceholder[];
+    shared?: boolean;
+  }) =>
+    unwrap<QueryTemplate>(http.put(`/lakehouse/sql/templates/${id}`, payload)),
+
+  deleteTemplate: (id: string) =>
+    unwrap<void>(http.delete(`/lakehouse/sql/templates/${id}`)),
+
+  renderTemplate: (id: string, values: Record<string, string>) =>
+    unwrap<{ sql: string; replacedCount: number; submittedDirectly: boolean }>(
+      http.post(`/lakehouse/sql/templates/${id}/render`, { values }),
+    ),
 };
 
 export const ModelingAPI = {
@@ -316,6 +365,8 @@ export const DataserviceAPI = {
       durationMs: number;
       rowCount: number;
       truncated: boolean;
+      maskedColumns?: string[];
+      securityNotices?: string[];
     }>(http.post(`/dataservice/apis/${id}/debug`, params)),
   publishApi: (id: string) => unwrap<ApiDefinition>(http.post(`/dataservice/apis/${id}/publish`)),
   offlineApi: (id: string) => unwrap<void>(http.post(`/dataservice/apis/${id}/offline`)),

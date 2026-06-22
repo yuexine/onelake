@@ -78,8 +78,8 @@ export interface Dag {
   id: UUID;
   name: string;
   dagsterJob: string;
-  definition: DagNode[];
-  edges: DagEdge[];
+  definition: { nodes?: DagNode[]; edges?: DagEdge[]; [key: string]: unknown } | DagNode[];
+  edges?: DagEdge[];
   scheduleCron?: string;
   enabled: boolean;
   version: number;
@@ -88,8 +88,10 @@ export interface Dag {
 
 export interface DagNode {
   id: string;
-  type: 'INPUT' | 'GOVERN' | 'MASK' | 'ENCRYPT' | 'OUTPUT' | 'QUALITY_GATE';
+  type: 'INPUT' | 'GOVERN' | 'MASK' | 'ENCRYPT' | 'OUTPUT' | 'QUALITY_GATE' | 'SQL' | string;
   name: string;
+  sql?: string;
+  engine?: string;
   schema?: string;
   status?: 'idle' | 'configured' | 'error' | 'running' | 'success' | 'failed';
   params?: Record<string, unknown>;
@@ -152,6 +154,9 @@ export interface SqlExecuteResult {
   rowCount?: number;
   truncated?: boolean;
   error?: string;
+  errorCode?: string;
+  maskedColumns?: string[];
+  securityNotices?: string[];
 }
 
 export interface SqlQueryHistory {
@@ -170,9 +175,31 @@ export interface SqlQueryHistory {
 export interface SavedQuery {
   id: UUID;
   name: string;
+  ownerId?: UUID;
   owner: string;
   shared: boolean;
   sql: string;
+  updatedAt?: string;
+}
+
+export interface QueryTemplatePlaceholder {
+  name: string;
+  type: 'string' | 'number' | 'date' | 'timestamp' | 'identifier' | 'boolean';
+  required?: boolean;
+  defaultValue?: string;
+  description?: string;
+}
+
+export interface QueryTemplate {
+  id: UUID;
+  name: string;
+  category?: string;
+  description?: string;
+  sqlTemplate: string;
+  placeholders: QueryTemplatePlaceholder[];
+  ownerId?: UUID;
+  ownerName?: string;
+  shared: boolean;
   updatedAt?: string;
 }
 
@@ -322,6 +349,8 @@ export interface ApiDefinition {
   viewName: string;
   selectSql: string;
   sourceFqn?: string;
+  requestParams?: string;
+  responseSchema?: string;
   qpsLimit: number;
   status: 'DRAFT' | 'PUBLISHED' | 'DEPRECATED' | 'OFFLINE';
   currentVersion: number;

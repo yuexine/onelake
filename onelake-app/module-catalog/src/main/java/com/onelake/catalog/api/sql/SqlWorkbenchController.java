@@ -8,15 +8,20 @@ import com.onelake.catalog.dto.sql.SqlQueryHistoryDTO;
 import com.onelake.catalog.dto.sql.SqlSaveQueryRequest;
 import com.onelake.catalog.service.sql.SqlWorkbenchService;
 import com.onelake.common.api.ApiResponse;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 
@@ -52,6 +57,16 @@ public class SqlWorkbenchController {
         return ApiResponse.ok(service.cancel(id));
     }
 
+    @PostMapping("/export")
+    public void export(
+        @Valid @RequestBody SqlExecuteRequest request,
+        @RequestParam(defaultValue = "csv") String format,
+        @RequestParam(required = false) Integer maxRows,
+        HttpServletResponse response
+    ) throws IOException {
+        service.export(request, format, maxRows, response);
+    }
+
     @GetMapping("/history")
     public ApiResponse<List<SqlQueryHistoryDTO>> history() {
         return ApiResponse.ok(service.history());
@@ -65,5 +80,19 @@ public class SqlWorkbenchController {
     @PostMapping("/saved-queries")
     public ApiResponse<SavedQueryDTO> saveQuery(@Valid @RequestBody SqlSaveQueryRequest request) {
         return ApiResponse.ok(service.saveQuery(request));
+    }
+
+    @PutMapping("/saved-queries/{id}")
+    public ApiResponse<SavedQueryDTO> updateSavedQuery(
+        @PathVariable UUID id,
+        @Valid @RequestBody SqlSaveQueryRequest request
+    ) {
+        return ApiResponse.ok(service.updateSavedQuery(id, request));
+    }
+
+    @DeleteMapping("/saved-queries/{id}")
+    public ApiResponse<Void> deleteSavedQuery(@PathVariable UUID id) {
+        service.deleteSavedQuery(id);
+        return ApiResponse.ok(null);
     }
 }

@@ -923,6 +923,262 @@
   - `findings.md`
   - `progress.md`
 
+### 阶段 41：ODS 到 DWD 标准闭环实施方案细化
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取既有 `task_plan.md`、`findings.md`、`progress.md`，确认当前项目计划已推进到阶段 40。
+  - 复核当前 ODS 入湖、Catalog、质量、SQL 工作台、dbt 和 Dagster 的真实边界。
+  - 将标准 ODS->DWD 闭环拆成 0-8 轮迭代，逐轮明确目标、前后端/数据面改动、验收和不做事项。
+  - 新增 `docs/ODS到DWD标准闭环实施方案.md`，作为后续“继续实施”时的执行基准。
+  - 更新 `task_plan.md` 和 `findings.md`，记录阶段 41 与关键发现。
+- 创建/修改的文件：
+  - `docs/ODS到DWD标准闭环实施方案.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 42：ODS 到 DWD 方案链路匹配评审
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 复读 `docs/ODS到DWD标准闭环实施方案.md`，按源端入湖、ODS 资产、DWD 模型、编排运行、dbt 执行、质量门禁、Catalog/血缘、前端可观测逐段检查。
+  - 对照现有 `SyncRunSucceededEventHandler`、`OrchestrationService`、Catalog/Quality/SQL 工作台阶段发现，确认方案主线与整体设计一致。
+  - 识别并补强关键缺口：DWD 模型需映射为编排 DAG/Asset、DWD 终态需要独立模型事件、质量门禁应解析 dbt artifacts、字段安全标签应沿 ODS->DWD 继承。
+  - 在方案文档中新增整体链路匹配评审矩阵、必须补强的设计约束、MVP-A/MVP-B 发布点和更新后的首批任务清单。
+  - 更新 `task_plan.md` 和 `findings.md`，记录阶段 42 与评审结论。
+- 创建/修改的文件：
+  - `docs/ODS到DWD标准闭环实施方案.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 43：ODS 到 DWD 加工治理与算力/流水线兼容评审
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 调研 Databricks Lakeflow Jobs/compute/expectations/Unity Catalog lineage、Dagster dbt assets/asset checks、dbt artifacts、Airflow Pools、Azure Data Factory mapping data flows、AWS Glue Data Quality。
+  - 检查 OneLake 前端流水线、DagCanvas、OperatorMarket、SQL 工作台 `resourceGroup` 与“加入流水线”能力。
+  - 检查前端 `DagNode` 类型和后端 `orchestration.dag/job_run` 当前字段边界，确认现有 DAG definition 可承载节点图，但缺少资源画像与运行成本/排队观测字段。
+  - 在 ODS->DWD 方案文档中新增加工治理、流水线、算子市场、算力/资源组的边界评审。
+  - 新增 `迭代 2.5：加工治理算子与算力资源契约`，要求 DWD 模型保存默认 operator graph、resource profile，并编译为 dbt 产物和 orchestration DAG。
+  - 更新第一批落地顺序和首批任务清单，把迭代 2.5 纳入 MVP-A。
+  - 更新 `task_plan.md` 和 `findings.md`，记录阶段 43 与评审结论。
+- 创建/修改的文件：
+  - `docs/ODS到DWD标准闭环实施方案.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 44：全局任务条开发进展检查与实施方案
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取 `RTK.md`、现有 `task_plan.md`、`findings.md`、`progress.md`，确认继续使用既有规划文件。
+  - 检查原型设计文档和前端验证报告中关于全局任务条、通知中心、长任务反馈的要求。
+  - 检查 `TaskProgressBar.tsx`、`App.tsx`、`stores/app.ts`、`mock/index.ts`、`NotificationCenter.tsx` 和 `api/index.ts`。
+  - 检查后端采集 run、SQL query、DAG run、质量结果、common alert/notification、Outbox 事件面，确认全局任务条当前缺少统一任务投影。
+  - 新增 `docs/全局任务条实施方案.md`，给出目标边界、数据模型、API、前端接入、通知联动、阶段计划和验证策略。
+  - 更新 `task_plan.md` 与 `findings.md`，记录阶段 44 和关键结论。
+- 创建/修改的文件：
+  - `docs/全局任务条实施方案.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 45：ODS 到 DWD 迭代 0 样例数据基线实施
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 新增 `scripts/ods-dwd-baseline.sh`，准备 `onelake_src.public.codex_orders` 源表和 `iceberg.ods.ods_codex_orders` ODS 表。
+  - 新增 Makefile 入口 `ods-dwd-baseline` 与 `ods-dwd-verify`，并同步 RTK 命令清单。
+  - 第一次运行发现 `psql -c` 不支持脚本中的 `\gexec`，改为先查库再 `createdb`。
+  - 第二次运行发现环境里已有旧版 `codex_orders` 表结构不一致，将样例源表改为显式重建。
+  - 成功运行 `make ods-dwd-baseline`：源表 10 行、ODS 表 10 行、3 条脏数据、6 个字段。
+  - 成功运行 `make ods-dwd-verify`，脚本确认源表、ODS 表和 Catalog 资产状态。
+  - 运行 `mvn -q -pl module-catalog -am test -Djacoco.skip=true`，验证 `integration.table.loaded` 事件处理代码。
+  - 用标准 `integration.table.loaded` Outbox 事件验证运行态：Redis Stream 中事件被 `orchestration` 与 `catalog` 消费，`catalog.asset` 生成 `ods.ods_codex_orders`，字段数 6，行数 10，字段级血缘数 6。
+  - 查询后端 Airbyte connector definitions 时返回 Unauthorized，记录为当前运行态 Airbyte auth 配置缺口，不阻塞后续 DWD 基于稳定 ODS 表推进。
+  - 运行 Trino 行数/脏数据查询和 `git diff --check`。
+- 创建/修改的文件：
+  - `RTK.md`
+  - `onelake-app/Makefile`
+  - `onelake-app/scripts/ods-dwd-baseline.sh`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 46：ODS 到 DWD 迭代 1 派生入口与模型草稿
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 新增 `modeling.data_model`、`modeling.data_model_source`、`modeling.data_model_column_mapping` 三张迁移表，保存 DWD 模型草稿、上游来源和字段映射。
+  - 在 `module-modeling` 增加 DWD 模型实体、Repository、DTO、`DwdModelService` 和 API：创建草稿、读取、更新、校验。
+  - 服务层强制校验 `sourceFqn` 必须是 Catalog 中的 ODS 资产且字段非空，`targetFqn` 必须位于 DWD 分层，字段映射默认继承上游密级/PII 标签。
+  - 前端 ODS 表详情新增“派生 DWD”动作；建表/建模向导支持 `derive=dwd&sourceAssetId=...` 模式，自动带入源 ODS、业务域、字段映射、主键和分区建议。
+  - 派生模式提交时调用 `ModelingAPI.createDwdDraft`，保存建模草稿，不直接创建物理湖仓表。
+  - 通过真实 API 创建草稿并调用 validate，确认依赖 `ods.ods_codex_orders`、输出 6 列、无错误。
+  - 浏览器验证 `/lakehouse/tables/a5e6f4aa-7ef7-4acd-8406-c5ebd07f6499`：ODS 详情展示“派生 DWD”，向导预填 `ods.ods_codex_orders`、6 个字段、`days(order_time)` 分区，并成功保存草稿 `346b0f13-712b-41a2-8749-a25f96c19924`。
+  - 验证命令通过：`mvn -q -pl module-modeling -am test -Djacoco.skip=true`、`pnpm exec tsc --noEmit`、`pnpm build`、`make migrate`、`make ods-dwd-verify`、后端 validate API、`git diff --check`。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/modeling/V2__dwd_data_model.sql`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/domain/entity/DataModel.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/domain/entity/DataModelSource.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/domain/entity/DataModelColumnMapping.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/dto/`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/repository/`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/service/DwdModelService.java`
+  - `onelake-app/module-modeling/src/test/java/com/onelake/modeling/service/DwdModelServiceTest.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/api/ModelingController.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/web-console/src/pages/lakehouse/TableDetail.tsx`
+  - `onelake-app/web-console/src/pages/lakehouse/TableWizard.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 47：ODS 到 DWD 迭代 2 DWD SQL/dbt 生成与静态校验
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取 `onelake-app/dbt` 工程结构、`dbt_project.yml`、`profiles.yml`、示例 DWD/ADS 模型和 orchestration DAG 实体/服务。
+  - 新增 `DwdModelCompileDTO` 与 `POST /api/v1/modeling/models/{id}/compile`。
+  - `DwdModelService.compileArtifacts` 在校验通过后生成 dbt 产物：
+    - `dbt/models/generated/sources.yml`
+    - `dbt/models/intermediate/dwd_trade_codex_orders_df.sql`
+    - `dbt/models/intermediate/dwd_trade_codex_orders_df.yml`
+  - compile 会创建或更新 disabled `orchestration.dag` 草稿，`dagsterJob=onelake_dbt_model_run`，definition 包含 ODS input、质量门禁、dbt model 和 DWD output。
+  - 修复 dbt 默认输出路径：后端运行工作目录是 `bootstrap`，默认 dbt project dir 从 `dbt` 改为 `../dbt`，避免误写到 `bootstrap/dbt`。
+  - 修复 Makefile 后端启动：先 `-pl bootstrap -am compile`，再 `-pl bootstrap spring-boot:run`，避免子模块改动后运行旧 jar。
+  - 使用真实 API 对模型 `346b0f13-712b-41a2-8749-a25f96c19924` 执行 compile，生成 dbt 文件并更新 DAG `6c0560c0-627c-483e-9072-088a96e614e0`。
+  - 使用 `uvx --from dbt-trino dbt parse --profiles-dir .` 验证 dbt 解析通过。
+- 创建/修改的文件：
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/dto/DwdModelCompileDTO.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/service/DwdModelService.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/api/ModelingController.java`
+  - `onelake-app/module-modeling/src/test/java/com/onelake/modeling/service/DwdModelServiceTest.java`
+  - `onelake-app/dbt/models/generated/sources.yml`
+  - `onelake-app/dbt/models/intermediate/dwd_trade_codex_orders_df.sql`
+  - `onelake-app/dbt/models/intermediate/dwd_trade_codex_orders_df.yml`
+  - `onelake-app/Makefile`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 48：ODS 到 DWD 迭代 2.5 加工治理算子与算力资源契约
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 新增迁移 `modeling/V3__dwd_operator_resource_contract.sql`，为 `modeling.data_model` 增加 `pipeline_mode/operator_graph_version/operator_graph/resource_group/compute_profile/engine/cost_policy`。
+  - `DataModel`、DTO 和前端类型同步暴露资源画像与算子图字段。
+  - compile 阶段生成系统默认 operator graph：`INPUT -> TRANSFORM -> GOVERN -> QUALITY_GATE -> DBT_MODEL -> OUTPUT`，敏感字段存在时插入 `MASK` 节点。
+  - operator graph 同时写入 `modeling.data_model.operator_graph` 和 `orchestration.dag.definition.operatorGraph`，DAG 顶层同步 `engine/resourceGroup/computeProfile/costPolicy`。
+  - 默认资源画像固定为 `engine=TRINO_DBT`、`resourceGroup=default`、`computeProfile=trino-small`，默认 cost policy 为 1TB 扫描阈值、30 分钟超时、0 次重试、大扫描需确认。
+  - 真实 API compile 后确认模型状态 `VALIDATED`，operator graph 节点数 6，DAG disabled，DAG 节点类型与模型一致。
+  - 验证命令通过：`make migrate`、`mvn -q -pl module-modeling -am test -Djacoco.skip=true`、`pnpm build`、`uvx --from dbt-trino dbt parse --profiles-dir .`、`make ods-dwd-verify`、`git diff --check`。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/modeling/V3__dwd_operator_resource_contract.sql`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/domain/entity/DataModel.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/dto/DataModelDTO.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/dto/DwdModelCompileDTO.java`
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/service/DwdModelService.java`
+  - `onelake-app/module-modeling/src/test/java/com/onelake/modeling/service/DwdModelServiceTest.java`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 50：全局任务条 P0 真实任务投影与前端接入
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 按 `docs/全局任务条实施方案.md` 推荐切片，先实现统一任务投影 + 采集 run 接入 + 前端真实任务条。
+  - 新增 `common.running_task` 迁移，后端提供 `GET /api/v1/tasks/running` 与 `POST /api/v1/tasks/{id}/dismiss`。
+  - `RunningTaskService` 查询时同步 `integration.sync_run`，把采集 run 统一映射为全局任务条状态、进度、详情链接、错误信息和取消端点。
+  - 前端新增 `TaskAPI` 与 `useGlobalTasks`，按展开态和页面可见性轮询真实任务。
+  - `TaskProgressBar` 移除 mock 依赖，支持 `QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED`、任务类型标签、失败提示、查看详情、取消和忽略。
+  - `App.tsx` 接入真实任务 hook，并用 AntD `App.useApp()` 处理任务操作反馈。
+  - 运行 `mvn -q -pl module-common -am test -Djacoco.skip=true`。
+  - 运行 `mvn -q -pl module-integration -am test -Djacoco.skip=true`。
+  - 运行 `pnpm exec tsc --noEmit` 与 `pnpm build`。
+  - 运行 `bash -n onelake-app/scripts/flyway-migrate.sh`、`make migrate` 和 `git diff --check`。
+  - 本地启动后端并验证 `http://localhost:8080/actuator/health` 为 `UP`。
+  - 使用 Keycloak `dev/dev123456` token 调用 `/api/v1/tasks/running?includeRecent=true&limit=20`，返回失败 `orders_sync -> ods.orders` 与运行中 `user_cdc -> ods.users` 两条真实任务。
+  - 浏览器打开 `http://localhost:5173/dashboard`，折叠态任务按钮显示真实运行计数；展开全局任务条可见 `orders_sync`、`user_cdc` 和运行中取消按钮，控制台无 error。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/common/V5__running_task.sql`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTask.java`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskRepository.java`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskDTO.java`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskService.java`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskController.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/task/RunningTaskServiceTest.java`
+  - `onelake-app/web-console/src/hooks/useGlobalTasks.ts`
+  - `onelake-app/web-console/src/components/TaskProgressBar.tsx`
+  - `onelake-app/web-console/src/App.tsx`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/stores/app.ts`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/web-console/src/components/index.ts`
+  - `onelake-app/web-console/src/mock/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 51：全局任务条 P1 SQL/编排/质量多来源接入
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 延续 `docs/全局任务条实施方案.md` 的统一投影路线，在 `RunningTaskService` 查询时继续同步 SQL 查询、编排 run 和质量稽核结果。
+  - `catalog.sql_query_history` 映射为 `sourceModule=LAKEHOUSE`、`taskType=SQL`、`refType=sql_query`；运行中 SQL 暴露 `/lakehouse/sql/queries/{id}/cancel`，终态跳转 `/lakehouse/sql`。
+  - `orchestration.job_run` 映射为 `sourceModule=ORCHESTRATION`、`taskType=DAG`、`refType=job_run`；任务跳转 `/orchestration/pipelines/{dagId}`，当前不提供全局取消。
+  - `quality.run_result` 映射为 `sourceModule=QUALITY`、`taskType=QUALITY`、`refType=quality_run_result`；失败结果带 `QUALITY_CHECK_FAILED` 与异常行摘要。
+  - SQL、编排和质量源同步只拉取运行中或最近 10 分钟结果，避免历史失败记录批量灌入全局任务条；进入投影后的失败仍保留到用户忽略，符合告警可见性要求。
+  - 补充 `RunningTaskServiceTest` 覆盖 SQL 可取消映射、编排成功状态归一和质量失败结果映射。
+  - 运行 `mvn -q -pl module-common -am test -Djacoco.skip=true`。
+  - 运行 `mvn -q install -DskipTests -Djacoco.skip=true`，刷新本地 Maven SNAPSHOT；验证发现只用旧进程或旧 installed jar 会导致后端仍加载旧 `module-common`。
+  - 清理本地 `common.running_task` 的 SQL/质量/编排投影后调用 `/api/v1/tasks/running?includeRecent=true&limit=50`，返回质量、SQL、采集失败、采集运行中 4 条任务。
+  - 临时插入并清理一条 `orchestration.job_run` 验证编排映射，接口返回 `ORCHESTRATION/DAG`、标题 `编排任务 DWD dwd_trade_codex_orders_df`、跳转到对应 pipeline。
+  - 浏览器登录本地 Keycloak `dev` 用户打开 `http://localhost:5173/dashboard`，折叠态任务按钮显示 `任务 4 / 1 运行中`；展开全局任务条可见质量稽核、`SQL 查询 SHOW SCHEMAS`、`orders_sync`、`user_cdc`，控制台无 error。
+- 创建/修改的文件：
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskService.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/task/RunningTaskServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 52：全局任务条 P2 通知中心真实化联动
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 按全局任务条方案阶段 D 推进通知中心真实化：任务条继续展示运行态和近期结果，通知中心承接失败后需要用户感知的消息。
+  - 新增迁移 `common/V6__notification_contract.sql`，为 `common.notification` 补充 `content/level/source_ref_type/source_ref_id`，并增加未读查询索引和来源幂等唯一索引。
+  - 新增 `Notification`、`NotificationDTO`、`NotificationRepository`、`NotificationService`、`NotificationController`，提供 `GET /api/v1/notifications`、`POST /notifications/{id}/read`、`POST /notifications/read-all`。
+  - `RunningTaskService` 保存任务投影后调用 `NotificationService.notifyTaskIfNeeded`；当前只为 `FAILED` 任务生成 `TASK/CRITICAL` 通知，成功任务仍只保留在任务条近期窗口，避免通知中心噪音。
+  - 前端新增 `NotificationAPI` 与 `useNotifications`，`App.tsx` 挂载通知轮询，顶部铃铛未读数来自真实 API。
+  - `NotificationCenter` 保持原有抽屉布局和分类标签，查看/全部已读调用真实 API；通知按钮补充 `aria-label="打开通知中心"`。
+  - 手工应用本轮 notification 迁移到本地 Postgres，重启后端并用 Keycloak `dev/dev123456` token 验证任务条刷新后生成真实通知。
+  - API 验证：`/api/v1/notifications?limit=20` 返回 `任务失败：采集任务 orders_sync -> ods.orders`，内容为 `账号密码过期`，`POST /notifications/{id}/read` 返回 `isRead=true`。
+  - 浏览器验证：`/dashboard` 顶部铃铛显示未读数 1，展开通知中心可见 `CRITICAL` 任务失败通知、内容和查看入口，控制台无 error。
+  - 验证命令通过：`mvn -q -pl module-common -am test -Djacoco.skip=true`、`mvn -q install -DskipTests -Djacoco.skip=true`、`pnpm exec tsc --noEmit`。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/common/V6__notification_contract.sql`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/notification/`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/task/RunningTaskService.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/notification/NotificationServiceTest.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/task/RunningTaskServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/hooks/useNotifications.ts`
+  - `onelake-app/web-console/src/stores/app.ts`
+  - `onelake-app/web-console/src/components/NotificationCenter.tsx`
+  - `onelake-app/web-console/src/App.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
@@ -942,6 +1198,13 @@
 | 2026-06-16 CST | 阶段 15 首次后端测试失败：既有测试仍假设 trigger 只 save 一次且 reconcile 只读 `getJobStatus` | 1 | 更新测试契约为 `QUEUED -> RUNNING` 双阶段落库和 `AirbyteJobSnapshot` 回写 |
 | 2026-06-16 CST | dry-run 单测 payload 自带 `airbyteConnectionId` 导致进入 connection 检查并默认失败 | 1 | 改为无 connection、具备动态创建配置的 dry-run 用例 |
 | 2026-06-22 CST | `make migrate` 首次复验失败：integration/security seed 使用 psql `\set`，integration demo UUID 非法，security V2 索引重复 | 3 | 移除 psql 变量、替换合法 UUID、让 seed/索引幂等后 `make migrate` 完整通过 |
+| 2026-06-22 CST | `make ods-dwd-baseline` 首次失败：脚本在 `psql -c` 中使用 `\gexec` 导致语法错误 | 1 | 改为先查询数据库是否存在，不存在再调用 `createdb` |
+| 2026-06-22 CST | `make ods-dwd-baseline` 第二次失败：本地已有旧版 `public.codex_orders`，缺少 `order_id` 等目标字段 | 1 | 将固定样例源表改为显式 `DROP TABLE IF EXISTS` 后重建 |
+| 2026-06-22 CST | API 验证脚本用 zsh `echo "$JSON"` 解析响应时把 JSON 内 `\n` 展开为真实换行，导致 `jq` 报控制字符错误 | 1 | 改用 `printf '%s' "$JSON"` 解析；后端响应本身有效 |
+| 2026-06-22 CST | 浏览器提交草稿后控制台出现 Ant Design 静态 `message` 主题上下文 warning | 1 | 判定为现有 `useAsyncAction` 全局模式触发，不阻断 ODS->DWD 链路；后续统一处理 AntD App/useApp 上下文 |
+| 2026-06-22 CST | DWD compile 首次把 dbt 产物写入 `bootstrap/dbt` | 1 | 后端运行目录为 `bootstrap`，将默认 dbt project dir 改为 `../dbt` 并清理误生成目录 |
+| 2026-06-22 CST | 后端重启后仍返回旧 OpenAPI schema，compile 响应缺少 2.5 字段 | 2 | 发现 `make backend` 只运行 bootstrap，没有先编译 reactor 依赖；改为先 `mvn -pl bootstrap -am compile`，再运行 bootstrap |
+| 2026-06-22 CST | 通知 API 验证脚本用 Python 从环境变量读取 `TOKEN`，但 shell 未 export，导致清理 SQL receiver_id 为空 | 1 | 改为直接用接口返回的通知 id 验证已读；后续脚本用 stdin 或显式 export 传 token |
 
 ## 五问重启检查
 | 问题 | 答案 |

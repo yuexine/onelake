@@ -277,12 +277,116 @@
 - 修复后 `make migrate` 已按 common、integration、orchestration、catalog、modeling、quality、security、dataservice 顺序完整执行通过。
 - 检查 Dagster code location 后确认当前只有 `onelake_sync_task_schedule_reconcile`，没有真实 SQL node job；因此本轮没有把 SQL 工作台 DAG 草稿伪装成可执行流水线，后续需要先补 Dagster SQL job 与 run config 契约。
 
+## 2026-06-22 ODS 到 DWD 标准闭环方案发现
+- 当前 OneLake 已具备 ODS 入湖、Airbyte run/reconcile、`integration.table.loaded`、Catalog 建档、字段 PII、质量最小闭环、SQL 查询安全和 dbt 示例模型，但还缺少“DWD 模型定义 -> dbt 生成 -> Dagster 执行 -> 质量门禁 -> Catalog/血缘回写”的贯通链路。
+- 标准链路应把 ODS 作为 Airbyte 默认落点，DWD 由 ODS 派生；DWD 直写不能作为主链路，否则会绕过原始保真、schema 漂移隔离、质量门禁和重跑审计。
+- DWD 写入不应由 SQL 工作台承担；SQL 工作台保持查询、诊断、草稿和 API/流水线入口，生产加工由 Modeling + dbt + Dagster 负责。
+- 首批可执行闭环应控制为“单 ODS 表 -> 单 DWD 表”，先验证样例链路：源端 `codex_orders` -> `ods.ods_codex_orders` -> `dwd.dwd_trade_order_df`。
+- 需要新增 DWD 模型持久化能力，建议落在 `module-modeling`，最小实体包含 source_fqn、target_fqn、materialization、unique_key、incremental_column、partition_expr、sql_text、dbt_model_name、status 和 owner 信息。
+- dbt 产物生成应包括 `sources.yml`、`models/intermediate/<model>.sql`、`models/intermediate/schema.yml`，并以 `dbt parse`/`dbt build --select <model>` 作为数据面验证。
+- Dagster 当前只有 schedule reconciliation job，下一步必须补 `dagster-dbt` asset/job 和 run config 契约，不能把 DWD 模型标记为可执行后只停留在 Java DAG 草稿。
+- `integration.table.loaded` 自动触发 DWD 时必须做幂等控制，建议以 `integrationRunId + modelId` 限制重复触发；缺少 ODS 字段 schema 时记录 warning，不硬跑。
+- DWD 成功后需要同时更新 Catalog 资产、表级/字段级血缘、新鲜度和质量状态；质量失败时保留失败 run 和告警，不把 DWD 资产伪装成可用。
+- 第一批实施建议做到样例基线、DWD 模型草稿、dbt 生成/校验、Dagster dbt 执行、ODS 事件自动触发、质量和 Catalog 回写；多表 Join、Backfill、Schema 变更审批、Iceberg compaction 放到后续生产化迭代。
+
+## 2026-06-22 ODS 到 DWD 方案链路匹配评审发现
+- 方案主线与整体设计匹配：源端入湖归 Integration，DWD 业务定义归 Modeling，运行编排归 Orchestration/Dagster，数据转换归 dbt，治理结果归 Catalog/Quality/Security。
+- 需要把 DWD 模型显式映射为数据开发编排对象：模型草稿阶段就预留 `orchestration_dag_id/dagster_job/artifact_path/last_run_id`，dbt 生成阶段同步创建 disabled 的 `orchestration.dag` 草稿。
+- `integration.table.loaded` 只表达 ODS 入湖完成，不应被拿来代表 DWD 完成；DWD 终态应新增 `modeling.model.loaded` / `modeling.model.failed` 事件，再由 Catalog/Quality/通知消费。
+- 质量门禁必须来自真实 dbt/Dagster 执行产物，第一批应解析 `run_results.json/manifest.json/catalog.json` 写入 `quality.run_result` 和 `quality.alert`，不能复用质量模块当前的控制面模拟试跑作为生产门禁。
+- DWD 字段安全标签要沿 ODS 字段映射继承；如果 DWD 模型做了 hash/脱敏/字段降敏，需要记录转换说明和新的建议密级，避免安全标签在派生层丢失。
+- 第一批应拆成 MVP-A 和 MVP-B 两个发布点：MVP-A 做手动 DWD 模型运行闭环，MVP-B 再做 ODS 事件自动触发和治理回写；没有到 MVP-B 前不能宣称标准 ODS->DWD 闭环完成。
+- 原方案中的迭代 6 前端可观测仍合理，但首批也需要最小前端入口与状态展示；完整模型详情、拖拽画布、复杂 DAG 拓扑仍放后续，避免主链路被 UI 工程拖散。
+
+## 2026-06-22 ODS 到 DWD 加工治理与算力/流水线兼容评审发现
+- 主流产品普遍把加工逻辑、质量治理、编排任务和计算资源绑定建模：Databricks Jobs/Pipelines 绑定任务、compute、expectations 和 Unity Catalog lineage；Dagster 将 dbt model 表示为 asset 并把 dbt tests 接为 asset checks；Airflow Pools 用于任务并发资源控制；ADF/Fabric data flow 是可视化加工逻辑但作为 pipeline activity 运行；AWS Glue Data Quality 支持在 Catalog 和 ETL pipeline 中执行质量规则。
+- 因此 ODS->DWD 不能只做“DWD SQL/dbt 生成”，还必须明确加工治理图和算力资源契约：清洗、标准化、去重、脱敏/加密、质量门禁、异常处理、DWD 输出、血缘回写都应是可持久化节点或策略。
+- OneLake 当前前端存在 `OperatorMarket`，但它是“算子市场”而不是完整“算力市场”；SQL 工作台已有 `resourceGroup` 选择，代表资源组/计算画像的雏形。方案应把算子市场和算力资源拆开设计，避免术语混淆。
+- 当前 `DagNode` 类型已支持 `INPUT/GOVERN/MASK/ENCRYPT/OUTPUT/QUALITY_GATE/SQL` 等节点，`SqlWorkbench` 已能创建真实 `orchestration.dag` 草稿并带 `resourceGroup`，说明 DWD 方案与流水线/算子市场方向兼容。
+- 兼容性缺口在后端契约：`orchestration.dag` 当前只有 `definition/schedule/enabled` 等字段，`job_run` 没有 `resource_group/compute_profile/cost/queue` 观测字段；DWD 模型方案也还需要补 `operator_graph_version/resource_group/compute_profile/engine/cost_policy`。
+- 方案已补充 `3.3 加工治理、流水线与算力资源兼容评审` 和 `6.5 迭代 2.5`：DWD 模型保存时生成默认 operator graph，编译为 dbt SQL/tests 与 orchestration DAG，资源组写入模型、DAG、run，首批固定 Trino/dbt/Dagster，不建设完整算力市场。
+- 评审结论：原方案主线兼容流水线与算子市场，但如果不执行迭代 2.5，会出现 DWD 模型、流水线画布、算子市场和资源控制四套定义漂移；因此迭代 2.5 应进入 MVP-A，不能推迟到生产化阶段。
+
+## 2026-06-22 ODS 到 DWD 迭代 0 样例基线实施发现
+- 新增 `onelake-app/scripts/ods-dwd-baseline.sh` 和 Makefile 入口 `ods-dwd-baseline`、`ods-dwd-verify`，用于幂等准备并验证固定样例链路。
+- 样例源表固定为 `onelake_src.public.codex_orders`，字段为 `order_id/user_id/amount/status/order_time/updated_at`，数据为 10 行，其中 3 行脏数据：负金额、空状态、空下单时间。
+- 样例 ODS 表固定为 Trino/Iceberg `iceberg.ods.ods_codex_orders`，脚本会重建该样例表并写入同样 10 行数据；DWD 目标表名预留为 `dwd.dwd_trade_order_df`，本轮不创建 DWD 数据。
+- 运行态验证写入了一条标准 `integration.table.loaded` Outbox 事件，事件进入 Redis Stream 后被 `orchestration` 和 `catalog` 两个 consumer 消费。
+- Catalog 侧已生成 `ods.ods_codex_orders` 资产：`layer=ODS`、`row_count=10`、`columns=6`；同时写入 `public.codex_orders -> ods.ods_codex_orders` 血缘，字段级映射数为 6。
+- Airbyte OSS API 当前通过后端查询 connector definitions 返回 Unauthorized，说明后端 Airbyte auth 配置仍未接入当前运行态；迭代 0 没有把真实 Airbyte 新建 connection 作为继续推进的阻塞项，后续 DWD 模型以稳定 ODS Iceberg 表和 `integration.table.loaded` 事件契约作为基线。
+- 迭代 0 验证命令通过：`make ods-dwd-baseline`、`make ods-dwd-verify`、`mvn -q -pl module-catalog -am test -Djacoco.skip=true`、Trino 行数/脏数据查询、`git diff --check`。
+
+## 2026-06-22 ODS 到 DWD 迭代 1 派生入口与模型草稿实施发现
+- DWD 模型草稿已落到 `module-modeling`，新增 `data_model/source/column_mapping` 三张表；模型定义保留 `dbtModelName`、`dagsterJob`、`orchestrationDagId`、`artifactPath`、`lastRunId` 等编排占位字段，满足后续迭代 2/3 继续接 dbt 和 Dagster。
+- `DwdModelService` 不直接依赖 `module-catalog` Java API，而是通过 `JdbcTemplate` 读取 `catalog.asset`，避免模块依赖倒挂；服务层校验 ODS 资产存在、layer 为 ODS、字段非空、DWD 表名符合 `layer_domain_business_granularity`。
+- 字段映射会继承 ODS 字段的 `classification/piiType/suggestLevel`；如果字段表达式包含 mask/hash/sha/encrypt，validate 不提示敏感字段直通，否则 L3/L4 直通会产生 warning，为后续加工治理节点接入保留抓手。
+- 前端复用现有建表/建模向导，但在 `derive=dwd` 模式下锁定 DWD 分层、预填源 ODS 字段、保留 `sourceName/sourceType` 映射，并提交到 `ModelingAPI.createDwdDraft`；这避免把 DWD 草稿误发布成 Catalog 物理表。
+- 浏览器真实路径验证通过：ODS 详情页展示“派生 DWD”，向导自动带入 `ods.ods_codex_orders`、6 个字段和 `days(order_time)` 分区建议，提交后落库模型 `346b0f13-712b-41a2-8749-a25f96c19924`，状态 `DRAFT`、字段映射 6 条。
+- 后端 API 实测创建的随机模型 validate 返回 `ok=true`、依赖 `ods.ods_codex_orders`、输出 6 列；浏览器提交模型再次 validate 也通过。
+- 迭代 1 的明确边界：仍不生成 dbt 文件、不创建真实 DWD Iceberg 表、不触发 Dagster；下一轮必须实现 dbt SQL/YAML 产物、静态校验和 disabled orchestration DAG 草稿，否则 DWD 模型会停留在控制面。
+- 浏览器控制台仅出现既有 React Router v7 future flag warning 和 Ant Design 静态 `message` 上下文 warning；没有 ODS->DWD 接口失败。AntD warning 来自现有 `useAsyncAction` 全局 message 用法，建议后续统一接 `App.useApp`。
+
+## 2026-06-22 ODS 到 DWD 迭代 2 dbt 生成与静态校验实施发现
+- DWD 模型 compile 已从“返回预览 SQL”推进到真实写 dbt 产物：生成 source YAML、intermediate SQL 和模型 schema YAML；样例模型 `dwd_trade_codex_orders_df` 可被 dbt parse 识别。
+- 为避免覆盖手写示例 `models/sources.yml`，生成源定义放在 `models/generated/sources.yml`；这是单源单目标阶段的稳妥选择，后续多模型需要演进为集中合并生成或模型注册表。
+- compile 会创建或更新 disabled `orchestration.dag`，而不是直接启用可运行任务；这保持了“迭代 2 只静态校验，不触发 Dagster”的边界。
+- 后端默认工作目录是 `onelake-app/bootstrap`，所以 dbt project 默认路径必须是 `../dbt`；如果部署形态变化，可以通过 `ONELAKE_DBT_PROJECT_DIR` 或 `onelake.dbt.projectDir` 覆盖。
+- `make backend` 原本只跑 `-pl bootstrap spring-boot:run`，子模块改动后可能继续使用旧 jar。已改为先 `-pl bootstrap -am compile`，再运行 bootstrap，避免新增 controller/DTO 后 OpenAPI 仍是旧 schema。
+- `uvx --from dbt-trino dbt parse --profiles-dir .` 可作为本地无 dbt 安装时的轻量验证方式；parse 通过，仅剩既有 `models.onelake.staging` 未命中配置提示。
+
+## 2026-06-22 ODS 到 DWD 迭代 2.5 加工治理与算力资源契约实施发现
+- `modeling.data_model` 已有稳定的加工治理和资源契约字段：`pipeline_mode/operator_graph_version/operator_graph/resource_group/compute_profile/engine/cost_policy`。
+- compile 阶段会生成系统默认 operator graph，并同时写到模型和 orchestration DAG；当前样例链路节点为 `INPUT/TRANSFORM/GOVERN/QUALITY_GATE/DBT_MODEL/OUTPUT`，敏感字段存在时会插入 `MASK` 节点。
+- 默认资源画像是 `TRINO_DBT + default + trino-small`，cost policy 固定 1TB 扫描阈值、30 分钟超时、0 次重试和大扫描确认。这样后续算力市场/资源组功能可以接模型字段，不必反解析页面或 DAG。
+- 迭代 2.5 仍不做完整算子市场注册、不开放拖拽编辑，也不启用任意引擎路由；它只把 DWD 模型、DAG 和 dbt 产物之间的加工/资源契约固定住。
+- 真实模型 `346b0f13-712b-41a2-8749-a25f96c19924` compile 后状态为 `VALIDATED`，operator graph 节点数 6，DAG `6c0560c0-627c-483e-9072-088a96e614e0` 仍 disabled，符合“生成可编排草稿但不运行”的边界。
+
+## 2026-06-22 全局任务条实施方案发现
+- `docs/数据平台 · 原型设计与交互说明文档.md` 对全局任务条的定位是底部/右下角常驻长任务进度，覆盖采集、稽核、Compaction 等长任务；通用交互要求触发运行后 Toast、任务条实时反馈、完成后 Toast 和通知中心红点。
+- `docs/FRONTEND_VERIFICATION.md` 将全局任务条标记为已完成，但这是前端原型完成，不等于真实数据闭环完成。
+- 当前 `TaskProgressBar.tsx` 已实现折叠触发器、展开面板、状态图标、进度条、平均进度和空态；`App.tsx` 已在 TopBar 和底部 fixed 位置接入。
+- 当前 `stores/app.ts` 的 `tasks` 来源是 `mock/index.ts` 的 `runningTasks`，没有真实 API；`RunningTask` 类型也过窄，缺少 queued/cancelled、link、cancelEndpoint、sourceModule、refId、errorMessage、时间戳等运行追踪字段。
+- 后端已有多个可接入来源：`integration.sync_run` 支持 run 详情/日志/取消/reconcile；`catalog.sql_query_history` 支持 SQL 异步查询历史；`orchestration.job_run` 记录 DAG run；`quality.run_result` 和 `quality.alert` 表达质量结果和门禁失败。
+- 公共层已有 Outbox、Redis Stream 消费、TenantContext、common.alert 和 common.notification 表结构，但没有统一 running task 投影、Task Controller 或 Notification Service。
+- 推荐把全局任务条设计为 `common.running_task` 只读投影，而不是直接让前端分别查询每个业务模块。P0 使用轮询即可，后续再增强 SSE/WebSocket。
+- 任务条和通知中心应分工：任务条展示当前/近期运行状态，通知中心展示失败、审批、告警、需要处理的结果消息；两者通过任务失败或终态事件联动。
+- 第一轮最小实施切片建议只覆盖采集 run：新增 common 任务投影和 API，从 `integration.sync_run` 聚合真实任务，前端移除 `runningTasks` mock 并接入 `TaskAPI.listRunning`。
+
+## 2026-06-22 全局任务条 P0 实施发现
+- 已新增 `common.running_task` 统一任务投影和 `/api/v1/tasks/running`、`/api/v1/tasks/{id}/dismiss` 后端 API；第一轮由 `RunningTaskService` 在查询时同步采集 `integration.sync_run` 状态，后续 SQL、编排、质量可以复用同一投影。
+- 采集运行映射为 `sourceModule=INTEGRATION`、`taskType=COLLECT`、`refType=sync_run`，状态统一为 `QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED`；失败任务保留至用户忽略，成功/取消任务进入近期完成窗口。
+- 任务详情跳转统一使用 `link`，采集 run 指向 `/integration/sync-tasks/{taskId}/runs/{runId}`；运行中任务暴露 `cancelEndpoint=/integration/sync-tasks/runs/{runId}/cancel`，前端取消动作不再硬编码业务路径。
+- 前端 `RunningTask` 类型已扩展 source module、引用 id、错误码/文案、时间戳、跳转和取消端点；`TaskProgressBar` 只消费统一任务契约，不再依赖采集模块内部类型。
+- `useGlobalTasks` 根据展开态和页面可见性调整轮询频率：展开 2 秒、折叠 5 秒、后台 30 秒；当前 P0 仍使用轮询，未引入 SSE/WebSocket。
+- 前端已移除 `runningTasks` mock 初始化，`App.tsx` 通过真实 `TaskAPI` 驱动全局任务条，支持查看、取消、忽略和加载失败提示。
+- API 实测返回两条真实任务：失败的 `orders_sync -> ods.orders` 和运行中的 `user_cdc -> ods.users`；浏览器展开全局任务条可看到这两条任务，控制台无 error。
+
+## 2026-06-22 全局任务条 P1 多来源接入实施发现
+- `RunningTaskService` 已把 SQL 查询、编排 DAG run 和质量稽核结果纳入同一个 `common.running_task` 投影，前端任务条无需了解各业务模块表结构。
+- SQL 查询映射为 `LAKEHOUSE/SQL/sql_query`，标题使用压缩后的 SQL 文本；运行中查询可通过统一 `cancelEndpoint` 取消，终态跳转到 `/lakehouse/sql`。
+- 编排 run 映射为 `ORCHESTRATION/DAG/job_run`，使用 DAG 名称和 Dagster run id 展示进度，跳转到 `/orchestration/pipelines/{dagId}`；当前没有全局取消能力，避免承诺 Dagster 取消闭环。
+- 质量稽核映射为 `QUALITY/QUALITY/quality_run_result`，失败结果包含通过率、异常行数和 `QUALITY_CHECK_FAILED`，用于任务条近期可见和后续通知中心联动。
+- SQL/编排/质量源同步只拉取运行中或最近 10 分钟结果，解决第一次接入时历史失败 SQL/质量结果批量占满任务条的问题；进入投影后的失败仍保留到用户忽略，符合“失败需要被看见”的交互语义。
+- 本地 runtime 需要先 `mvn -q install -DskipTests -Djacoco.skip=true` 刷新 installed SNAPSHOT，再启动后端；否则 `make backend` 分段运行时可能继续加载旧 `module-common` jar。
+- API 验证结果：清理 SQL/质量/编排投影后，`/api/v1/tasks/running?includeRecent=true&limit=50` 返回质量失败、`SQL 查询 SHOW SCHEMAS`、`orders_sync` 失败、`user_cdc` 运行中 4 条任务；临时 `orchestration.job_run` 也能映射为 `ORCHESTRATION/DAG` 并在验证后清理。
+- 浏览器验证结果：`/dashboard` 折叠态显示 `任务 4 / 1 运行中`，展开面板可见质量稽核、SQL、采集失败和采集运行中任务，控制台无 error。
+
+## 2026-06-22 全局任务条 P2 通知中心真实化实施发现
+- `common.notification` 已从只有基础表结构推进到可用契约：新增 `content`、`level`、`source_ref_type`、`source_ref_id`，用 `tenant_id + receiver_id + source_ref_type + source_ref_id` 保证同一任务失败不会因轮询重复生成通知。
+- 通知中心真实化的第一刀只接失败任务：任务条负责运行态和近期终态，通知中心负责需要用户感知/处理的失败结果；成功任务仍停留在任务条近期窗口，避免未读红点成为噪音。
+- `NotificationService.notifyTaskIfNeeded` 会优先使用任务自己的 `userId`，没有任务用户时退回当前 `TenantContext.userId`，因此采集这类租户级任务会给当前查看者生成个人通知。
+- 新 API 为 `GET /api/v1/notifications`、`POST /api/v1/notifications/{id}/read`、`POST /api/v1/notifications/read-all`，均按当前租户和当前用户过滤，避免跨用户读取通知。
+- 前端通知中心保持原抽屉、分类和视觉样式，只把数据源从 mock 切到 `NotificationAPI`；顶部铃铛未读数来自 `useNotifications` 的真实轮询结果。
+- 浏览器验证中，任务条刷新后生成 `任务失败：采集任务 orders_sync -> ods.orders` 未读通知，顶部铃铛显示 1，抽屉展示 `CRITICAL`、失败标题和 `账号密码过期`，控制台无 error。
+- 这仍不是完整通知体系：审批、系统消息、质量告警单独入通知、静默规则、通知渠道和 SSE/WebSocket 推送仍是后续 P3/P4；本轮只完成任务条失败结果到通知中心的最小真实闭环。
+
 ## 技术决策
 | 决策 | 理由 |
 |------|------|
 | 以当前代码校准文档 | `RTK.md` 明确要求 docs 和 code 不一致时先信当前代码 |
 | Airbyte/Dagster 本轮推进到真实数据面实证 | Airbyte 已通过 abctl 运行，Dagster 本地 compose 可用，Postgres 源表到目标库的真实同步已完成 |
 | Airbyte 不再放入 `docker-compose.yml` | 官方本地部署已转向 `abctl`，保留无效 compose 服务会持续制造误导和启动失败 |
+| 全局任务条先做统一任务投影而不是前端多源拼接 | OneLake 的长任务跨采集、SQL、编排、质量和数据服务，统一投影能保证状态语义、权限、跳转和后续通知联动一致 |
 
 ## 遇到的问题
 | 问题 | 解决方案 |

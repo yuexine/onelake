@@ -73,6 +73,7 @@
 | api/vo | `CreateDataSourceVO` / `UpdateDataSourceVO` / `TestDataSourceVO` / `ProbeDatabasesVO` / `DatabaseProbeResult` / `CreateSyncTaskVO` / `ConnectivityResult` | 入参/出参 |
 | service | `DataSourceService` / `SyncTaskService` | 用例编排接口 |
 | service/impl | `DataSourceServiceImpl` / `SyncTaskServiceImpl` | 事务边界 + Outbox + 审计 |
+| service/impl | `SourceSchemaSnapshotServiceImpl` | 源端 schema snapshot 对比与 `integration.schema.drift` 事件发布，补充受影响 ODS `targetTables` |
 | service/validation | `DataSourceConfigValidator` | 按 MYSQL/POSTGRES/HIVE/KAFKA/S3 等类型校验连接配置 |
 | domain/entity | `DataSource` / `SyncTask` / `SyncRun` / `SourceSchemaSnapshot` | JPA 实体 |
 | domain/enums | 7 个枚举（Health / SyncMode / DataSourceType / NetworkMode / EnvLevel / TaskStatus / RunStatus） | |
@@ -112,7 +113,10 @@
 | `OpenMetadataClient` | 调 OM `/tables?fields=owner,tags,columns` |
 | `CatalogSyncService` | 把 OM tags 自动提取为 L1~L4 密级 |
 | `CatalogService` | 资产 CRUD + 影响分析（BFS 下游） |
-| `CatalogController` | `/api/v1/catalog/assets` + `/lineage/downstream` + `/sync` |
+| `CatalogMaintenanceService` | DWD 运维评估、Iceberg `$files` 小文件统计、新鲜度 SLA 判断与 Trino Iceberg 维护操作 |
+| `DwdModelLoadedEventHandler` | 消费 `modeling.model.loaded`，自动回写 DWD Catalog 资产与 ODS->DWD 表级/字段级血缘 |
+| `QualityCheckEventHandler` | 消费质量检查事件，更新 Catalog 资产质量分 |
+| `CatalogController` | `/api/v1/catalog/assets` + `/assets/{id}/maintenance` + `/assets/maintenance` + `/lineage/downstream` + `/sync` |
 
 ---
 
@@ -123,9 +127,17 @@
 | 类 | 职责 |
 |----|------|
 | `SubjectDomain` / `DataStandard` / `Metric` / `Dimension` 实体 | 完整 4 表 |
+| `DataModel` / `DataModelSource` / `DataModelColumnMapping` 实体 | ODS->DWD 模型草稿、source、字段映射与 dbt 编译产物 |
+| `DataModelRun` 实体 | DWD 模型运行态，记录 Dagster runId、触发类型、资源画像、开始/结束时间和错误 |
 | `SubjectDomainRepository` / `MetricRepository` | |
+| `DataModelRepository` / `DataModelRunRepository` | DWD 模型与运行历史查询 |
 | `ModelingService` | 主题域/指标 CRUD |
-| `ModelingController` | `/api/v1/modeling/domains` + `/metrics` |
+| `DwdModelService` | DWD 草稿、校验、dbt 产物生成、增量 SQL、disabled DAG 草稿、Dagster/dbt run、Backfill config、artifact 解析和模型运行事件 |
+| `DwdRunArtifactReader` | 解析 dbt `run_results.json`，抽取模型行数、错误与 `qualityChecks` |
+| `DwdModelDagsterClient` | GraphQL `launchRun` + run status refresh |
+| `DwdOdsLoadedEventHandler` | 消费 `integration.table.loaded`，按 ODS source 自动触发已验证 DWD 模型，含重复/活跃运行/历史事件保护 |
+| `DwdSchemaDriftEventHandler` | 消费 `integration.schema.drift`，将受影响 DWD 模型标记为 `NEEDS_REVIEW` 并阻断运行 |
+| `ModelingController` | `/api/v1/modeling/domains` + `/metrics` + `/models?sourceFqn/targetFqn` + `/models/{id}/compile` + `/models/{id}/run` + `/models/{id}/runs` |
 
 ---
 
@@ -138,6 +150,7 @@
 | `Rule` / `RunResult` / `ScoreSnapshot` / `Alert` 实体 | 完整 4 表 |
 | `RuleRepository` / `RunResultRepository` / `AlertRepository` | |
 | `QualityService` | 规则 CRUD + 结果记录 + 告警 raise/close |
+| `DwdModelQualityEventHandler` | 消费 DWD 模型成功/失败事件，落库 dbt build/test 质量结果；成功也记录 `DBT_BUILD` 通过，失败时生成告警，并发布质量检查事件 |
 | `QualityController` | `/api/v1/quality/rules` + `/results` + `/alerts` |
 
 ---
@@ -187,11 +200,14 @@
 | `orchestration/V1__orchestration.sql` | 2（dag/job_run） | |
 | `catalog/V1__catalog.sql` | 2（asset/lineage_edge） | |
 | `modeling/V1__modeling.sql` | 4（subject_domain/data_standard/metric/dimension） | ✅ dimension |
+| `modeling/V2__dwd_data_model.sql` | 3（data_model/data_model_source/data_model_column_mapping） | ODS->DWD 草稿 |
+| `modeling/V3__dwd_operator_resource_contract.sql` | 0 | DWD operator graph / resource profile 字段 |
+| `modeling/V4__dwd_model_run.sql` | 1（model_run） | DWD 模型运行态 |
 | `quality/V1__quality.sql` | 4（rule/run_result/score_snapshot/alert） | ✅ score_snapshot/alert |
 | `security/V1__security.sql` | 6（secret/masking_policy/access_grant/role/role_binding/approval_request） | ✅ role/role_binding/approval_request |
 | `dataservice/V1__dataservice.sql` | 6（api_definition/api_version/app_key/subscription/api_call_log/quota_usage）+ dataservice_api schema | ✅ quota_usage |
 
-**全部 36 张表 + 审查补全 7 张补全表 = 共 43 张表，已 100% 覆盖设计文档。**
+**基础控制面 36 张表 + 审查补全 7 张补全表 + ODS->DWD 闭环新增 4 张表 = 共 47 张表。**
 
 ---
 
@@ -205,9 +221,13 @@
 | `profiles.yml` | Trino target（环境变量注入） |
 | `models/sources.yml` | ODS 源声明 + tests |
 | `models/intermediate/dwd_order_df.sql` | DWD 明细视图 |
+| `models/generated/sources.yml` | DWD compile 生成的 ODS source 声明 |
+| `models/intermediate/dwd_trade_codex_orders_df.sql` | DWD compile 生成的样例明细模型 |
+| `models/intermediate/dwd_trade_codex_orders_df.yml` | DWD compile 生成的样例模型 tests/schema |
 | `models/marts/ads_order_gmv_daily.sql` | ADS 每日 GMV |
 | `models/marts/schema.yml` | 质量门禁（not_null/unique/accepted_range） |
 | `macros/onelake_macros.sql` | 增量水位 + 手机号/身份证脱敏宏 |
+| `dagster/definitions.py` | DWD dbt build job，支持 Backfill `--full-refresh` 与 dbt vars 透传 |
 
 ---
 
@@ -223,9 +243,12 @@
 | `index.html` + `src/main.tsx` | React Query + AntD 中文 locale + BrowserRouter |
 | `src/App.tsx` | ProLayout + 10 大菜单 + 路由表 |
 | `src/api/http.ts` | axios 全局：JWT 注入 + X-Trace-Id + ApiResponse 解包 + 401 重定向 |
-| `src/api/index.ts` | 7 个模块 API SDK 雏形 |
+| `src/api/index.ts` | 模块 API SDK；`ModelingAPI` 独立承载 DWD 模型草稿、编译、运行与运行历史 |
 | `src/pages/dashboard/index.tsx` | 工作台（4 指标卡 + 我的待办 + 快捷入口） |
 | `src/pages/integration/index.tsx` | 数据集成完整 CRUD（新建抽屉 + 测连 + 删除） |
+| `src/pages/lakehouse/TableDetail.tsx` | ODS/DWD 表详情：Schema、DWD 模型、质量门禁、表级/字段级血缘、Iceberg 运维、权限入口 |
+| `src/pages/lakehouse/OptimizeCenter.tsx` | DWD 存储优化中心，读取真实维护评估并触发 Iceberg Compaction/快照/孤儿文件清理 |
+| `src/pages/lakehouse/TableWizard.tsx` | ODS 派生 DWD 草稿建模向导，保存后回到源 ODS 表详情 |
 | `src/pages/{orchestration,catalog,modeling,quality,security,dataservice}/index.tsx` | 占位骨架 |
 | `src/stores/app.ts` | zustand 全局 store |
 

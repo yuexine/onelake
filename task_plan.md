@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-阶段 33
+阶段 52
 
 ## 各阶段
 
@@ -346,6 +346,99 @@
 - [x] 数据服务增加已发布 SQL API 的 AppKey 运行时入口，校验 AppKey、租户、订阅、状态、日配额并写调用日志
 - [x] 修复 Flyway 迁移入口：按 schema 顺序迁移，integration 重复 V2 改为幂等 V6
 - [x] 跑通 security/catalog/dataservice 模块测试、全量后端跳测编译、前端 TypeScript、前端 build、diff 空白检查
+- **状态：** complete
+
+### 阶段 41：ODS 到 DWD 标准闭环实施方案细化
+- [x] 复核当前采集、Catalog、质量、SQL 工作台、dbt、Dagster 代码边界
+- [x] 对照 Medallion/dbt/Dagster/Airbyte/OpenMetadata 标准链路提炼 OneLake 闭环目标
+- [x] 输出按迭代拆分的详细实施方案，明确每轮交付、改动点、验证与不做事项
+- [x] 更新 `findings.md`、`progress.md`
+- **状态：** complete
+
+### 阶段 42：ODS 到 DWD 方案链路匹配评审
+- [x] 按源端入湖、ODS 资产、DWD 模型、编排运行、dbt 执行、质量门禁、Catalog/血缘、前端可观测逐段评审
+- [x] 检查 DWD 模型与数据开发编排的关系是否明确
+- [x] 补强模型运行事件、dbt artifacts 解析、质量真实来源、字段安全标签继承和 MVP 发布点
+- [x] 更新 `docs/ODS到DWD标准闭环实施方案.md`、`findings.md`、`progress.md`
+- **状态：** complete
+
+### 阶段 43：ODS 到 DWD 加工治理与算力/流水线兼容评审
+- [x] 调研 Databricks、Dagster/dbt、Airflow、Azure Data Factory/Fabric、AWS Glue 等主流产品在加工、治理、编排、计算资源上的设计方式
+- [x] 检查 OneLake 当前前端流水线、算子市场、SQL 工作台资源组和后端 orchestration DAG 的真实边界
+- [x] 评审现有 ODS->DWD 方案是否覆盖加工治理操作、是否兼容流水线与算力/资源组能力
+- [x] 在方案文档中补充 `加工治理、流水线与算力资源兼容评审` 和 `迭代 2.5：加工治理算子与算力资源契约`
+- [x] 更新 `findings.md`、`progress.md`
+- **状态：** complete
+
+### 阶段 44：全局任务条开发进展检查与实施方案
+- [x] 检查原型设计、前端验证报告和全局任务条组件接入状态
+- [x] 检查前端 store/mock/API、通知中心、采集/SQL/编排/质量运行模型
+- [x] 判断全局任务条与整体项目目标的差距和实施边界
+- [x] 新增 `docs/全局任务条实施方案.md`
+- [x] 更新 `findings.md`、`progress.md`
+- **状态：** complete
+
+### 阶段 45：ODS 到 DWD 迭代 0 样例数据基线实施
+- [x] 新增 `scripts/ods-dwd-baseline.sh`，幂等准备 `onelake_src.public.codex_orders` 与 `iceberg.ods.ods_codex_orders`
+- [x] 新增 Makefile 入口 `ods-dwd-baseline` 与 `ods-dwd-verify`
+- [x] 固定样例数据为 10 行、6 个字段、3 条脏数据，满足后续 DWD 清洗/质量门禁验证
+- [x] 写入样例 `integration.table.loaded` Outbox 事件，验证 Catalog 消费后生成 ODS 资产、字段 schema 和字段级血缘
+- [x] 运行脚本验证、Catalog 模块测试、Trino 查询和 diff 空白检查
+- **状态：** complete
+
+### 阶段 46：ODS 到 DWD 迭代 1 派生入口与模型草稿
+- [x] 阅读 `module-modeling`、湖仓表详情/建表向导、Catalog 资产 API 和现有迁移
+- [x] 新增 DWD 模型草稿实体、迁移、Repository、DTO、API 和校验服务
+- [x] 前端从 ODS 表详情进入“派生 DWD 明细表”，并保存模型草稿
+- [x] 补充测试，核对迭代 1 验收项后再进入迭代 2
+- **状态：** complete
+
+### 阶段 47：ODS 到 DWD 迭代 2 DWD SQL/dbt 生成与静态校验
+- [x] 阅读当前 dbt 项目结构、profile、示例模型和 orchestration DAG 契约
+- [x] 新增 DWD 模型编译服务，生成 dbt SQL/YAML 产物并保持幂等
+- [x] 校验输出字段、source 依赖、目标模型命名和增量策略
+- [x] 生成或关联 disabled orchestration DAG 草稿，保留后续 Dagster 运行入口
+- [x] 运行 dbt parse、后端测试、前端/接口回归和 diff 空白检查
+- **状态：** complete
+
+### 阶段 48：ODS 到 DWD 迭代 2.5 加工治理算子与算力资源契约
+- [x] 为 DWD 模型补充 pipeline mode、operator graph、resource group、compute profile、engine 和 cost policy 持久化字段
+- [x] 编译时生成 INPUT/TRANSFORM/GOVERN/MASK/QUALITY_GATE/DBT_MODEL/OUTPUT 节点图，并同步到 orchestration DAG definition
+- [x] 将默认资源画像写入模型、DAG 和 compile 返回结果，保证后续算力市场/资源组可兼容
+- [x] 对敏感字段继承和直通/脱敏策略做静态提示，不把算子市场停留在前端展示
+- [x] 补充测试并运行后端、dbt、前端与 diff 检查
+- **状态：** complete
+
+### 阶段 49：ODS 到 DWD 迭代 3 Dagster dbt 执行最小闭环
+- [ ] 检查 Dagster user-code 镜像、definitions.py、dagster-dbt 依赖和 dbt project 挂载路径
+- [ ] 新增 `onelake_dbt_model_run` job 或 asset job，接收 modelName/run config 并执行 `dbt build --select <model>`
+- [ ] 控制面新增 DWD model run 记录与触发 API，写入 Dagster run id、状态和日志入口
+- [ ] 解析 dbt artifacts 的最小 run result，形成后续质量/Catalog 回写输入
+- [ ] 运行 Dagster/dbt 本地验证、后端测试和浏览器/接口回归
+- **状态：** pending
+
+### 阶段 50：全局任务条 P0 真实任务投影与前端接入
+- [x] 新增 `common.running_task` 统一任务投影表和后端任务 API
+- [x] 从 `integration.sync_run` 聚合采集运行状态，映射为全局任务条可展示的 `RunningTask`
+- [x] 前端移除 `runningTasks` mock，新增 `TaskAPI` 与轮询 hook
+- [x] 全局任务条展示真实运行/失败任务，支持查看详情、取消运行和忽略近期终态任务
+- [x] 运行后端测试、前端类型检查/构建、迁移和真实浏览器验证
+- **状态：** complete
+
+### 阶段 51：全局任务条 P1 SQL/编排/质量多来源接入
+- [x] `RunningTaskService` 同步 `catalog.sql_query_history`，将 SQL 查询映射为 `LAKEHOUSE/SQL` 任务并暴露取消端点
+- [x] 同步 `orchestration.job_run`，将 DAG run 映射为 `ORCHESTRATION/DAG` 任务并跳转到编排详情
+- [x] 同步 `quality.run_result`，将最近稽核结果映射为 `QUALITY/QUALITY` 任务，失败进入可关闭告警态
+- [x] 限制 SQL/编排/质量源同步为运行中或最近 10 分钟结果，避免历史失败批量占满任务条
+- [x] 补充 common 单测，完成真实 API 与浏览器任务条验证
+- **状态：** complete
+
+### 阶段 52：全局任务条 P2 通知中心真实化联动
+- [x] 扩展 `common.notification` 契约，补充内容、级别和来源引用，支持任务通知幂等生成
+- [x] 新增 Notification Entity/Repository/Service/Controller，提供通知列表、单条已读、全部已读 API
+- [x] `RunningTaskService` 在失败任务投影保存后生成 `TASK/CRITICAL` 通知，避免任务条和通知中心割裂
+- [x] 前端新增 `NotificationAPI` 与 `useNotifications`，通知中心从 mock 改为真实 API 数据
+- [x] 保持通知中心视觉不变，补充通知按钮 aria label，并验证铃铛未读数、抽屉内容和已读接口
 - **状态：** complete
 
 ## 关键问题

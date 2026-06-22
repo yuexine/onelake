@@ -98,6 +98,8 @@ make ps          # Inspect data plane containers
 make logs        # Follow data plane logs
 make seed        # Initialize Keycloak realm and MinIO bucket
 make migrate     # Run Flyway migrations
+make ods-dwd-baseline  # Prepare fixed ODS->DWD sample source/ODS data
+make ods-dwd-verify    # Verify fixed ODS->DWD sample baseline
 make backend     # Run Spring Boot backend in foreground
 make debug       # Run backend with JDWP on 5005
 make frontend    # pnpm install + gen API SDK + Vite dev server

@@ -8,7 +8,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import javax.sql.DataSource;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -29,8 +28,8 @@ import java.util.Properties;
 @ConditionalOnClass(HikariDataSource.class)
 public class TrinoDataSourceConfig {
 
-    @Bean(name = "trinoDataSource", destroyMethod = "close")
-    public DataSource trinoDataSource(
+    @Bean(destroyMethod = "close")
+    public TrinoConnectionFactory trinoConnectionFactory(
         @Value("${onelake.dataplane.trino.jdbc-url:jdbc:trino://localhost:18080/iceberg}") String jdbcUrl,
         @Value("${onelake.dataplane.trino.user:onelake}") String user,
         @Value("${onelake.dataplane.trino.password:}") String password,
@@ -59,7 +58,7 @@ public class TrinoDataSourceConfig {
         config.setAutoCommit(true);
         // Trino 不支持事务、不支持 setAutoCommit(false)，保持默认 true
         config.setConnectionTestQuery("SELECT 1");
-        return new HikariDataSource(config);
+        return new TrinoConnectionFactory(new HikariDataSource(config));
     }
 
     private static void ensureDriverRegistered() {

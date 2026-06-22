@@ -1,5 +1,6 @@
 package com.onelake.catalog.service.sql;
 
+import com.onelake.catalog.config.TrinoConnectionFactory;
 import com.onelake.catalog.domain.entity.sql.SavedQuery;
 import com.onelake.catalog.domain.entity.sql.SqlQueryHistory;
 import com.onelake.catalog.dto.sql.SqlExecuteRequest;
@@ -16,7 +17,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import javax.sql.DataSource;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -42,7 +42,7 @@ class SqlWorkbenchServiceTest {
     private SecurityService securityService;
     private AuditLogger auditLogger;
     private AclService aclService;
-    private DataSource trinoDataSource;
+    private TrinoConnectionFactory trinoConnectionFactory;
     private SqlWorkbenchService service;
 
     @BeforeEach
@@ -53,8 +53,8 @@ class SqlWorkbenchServiceTest {
         securityService = mock(SecurityService.class);
         auditLogger = mock(AuditLogger.class);
         aclService = mock(AclService.class);
-        trinoDataSource = mock(DataSource.class);
-        service = new SqlWorkbenchService(historyRepo, savedQueryRepo, assetSecurityService, securityService, auditLogger, aclService, trinoDataSource);
+        trinoConnectionFactory = mock(TrinoConnectionFactory.class);
+        service = new SqlWorkbenchService(historyRepo, savedQueryRepo, assetSecurityService, securityService, auditLogger, aclService, trinoConnectionFactory);
         ReflectionTestUtils.setField(service, "scanThresholdBytes", 1024L);
         // ACL mock 默认允许：让 owner 外的 requireEdit / filterViewable 通过
         org.mockito.Mockito.doNothing().when(aclService).requireEdit(any(), any(), any());

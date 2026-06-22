@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -26,11 +27,14 @@ public class CatalogService {
 
     private final AssetRepository assetRepo;
     private final LineageEdgeRepository lineageRepo;
+    private final CatalogRowCountResolver rowCountResolver;
 
     @Transactional(readOnly = true)
     public AssetDTO getAsset(UUID id) {
-        return toDTO(assetRepo.findById(id)
-            .orElseThrow(() -> new BizException(40400, "资产不存在")));
+        Asset asset = assetRepo.findById(id)
+            .orElseThrow(() -> new BizException(40400, "资产不存在"));
+        Map<UUID, Long> liveRowCounts = rowCountResolver.resolve(List.of(asset));
+        return toDTO(asset, liveRowCounts.get(asset.getId()));
     }
 
     @Transactional(readOnly = true)
@@ -39,7 +43,8 @@ public class CatalogService {
         List<Asset> assets = layer == null || layer.isBlank()
             ? assetRepo.findByTenantId(tenantId)
             : assetRepo.findByTenantIdAndLayer(tenantId, layer.toUpperCase());
-        return assets.stream().map(this::toDTO).toList();
+        Map<UUID, Long> liveRowCounts = rowCountResolver.resolve(assets);
+        return assets.stream().map(asset -> toDTO(asset, liveRowCounts.get(asset.getId()))).toList();
     }
 
     /** 影响分析：以下游 fqn 为根，BFS 找出所有下游资产。 */
@@ -66,7 +71,7 @@ public class CatalogService {
         return result;
     }
 
-    private AssetDTO toDTO(Asset asset) {
+    private AssetDTO toDTO(Asset asset, Long liveRowCount) {
         String fqn = asset.getOmFqn();
         return new AssetDTO(
             asset.getId(),
@@ -83,7 +88,7 @@ public class CatalogService {
             asset.getQualityScore(),
             asset.getPopularity() == null ? 0 : asset.getPopularity(),
             asset.getAccessCount() == null ? 0 : asset.getAccessCount(),
-            asset.getRowCount(),
+            liveRowCount == null ? asset.getRowCount() : liveRowCount,
             asset.getSizeBytes(),
             parseColumns(asset.getColumns()),
             parseTags(asset.getPartitions()),

@@ -1,5 +1,6 @@
 package com.onelake.catalog.service.sql;
 
+import com.onelake.catalog.config.TrinoConnectionFactory;
 import com.onelake.catalog.domain.entity.sql.SavedQuery;
 import com.onelake.catalog.domain.entity.sql.SqlQueryHistory;
 import com.onelake.catalog.dto.sql.SavedQueryDTO;
@@ -21,13 +22,11 @@ import io.trino.jdbc.TrinoStatement;
 import jakarta.annotation.PreDestroy;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -74,7 +73,7 @@ public class SqlWorkbenchService {
     private final SecurityService securityService;
     private final AuditLogger auditLogger;
     private final AclService aclService;
-    private final DataSource trinoDataSource;
+    private final TrinoConnectionFactory trinoConnectionFactory;
     private final Map<UUID, QueryTask> queryTasks = new ConcurrentHashMap<>();
     private final ExecutorService queryExecutor = Executors.newCachedThreadPool();
 
@@ -85,7 +84,7 @@ public class SqlWorkbenchService {
         SecurityService securityService,
         AuditLogger auditLogger,
         AclService aclService,
-        @Qualifier("trinoDataSource") DataSource trinoDataSource
+        TrinoConnectionFactory trinoConnectionFactory
     ) {
         this.historyRepo = historyRepo;
         this.savedQueryRepo = savedQueryRepo;
@@ -93,7 +92,7 @@ public class SqlWorkbenchService {
         this.securityService = securityService;
         this.auditLogger = auditLogger;
         this.aclService = aclService;
-        this.trinoDataSource = trinoDataSource;
+        this.trinoConnectionFactory = trinoConnectionFactory;
     }
 
     @Value("${onelake.dataplane.trino.jdbc-url:jdbc:trino://localhost:18080/iceberg}")
@@ -482,7 +481,7 @@ public class SqlWorkbenchService {
     }
 
     private SqlExecuteResultDTO executeTrino(QueryTask task, int rowLimit) throws Exception {
-        try (Connection connection = trinoDataSource.getConnection();
+        try (Connection connection = trinoConnectionFactory.getConnection();
              Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(timeoutSeconds);
             task.statement = statement;
@@ -725,7 +724,7 @@ public class SqlWorkbenchService {
             || sql.regionMatches(true, 0, "DESC", 0, 4)) {
             return new TrinoEstimate(null, "SHOW/DESCRIBE 不产生扫描量估算");
         }
-        try (Connection connection = trinoDataSource.getConnection();
+        try (Connection connection = trinoConnectionFactory.getConnection();
              Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(Math.min(timeoutSeconds, 10));
             try (ResultSet rs = statement.executeQuery("EXPLAIN (TYPE IO, FORMAT JSON) " + sql)) {

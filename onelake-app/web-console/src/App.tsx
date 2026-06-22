@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button } from 'antd';
+import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button, App as AntdApp } from 'antd';
 import {
   ClusterOutlined, SearchOutlined,
   SafetyOutlined, LockOutlined, CloudOutlined, DashboardOutlined,
@@ -22,6 +22,10 @@ import { NotificationCenter } from './components/NotificationCenter';
 import { OneLakeLogo } from './components/OneLakeLogo';
 import { TaskProgressBar, TaskProgressTrigger } from './components/TaskProgressBar';
 import { getAuthUser, logout } from './auth/oidc';
+import { TaskAPI } from './api';
+import { useGlobalTasks } from './hooks/useGlobalTasks';
+import { useNotifications } from './hooks/useNotifications';
+import type { RunningTask } from './types';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
@@ -112,9 +116,24 @@ const ROLE_LABELS: Record<string, string> = {
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [taskBarCollapsed, setTaskBarCollapsed] = useState(true);
-  const { user, tenant, tenants, tasks, notifications, setSearchOpen, setNotifyOpen, setUser } = useAppStore();
+  const [taskActionId, setTaskActionId] = useState<string | null>(null);
+  const { message } = AntdApp.useApp();
+  const {
+    user,
+    tenant,
+    tenants,
+    tasks,
+    taskLoadError,
+    notifications,
+    setSearchOpen,
+    setNotifyOpen,
+    setUser,
+    removeTask,
+  } = useAppStore();
   const navigate = useNavigate();
   const location = useLocation();
+  const { refresh: refreshGlobalTasks } = useGlobalTasks({ expanded: !taskBarCollapsed });
+  useNotifications();
   const unread = notifications.filter((n) => !n.isRead).length;
   const visibleRoles = user.roles.slice(0, 3);
   const hiddenRoleCount = Math.max(user.roles.length - visibleRoles.length, 0);
@@ -152,6 +171,35 @@ export default function App() {
   // 顶层菜单（含子菜单时展开根 key）
   const root = '/' + (location.pathname.split('/')[1] || 'dashboard');
   const openKeys = NAV?.filter((n) => n && typeof n === 'object' && 'key' in n && (n.key as string) === root).map((n) => (n as { key: string }).key);
+
+  const handleTaskOpen = (task: RunningTask) => {
+    if (task.link) navigate(task.link);
+  };
+
+  const handleTaskCancel = async (task: RunningTask) => {
+    setTaskActionId(task.id);
+    try {
+      await TaskAPI.cancel(task);
+      message.success('已提交取消任务请求');
+      await refreshGlobalTasks();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '取消任务失败');
+    } finally {
+      setTaskActionId(null);
+    }
+  };
+
+  const handleTaskDismiss = async (task: RunningTask) => {
+    setTaskActionId(task.id);
+    try {
+      await TaskAPI.dismiss(task.id);
+      removeTask(task.id);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '关闭任务失败');
+    } finally {
+      setTaskActionId(null);
+    }
+  };
 
   return (
     <Layout hasSider style={{ minHeight: '100vh', flexDirection: 'row' }}>
@@ -267,6 +315,7 @@ export default function App() {
               <Badge count={unread} size="small" offset={[-2, 2]}>
                 <Button
                   type="text"
+                  aria-label="打开通知中心"
                   icon={<BellOutlined />}
                   onClick={() => setNotifyOpen(true)}
                   style={{ color: 'var(--ol-ink-2)' }}
@@ -388,7 +437,15 @@ export default function App() {
               transition: 'left var(--ol-dur-base) var(--ol-ease)',
             }}
           >
-            <TaskProgressBar tasks={tasks} onCollapse={() => setTaskBarCollapsed(true)} />
+            <TaskProgressBar
+              tasks={tasks}
+              taskError={taskLoadError}
+              busyTaskId={taskActionId}
+              onCollapse={() => setTaskBarCollapsed(true)}
+              onTaskOpen={handleTaskOpen}
+              onTaskCancel={handleTaskCancel}
+              onTaskDismiss={handleTaskDismiss}
+            />
           </div>
         )}
       </Layout>

@@ -5,6 +5,7 @@ import type {
   Asset,
   ApprovalRequest,
   DataSource,
+  Notification,
   QualityAlert,
   QualityRule,
   QualityRunResult,
@@ -12,6 +13,7 @@ import type {
   QueryTemplate,
   QueryTemplatePlaceholder,
   Dag,
+  RunningTask,
   SqlExecuteResult,
   SqlQueryHistory,
   SyncRun,
@@ -104,6 +106,32 @@ export const SystemAPI = {
   context: () => unwrap<SystemContext>(http.get('/system/context')),
 
   projects: () => unwrap<ProjectOption[]>(http.get('/system/projects')),
+};
+
+export const TaskAPI = {
+  listRunning: (params?: { includeRecent?: boolean; limit?: number }) =>
+    unwrap<RunningTask[]>(http.get('/tasks/running', { params })),
+
+  dismiss: (id: string) =>
+    unwrap<RunningTask>(http.post(`/tasks/${id}/dismiss`)),
+
+  cancel: (task: RunningTask) => {
+    if (!task.cancelEndpoint) {
+      return Promise.reject(new Error('该任务不支持全局取消'));
+    }
+    return unwrap<unknown>(http.post(task.cancelEndpoint));
+  },
+};
+
+export const NotificationAPI = {
+  list: (params?: { limit?: number }) =>
+    unwrap<Notification[]>(http.get('/notifications', { params })),
+
+  markRead: (id: string) =>
+    unwrap<Notification>(http.post(`/notifications/${id}/read`)),
+
+  markAllRead: () =>
+    unwrap<void>(http.post('/notifications/read-all')),
 };
 
 export const IntegrationAPI = {

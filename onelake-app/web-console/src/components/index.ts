@@ -8,7 +8,7 @@ export { DangerConfirm } from './DangerConfirm';
 export { ImpactAnalysis } from './ImpactAnalysis';
 export { DetailPageLayout } from './DetailPageLayout';
 export { TaskProgressBar } from './TaskProgressBar';
-export type { RunningTask } from './TaskProgressBar';
+export type { RunningTask } from '../types';
 export { ErrorBoundary } from './ErrorBoundary';
 export {
   tokens, classifications, statusColors, taskStatusColorMap,
@@ -30,4 +30,3 @@ export { IntentBadge } from './primitives/IntentBadge';
 
 // Hooks
 export { useAsyncAction } from '../hooks/useAsyncAction';
-

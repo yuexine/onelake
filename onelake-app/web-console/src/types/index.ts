@@ -74,6 +74,28 @@ export interface SyncRun {
   throughputRows?: number;
 }
 
+export interface RunningTask {
+  id: UUID;
+  sourceModule: 'INTEGRATION' | 'LAKEHOUSE' | 'ORCHESTRATION' | 'QUALITY' | 'DATASERVICE' | 'SECURITY' | 'SYSTEM' | string;
+  taskType: 'COLLECT' | 'SQL' | 'DAG' | 'API' | 'QUALITY' | 'COMPACTION' | 'ALERT' | string;
+  refType: string;
+  refId: string;
+  parentRefId?: string;
+  title: string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  progress?: number;
+  phase?: string;
+  detail?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  link?: string;
+  cancellable?: boolean;
+  cancelEndpoint?: string;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
 export interface Dag {
   id: UUID;
   name: string;

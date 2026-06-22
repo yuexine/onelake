@@ -17,10 +17,3 @@ export const currentUser = {
   roles: ['DE', 'ADMIN'],
   tenant: { id: 't-1', name: '交易事业部' },
 };
-
-// 全局任务条
-export const runningTasks = [
-  { id: 'rt-1', category: 'COLLECT' as const, name: '采集任务 user_cdc', progress: 62, status: 'running' as const, detail: '62%' },
-  { id: 'rt-2', category: 'COMPACTION' as const, name: 'dwd_order_df 小文件合并', progress: 80, status: 'running' as const, detail: '80%' },
-  { id: 'rt-3', category: 'QUALITY' as const, name: 'dwd_order_df 质量稽核', progress: 35, status: 'running' as const, detail: '35%' },
-];

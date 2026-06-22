@@ -2,9 +2,8 @@
  * 全局 store：当前租户、用户、运行任务条、通知、搜索弹窗。
  */
 import { create } from 'zustand';
-import { currentUser, runningTasks, notifications, tenants } from '../mock';
-import type { Notification, Tenant } from '../types';
-import type { RunningTask } from '../components';
+import { currentUser, tenants } from '../mock';
+import type { Notification, RunningTask, Tenant } from '../types';
 
 interface AppState {
   user: typeof currentUser;
@@ -13,8 +12,12 @@ interface AppState {
   tenants: Tenant[];
   switchTenant: (id: string) => void;
   tasks: RunningTask[];
+  taskLoadError?: string;
+  setTasks: (tasks: RunningTask[]) => void;
+  setTaskLoadError: (message?: string) => void;
   removeTask: (id: string) => void;
   notifications: Notification[];
+  setNotifications: (notifications: Notification[]) => void;
   markAllRead: () => void;
   markRead: (id: string) => void;
   searchOpen: boolean;
@@ -33,10 +36,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (t) set({ tenant: t });
   },
 
-  tasks: runningTasks,
+  tasks: [],
+  taskLoadError: undefined,
+  setTasks: (tasks) => set({ tasks }),
+  setTaskLoadError: (message) => set({ taskLoadError: message }),
   removeTask: (id) => set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) })),
 
-  notifications,
+  notifications: [],
+  setNotifications: (notifications) => set({ notifications }),
   markAllRead: () => set((s) => ({ notifications: s.notifications.map((n) => ({ ...n, isRead: true })) })),
   markRead: (id) => set((s) => ({
     notifications: s.notifications.map((n) => (n.id === id ? { ...n, isRead: true } : n)),

@@ -1,29 +1,32 @@
 /**
- * 模拟长任务进度（§2.4 长任务 + §1.2 全局任务条）。
+ * 全局任务条（§2.4 长任务 + §1.2 全局任务条）。
  */
 import { useMemo } from 'react';
 import { Button, Progress, Tooltip, Typography } from 'antd';
 import {
-  CheckCircleOutlined, CloseCircleOutlined, DownOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  CloseOutlined,
+  DownOutlined,
+  EyeOutlined,
   LoadingOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
+import type { RunningTask } from '../types';
 
 const { Text } = Typography;
-
-export interface RunningTask {
-  id: string;
-  category: 'COLLECT' | 'COMPACTION' | 'DAG' | 'API' | 'QUALITY';
-  name: string;
-  progress: number;
-  status: 'running' | 'success' | 'failed';
-  detail?: string;
-}
 
 interface Props {
   tasks: RunningTask[];
   extra?: ReactNode;
+  taskError?: string;
+  busyTaskId?: string | null;
   onCollapse?: () => void;
+  onTaskOpen?: (task: RunningTask) => void;
+  onTaskCancel?: (task: RunningTask) => void;
+  onTaskDismiss?: (task: RunningTask) => void;
 }
 
 interface TriggerProps {
@@ -31,42 +34,72 @@ interface TriggerProps {
   onClick: () => void;
 }
 
-const categoryLabel: Record<RunningTask['category'], string> = {
+const taskTypeLabel: Record<string, string> = {
   COLLECT: '采集',
   COMPACTION: '合并',
   DAG: '编排',
   API: '服务',
   QUALITY: '质量',
+  SQL: 'SQL',
+  ALERT: '告警',
 };
 
 const statusMeta: Record<RunningTask['status'], { label: string; color: string; bg: string; icon: ReactNode }> = {
-  running: {
+  QUEUED: {
+    label: '排队中',
+    color: 'var(--ol-ink-3)',
+    bg: 'var(--ol-fill)',
+    icon: <ClockCircleOutlined />,
+  },
+  RUNNING: {
     label: '运行中',
     color: 'var(--ol-info)',
     bg: 'var(--ol-info-soft)',
     icon: <LoadingOutlined spin />,
   },
-  success: {
+  SUCCEEDED: {
     label: '已完成',
     color: 'var(--ol-success)',
     bg: 'var(--ol-success-soft)',
     icon: <CheckCircleOutlined />,
   },
-  failed: {
+  FAILED: {
     label: '失败',
     color: 'var(--ol-error)',
     bg: 'var(--ol-error-soft)',
     icon: <CloseCircleOutlined />,
   },
+  CANCELLED: {
+    label: '已取消',
+    color: 'var(--ol-ink-3)',
+    bg: 'var(--ol-fill)',
+    icon: <StopOutlined />,
+  },
 };
 
+const activeStatuses = new Set<RunningTask['status']>(['QUEUED', 'RUNNING']);
+
+function getProgress(task: RunningTask) {
+  if (typeof task.progress === 'number') return Math.max(0, Math.min(100, task.progress));
+  return activeStatuses.has(task.status) ? 0 : 100;
+}
+
 function getTaskStats(tasks: RunningTask[]) {
-  const runningCount = tasks.filter((t) => t.status === 'running').length;
-  const failedCount = tasks.filter((t) => t.status === 'failed').length;
+  const runningCount = tasks.filter((t) => activeStatuses.has(t.status)).length;
+  const failedCount = tasks.filter((t) => t.status === 'FAILED').length;
   const averageProgress = tasks.length === 0
     ? 0
-    : Math.round(tasks.reduce((sum, t) => sum + t.progress, 0) / tasks.length);
+    : Math.round(tasks.reduce((sum, t) => sum + getProgress(t), 0) / tasks.length);
   return { runningCount, failedCount, averageProgress };
+}
+
+function taskDetail(task: RunningTask) {
+  if (task.status === 'FAILED' && task.errorMessage) return task.errorMessage;
+  return task.detail || task.phase || `${getProgress(task)}%`;
+}
+
+function canDismiss(task: RunningTask) {
+  return !activeStatuses.has(task.status);
 }
 
 export function TaskProgressTrigger({ tasks, onClick }: TriggerProps) {
@@ -108,14 +141,23 @@ export function TaskProgressTrigger({ tasks, onClick }: TriggerProps) {
           {tasks.length}
         </span>
         <span className="tnum" style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginLeft: 2 }}>
-          {averageProgress}%
+          {runningCount > 0 ? `${runningCount} 运行中` : `${averageProgress}%`}
         </span>
       </button>
     </Tooltip>
   );
 }
 
-export function TaskProgressBar({ tasks, extra, onCollapse }: Props) {
+export function TaskProgressBar({
+  tasks,
+  extra,
+  taskError,
+  busyTaskId,
+  onCollapse,
+  onTaskOpen,
+  onTaskCancel,
+  onTaskDismiss,
+}: Props) {
   const { runningCount, failedCount, averageProgress } = useMemo(() => getTaskStats(tasks), [tasks]);
 
   return (
@@ -150,6 +192,11 @@ export function TaskProgressBar({ tasks, extra, onCollapse }: Props) {
           <Text type="secondary" className="tnum" style={{ fontSize: 12 }}>
             平均 {averageProgress}%
           </Text>
+          {taskError && (
+            <Tooltip title={taskError}>
+              <Text type="secondary" style={{ fontSize: 12, color: 'var(--ol-warning)' }}>刷新失败</Text>
+            </Tooltip>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           {extra}
@@ -177,10 +224,10 @@ export function TaskProgressBar({ tasks, extra, onCollapse }: Props) {
               key={t.id}
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(220px, 320px) minmax(180px, 1fr) 48px',
+                gridTemplateColumns: 'minmax(220px, 360px) minmax(160px, 1fr) minmax(90px, 140px) 92px',
                 alignItems: 'center',
                 gap: 14,
-                minHeight: 34,
+                minHeight: 36,
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -201,24 +248,65 @@ export function TaskProgressBar({ tasks, extra, onCollapse }: Props) {
                   {statusMeta[t.status].icon}
                 </span>
                 <span className="ol-chip" style={{ padding: '0 6px', lineHeight: '18px', flexShrink: 0 }}>
-                  {categoryLabel[t.category]}
+                  {taskTypeLabel[t.taskType] || t.taskType}
                 </span>
-                <Text className="ol-truncate" style={{ color: 'var(--ol-ink)', fontSize: 13, minWidth: 0 }}>
-                  {t.name}
-                </Text>
+                <Tooltip title={t.title}>
+                  <Text className="ol-truncate" style={{ color: 'var(--ol-ink)', fontSize: 13, minWidth: 0 }}>
+                    {t.title}
+                  </Text>
+                </Tooltip>
               </div>
               <Progress
-                percent={t.progress}
+                percent={getProgress(t)}
                 showInfo={false}
                 size="small"
-                status={t.status === 'failed' ? 'exception' : t.status === 'success' ? 'success' : 'active'}
-                strokeColor={t.status === 'running' ? 'var(--ol-info)' : undefined}
+                status={t.status === 'FAILED' ? 'exception' : t.status === 'SUCCEEDED' ? 'success' : 'active'}
+                strokeColor={activeStatuses.has(t.status) ? 'var(--ol-info)' : undefined}
                 trailColor="var(--ol-line-soft)"
                 style={{ margin: 0 }}
               />
-              <Text className="tnum" style={{ color: 'var(--ol-ink-3)', fontSize: 12, textAlign: 'right' }}>
-                {t.detail || `${t.progress}%`}
-              </Text>
+              <Tooltip title={taskDetail(t)}>
+                <Text className="ol-truncate" style={{ color: 'var(--ol-ink-3)', fontSize: 12, textAlign: 'right' }}>
+                  {taskDetail(t)}
+                </Text>
+              </Tooltip>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 2 }}>
+                <Tooltip title="查看">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EyeOutlined />}
+                    disabled={!t.link}
+                    onClick={() => onTaskOpen?.(t)}
+                    aria-label="查看任务"
+                  />
+                </Tooltip>
+                {t.cancellable && (
+                  <Tooltip title="取消">
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<StopOutlined />}
+                      loading={busyTaskId === t.id}
+                      onClick={() => onTaskCancel?.(t)}
+                      aria-label="取消任务"
+                    />
+                  </Tooltip>
+                )}
+                {canDismiss(t) && (
+                  <Tooltip title="关闭">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<CloseOutlined />}
+                      loading={busyTaskId === t.id}
+                      onClick={() => onTaskDismiss?.(t)}
+                      aria-label="关闭任务"
+                    />
+                  </Tooltip>
+                )}
+              </div>
             </div>
           ))}
         </div>

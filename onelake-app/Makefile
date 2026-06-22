@@ -14,7 +14,7 @@ help:
 	@echo "  make ps          查看容器状态"
 	@echo "  make logs        跟踪数据面日志"
 	@echo "  make seed        初始化 Keycloak realm + MinIO bucket"
-	@echo "  make migrate     Flyway 在 8 个 schema 建表"
+	@echo "  make migrate     Flyway 按 schema 顺序执行迁移"
 	@echo "  make backend     本地运行控制面（带 devtools 热重载）"
 	@echo "  make debug       以 JDWP 5005 端口启动，供 IDE 远程挂载"
 	@echo "  make frontend    启动前端 + 自动生成 API SDK"
@@ -64,7 +64,7 @@ seed:
 	./scripts/minio-bucket.sh warehouse
 
 migrate:
-	$(MVN) -pl bootstrap flyway:migrate
+	MVN="$(MVN)" ./scripts/flyway-migrate.sh
 
 backend:
 	$(MVN) -pl bootstrap spring-boot:run

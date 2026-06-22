@@ -11,5 +11,5 @@ CREATE TABLE IF NOT EXISTS security.pii_scan_record (
     confirmed_at  TIMESTAMP WITH TIME ZONE
 );
 
-CREATE INDEX idx_pii_scan_tenant_status ON security.pii_scan_record (tenant_id, status);
-CREATE INDEX idx_pii_scan_fqn ON security.pii_scan_record (fqn);
+CREATE INDEX IF NOT EXISTS idx_pii_scan_tenant_status ON security.pii_scan_record (tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_pii_scan_fqn ON security.pii_scan_record (fqn);

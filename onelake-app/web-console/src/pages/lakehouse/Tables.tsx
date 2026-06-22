@@ -2,11 +2,10 @@
  * 分层表浏览（对应原型 §8.3.1 升级版）。
  *   左侧分层/域树 + 右侧表清单
  */
-import { Row, Col, Tree, Table, Tag, Space, Button, Input, Typography, message } from 'antd';
+import { Row, Col, Tree, Table, Button, Input, Typography } from 'antd';
 import { PlusOutlined, ClusterOutlined, ApartmentOutlined, TableOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { lakehouseAssets } from '../../mock';
 import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../components';
 import type { Asset } from '../../types';
 import { CatalogAPI } from '../../api';
@@ -21,21 +20,32 @@ const LAYER_COLOR: Record<string, { bg: string; fg: string }> = {
   ADS: { bg: 'var(--ol-success-soft)',fg: 'var(--ol-success)' },
 };
 
+function renderAssetTreeTitle(asset: Asset, showClassification = false) {
+  return (
+    <span className="ol-tree-node-title" title={asset.name}>
+      <span className="ol-tree-node-title__text">{asset.name}</span>
+      {showClassification ? <ClassificationBadge level={asset.classification} size="small" /> : null}
+    </span>
+  );
+}
+
 export default function Tables() {
   const navigate = useNavigate();
-  const [assets, setAssets] = useState<Asset[]>(lakehouseAssets);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [layer, setLayer] = useState<string>();
   const [domain, setDomain] = useState<string>();
   const [keyword, setKeyword] = useState('');
 
   const loadAssets = () => {
     setLoading(true);
+    setLoadError(null);
     CatalogAPI.listAssets()
       .then((items) => setAssets(normalizeCatalogAssets(items)))
       .catch((e) => {
-        setAssets(lakehouseAssets);
-        message.error(e.message || '分层表资产加载失败，已显示本地示例数据');
+        setAssets([]);
+        setLoadError(e.message || '分层表资产加载失败，请检查 Catalog 服务或稍后重试');
       })
       .finally(() => setLoading(false));
   };
@@ -77,12 +87,13 @@ export default function Tables() {
         <Col xs={24} lg={5}>
           <SectionCard title="分层 / 业务域" icon={<ClusterOutlined />}>
             <Tree
+              className="ol-asset-tree"
               defaultExpandAll
               treeData={[
-                { title: '贴源 ODS', key: 'ODS', children: assets.filter((a) => a.layer === 'ODS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
-                { title: '明细 DWD', key: 'DWD', children: assets.filter((a) => a.layer === 'DWD').map((a) => ({ title: <Space>{a.name}<ClassificationBadge level={a.classification} size="small" /></Space>, key: a.id, isLeaf: true })) },
-                { title: '汇总 DWS', key: 'DWS', children: assets.filter((a) => a.layer === 'DWS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
-                { title: '应用 ADS', key: 'ADS', children: assets.filter((a) => a.layer === 'ADS').map((a) => ({ title: a.name, key: a.id, isLeaf: true })) },
+                { title: '贴源 ODS', key: 'ODS', children: assets.filter((a) => a.layer === 'ODS').map((a) => ({ title: renderAssetTreeTitle(a), key: a.id, isLeaf: true })) },
+                { title: '明细 DWD', key: 'DWD', children: assets.filter((a) => a.layer === 'DWD').map((a) => ({ title: renderAssetTreeTitle(a, true), key: a.id, isLeaf: true })) },
+                { title: '汇总 DWS', key: 'DWS', children: assets.filter((a) => a.layer === 'DWS').map((a) => ({ title: renderAssetTreeTitle(a), key: a.id, isLeaf: true })) },
+                { title: '应用 ADS', key: 'ADS', children: assets.filter((a) => a.layer === 'ADS').map((a) => ({ title: renderAssetTreeTitle(a), key: a.id, isLeaf: true })) },
               ]}
               onSelect={(keys, info) => {
                 const node = info.node;
@@ -125,12 +136,21 @@ export default function Tables() {
               loading={loading}
               locale={{
                 emptyText: (
-                  <StateView
-                    state="empty"
-                    title="暂无资产"
-                    description="调整筛选条件，或新建第一个表"
-                    cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/lakehouse/tables/new')}>新建表</Button>}
-                  />
+                  loadError ? (
+                    <StateView
+                      state="error"
+                      title="分层表资产加载失败"
+                      description={loadError}
+                      onRetry={loadAssets}
+                    />
+                  ) : (
+                    <StateView
+                      state="empty"
+                      title="暂无资产"
+                      description="当前 Catalog 没有返回分层表资产，请先完成采集入湖或同步资产目录"
+                      cta={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/lakehouse/tables/new')}>新建表</Button>}
+                    />
+                  )
                 ),
               }}
               size="middle"

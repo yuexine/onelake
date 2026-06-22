@@ -25,6 +25,8 @@ const { Text } = Typography;
 
 const EXPORT_MAX_ROWS_HINT = 50000;
 const ROW_LIMIT_OPTIONS = [100, 500, 2000] as const;
+const RESULT_COLUMN_WIDTH = 180;
+const RESULT_TABLE_MIN_WIDTH = 720;
 
 interface ErrorHint {
   title?: string;
@@ -870,8 +872,8 @@ export default function SqlWorkbench() {
     const isMasked = Boolean(result.maskedColumns?.some((name) => name.toLowerCase() === column.name.toLowerCase()));
     return {
       title: (
-        <Space size={6}>
-          <span>{column.name}</span>
+        <Space size={6} style={{ minWidth: 0, maxWidth: '100%' }}>
+          <span className="ol-truncate" title={column.name}>{column.name}</span>
           {isMasked && (
             <Tooltip title="该列已由后端按 Catalog 密级与 Security 脱敏策略处理">
               <Tag color="warning" style={{ margin: 0 }}>策略</Tag>
@@ -880,9 +882,15 @@ export default function SqlWorkbench() {
         </Space>
       ),
       dataIndex: column.name,
-      render: (value: unknown) => <span className="mono">{cellText(value)}</span>,
+      width: RESULT_COLUMN_WIDTH,
+      ellipsis: true,
+      render: (value: unknown) => {
+        const text = cellText(value);
+        return <span className="mono ol-truncate" title={text} style={{ display: 'block' }}>{text}</span>;
+      },
     };
   }) || [];
+  const resultTableScrollX = Math.max(RESULT_TABLE_MIN_WIDTH, resultColumns.length * RESULT_COLUMN_WIDTH);
 
   const resultRows = result?.rows.map((row, index) => ({ key: index, ...row })) || [];
   const protectedResult = hasProtectedResult(result);
@@ -1051,6 +1059,8 @@ export default function SqlWorkbench() {
           loading={loading}
           dataSource={resultRows}
           columns={resultColumns}
+          scroll={{ x: resultTableScrollX }}
+          tableLayout="fixed"
           locale={{
             emptyText: queryErrorView ? (
               <div style={{ padding: '28px 16px', textAlign: 'center' }}>

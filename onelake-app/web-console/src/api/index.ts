@@ -3,6 +3,10 @@ import type {
   ApiDefinition,
   AccessGrant,
   Asset,
+  AssetDetail,
+  AssetMaintenanceAssessment,
+  AssetMaintenanceOperation,
+  AssetMaintenanceResult,
   ApprovalRequest,
   DataSource,
   Notification,
@@ -13,11 +17,17 @@ import type {
   QueryTemplate,
   QueryTemplatePlaceholder,
   Dag,
+  DataModel,
+  DwdModelRun,
+  DwdModelCompileResult,
+  DwdModelDraftRequest,
+  DwdModelValidation,
   RunningTask,
   SqlExecuteResult,
   SqlQueryHistory,
   SyncRun,
   SyncTask,
+  TableCreateRequest,
 } from '../types';
 
 export interface PageResult<T> {
@@ -275,9 +285,16 @@ export const OrchestrationAPI = {
 export const CatalogAPI = {
   listAssets: (layer?: string) => unwrap<Asset[]>(http.get('/catalog/assets', { params: { layer } })),
   getAsset: (id: string) => unwrap<Asset>(http.get(`/catalog/assets/${id}`)),
+  getAssetDetail: (id: string) => unwrap<AssetDetail>(http.get(`/catalog/assets/${id}/detail`)),
+  createTable: (payload: TableCreateRequest) => unwrap<Asset>(http.post('/catalog/tables', payload)),
   downstream: (fqn: string) => unwrap<string[]>(http.get('/catalog/lineage/downstream', { params: { fqn } })),
   sync: () => unwrap<{ synced: number }>(http.post('/catalog/sync')),
   refreshColumns: () => unwrap<{ refreshed: number }>(http.post('/catalog/assets/refresh-columns')),
+  listMaintenance: () => unwrap<AssetMaintenanceAssessment[]>(http.get('/catalog/assets/maintenance')),
+  getMaintenance: (assetId: string) =>
+    unwrap<AssetMaintenanceAssessment>(http.get(`/catalog/assets/${assetId}/maintenance`)),
+  runMaintenance: (assetId: string, operation: AssetMaintenanceOperation) =>
+    unwrap<AssetMaintenanceResult>(http.post(`/catalog/assets/${assetId}/maintenance`, { operation })),
 };
 
 export const SqlWorkbenchAPI = {
@@ -355,6 +372,30 @@ export const ModelingAPI = {
   listDomains: () => http.get('/modeling/domains'),
   listMetricsByDomain: (domainId: string) =>
     http.get(`/modeling/metrics/by-domain/${domainId}`),
+  createDwdDraft: (payload: DwdModelDraftRequest) =>
+    unwrap<DataModel>(http.post('/modeling/models/dwd/draft', payload)),
+  listModels: (params?: { sourceFqn?: string; targetFqn?: string }) =>
+    unwrap<DataModel[]>(http.get('/modeling/models', { params })),
+  getModel: (id: string) =>
+    unwrap<DataModel>(http.get(`/modeling/models/${id}`)),
+  updateModel: (id: string, payload: DwdModelDraftRequest) =>
+    unwrap<DataModel>(http.put(`/modeling/models/${id}`, payload)),
+  validateModel: (id: string) =>
+    unwrap<DwdModelValidation>(http.post(`/modeling/models/${id}/validate`)),
+  compileModel: (id: string) =>
+    unwrap<DwdModelCompileResult>(http.post(`/modeling/models/${id}/compile`)),
+  runModel: (id: string, payload?: {
+    triggerType?: string;
+    sourceIntegrationRunId?: string;
+    fullRefresh?: boolean;
+    partitionStart?: string;
+    partitionEnd?: string;
+  }) =>
+    unwrap<DwdModelRun>(http.post(`/modeling/models/${id}/run`, payload || { triggerType: 'MANUAL' })),
+  listModelRuns: (id: string) =>
+    unwrap<DwdModelRun[]>(http.get(`/modeling/models/${id}/runs`)),
+  getModelRun: (runId: string) =>
+    unwrap<DwdModelRun>(http.get(`/modeling/model-runs/${runId}`)),
 };
 
 export const QualityAPI = {

@@ -20,7 +20,7 @@ interface Props {
   flatBody?: boolean;          // 不带默认 padding
 }
 
-const PAD: Record<string, number> = { sm: 12, md: 16, lg: 24 };
+const PAD: Record<string, number> = { sm: 12, md: 16, lg: 24, none: 0 };
 
 export function SectionCard({
   title, subtitle, extra, icon, children,
@@ -28,9 +28,10 @@ export function SectionCard({
 }: Props) {
   const pad = padded === true ? PAD.md : padded === false ? 0 : PAD[padded] ?? PAD.md;
   const showHeader = title || extra || subtitle;
+  const edgeBody = flatBody || pad === 0;
   return (
     <section
-      className="ol-anim-fade"
+      className={`ol-section-card ol-anim-fade${edgeBody ? ' ol-section-card--edge-body' : ''}`}
       style={{
         background: 'var(--ol-card)',
         border: bordered ? '1px solid var(--ol-line-soft)' : 'none',
@@ -68,7 +69,7 @@ export function SectionCard({
           {extra}
         </header>
       )}
-      <div style={{ flex: 1, ...(flatBody ? { ...bodyStyle } : { padding: pad, ...bodyStyle }) }}>{children}</div>
+      <div className="ol-section-card__body" style={{ flex: 1, ...(flatBody ? { ...bodyStyle } : { padding: pad, ...bodyStyle }) }}>{children}</div>
     </section>
   );
 }

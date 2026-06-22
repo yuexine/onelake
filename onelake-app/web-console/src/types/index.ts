@@ -160,6 +160,251 @@ export interface AssetColumn {
   stats?: { nullRate?: number; cardinality?: number; min?: string; max?: string };
 }
 
+export interface AssetDetail {
+  asset: Asset;
+  lineage: AssetLineageSummary;
+  quality: AssetQualitySummary;
+  security: AssetSecuritySummary;
+  subscription: AssetSubscriptionSummary;
+}
+
+export type AssetMaintenanceOperation = 'OPTIMIZE' | 'EXPIRE_SNAPSHOTS' | 'REMOVE_ORPHAN_FILES';
+
+export interface AssetMaintenanceAssessment {
+  assetId: UUID;
+  fqn: string;
+  layer: Asset['layer'];
+  status: 'OK' | 'WARN' | 'CRITICAL';
+  freshnessStatus: 'OK' | 'BREACHED' | 'UNKNOWN';
+  freshnessLagMinutes?: number;
+  freshnessSlaMinutes: number;
+  fileCount?: number;
+  smallFileCount?: number;
+  totalBytes?: number;
+  smallFileThresholdBytes: number;
+  risks: string[];
+  suggestedOperations: AssetMaintenanceOperation[];
+  lastSyncAt?: string;
+  assessedAt: string;
+}
+
+export interface AssetMaintenanceResult {
+  assetId: UUID;
+  fqn: string;
+  operation: AssetMaintenanceOperation;
+  status: 'SUCCEEDED' | 'FAILED';
+  statement: string;
+  message: string;
+  submittedAt: string;
+}
+
+export interface AssetLineageSummary {
+  upstream: AssetLineageEdge[];
+  downstream: AssetLineageEdge[];
+  downstreamFqns: string[];
+}
+
+export interface AssetLineageEdge {
+  upstreamFqn: string;
+  downstreamFqn: string;
+  columns: { from: string; to: string; transform?: string }[];
+  jobRef?: string;
+  syncedAt?: string;
+}
+
+export interface AssetQualitySummary {
+  score?: number;
+  ruleCount: number;
+  failedRuleCount: number;
+  latestCheckedAt?: string;
+  rules: AssetQualityRuleStatus[];
+}
+
+export interface AssetQualityRuleStatus {
+  ruleId: UUID;
+  ruleType: string;
+  targetColumn?: string;
+  severity: string;
+  passed?: boolean;
+  passRate?: number;
+  failedRows?: number;
+  checkedAt?: string;
+}
+
+export interface AssetSecuritySummary {
+  classification?: Classification;
+  sensitiveColumnCount: number;
+  activeGrantCount: number;
+  maskingPolicyCount: number;
+  piiDetectionCount: number;
+}
+
+export interface AssetSubscriptionSummary {
+  apiCount: number;
+  publishedApiCount: number;
+  approvedSubscriptionCount: number;
+  callCount: number;
+  popularity: number;
+}
+
+export interface TableCreateRequest {
+  layer: Asset['layer'];
+  domain: string;
+  name: string;
+  description?: string;
+  columns: TableCreateColumn[];
+  partitionStrategy?: string;
+  format?: 'ICEBERG' | 'PARQUET' | 'ORC';
+  compression?: 'ZSTD' | 'SNAPPY' | 'GZIP';
+  ttlDays?: number;
+  coldStorageAfterDays?: number;
+}
+
+export interface TableCreateColumn {
+  name: string;
+  type: string;
+  primaryKey?: boolean;
+  classification?: Classification;
+  comment?: string;
+}
+
+export interface DwdModelDraftRequest {
+  name: string;
+  domain?: string;
+  sourceFqn: string;
+  targetFqn?: string;
+  materialization?: 'VIEW' | 'TABLE' | 'INCREMENTAL';
+  uniqueKey?: string;
+  incrementalColumn?: string;
+  partitionExpr?: string;
+  columnMappings?: DwdModelColumnMappingRequest[];
+}
+
+export interface DwdModelColumnMappingRequest {
+  source: string;
+  target: string;
+  sourceType?: string;
+  targetType?: string;
+  expression?: string;
+  primaryKey?: boolean;
+  classification?: Classification;
+  piiType?: string;
+  suggestLevel?: Classification;
+}
+
+export interface DataModel {
+  id: UUID;
+  name: string;
+  layer: 'DWD' | string;
+  domain?: string;
+  sourceFqn: string;
+  targetFqn: string;
+  status: 'DRAFT' | 'VALIDATED' | 'PUBLISHED' | string;
+  materialization: 'VIEW' | 'TABLE' | 'INCREMENTAL' | string;
+  uniqueKey?: string;
+  incrementalColumn?: string;
+  partitionExpr?: string;
+  sqlText?: string;
+  compiledSql?: string;
+  dbtModelName?: string;
+  orchestrationDagId?: UUID;
+  dagsterJob?: string;
+  artifactPath?: string;
+  lastRunId?: UUID;
+  pipelineMode?: string;
+  operatorGraphVersion?: number;
+  operatorGraph?: string;
+  resourceGroup?: string;
+  computeProfile?: string;
+  engine?: string;
+  costPolicy?: string;
+  ownerId?: UUID;
+  ownerName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  sources: DataModelSource[];
+  columnMappings: DataModelColumnMapping[];
+}
+
+export interface DataModelSource {
+  id: UUID;
+  sourceFqn: string;
+  sourceType: string;
+  sortNo?: number;
+}
+
+export interface DataModelColumnMapping {
+  id: UUID;
+  source: string;
+  target: string;
+  sourceType?: string;
+  targetType?: string;
+  expression?: string;
+  primaryKey?: boolean;
+  classification?: Classification;
+  piiType?: string;
+  suggestLevel?: Classification;
+  sortNo?: number;
+}
+
+export interface DwdModelValidation {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  compiledSql: string;
+  dependencies: string[];
+  outputColumns: string[];
+}
+
+export interface DwdModelCompileResult {
+  modelId: UUID;
+  dbtModelName: string;
+  materialization: string;
+  sqlPath: string;
+  schemaPath: string;
+  sourcePath: string;
+  orchestrationDagId: UUID;
+  dagsterJob: string;
+  pipelineMode: string;
+  operatorGraphVersion: number;
+  operatorGraph: string;
+  resourceGroup: string;
+  computeProfile: string;
+  engine: string;
+  costPolicy: string;
+  compiledSql: string;
+  dependencies: string[];
+  outputColumns: string[];
+}
+
+export interface DwdModelRun {
+  id: UUID;
+  modelId: UUID;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
+  triggerType: 'MANUAL' | 'ODS_EVENT' | 'BACKFILL' | string;
+  sourceIntegrationRunId?: UUID;
+  orchestrationDagId?: UUID;
+  dagsterRunId?: string;
+  engineRunId?: string;
+  trinoQueryId?: string;
+  resourceGroup?: string;
+  computeProfile?: string;
+  queuedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  errorMsg?: string;
+  rowsRead?: number;
+  rowsWritten?: number;
+  artifactsPath?: string;
+  estimatedScanBytes?: number;
+  actualScanBytes?: number;
+  costEstimate?: number;
+  queueReason?: string;
+  retryCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface SqlColumn {
   name: string;
   type: string;

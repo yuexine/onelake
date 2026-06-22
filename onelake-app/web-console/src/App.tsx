@@ -115,6 +115,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
+  const [menuOpenKeys, setMenuOpenKeys] = useState<string[]>([]);
   const [taskBarCollapsed, setTaskBarCollapsed] = useState(true);
   const [taskActionId, setTaskActionId] = useState<string | null>(null);
   const { message } = AntdApp.useApp();
@@ -170,7 +171,20 @@ export default function App() {
 
   // 顶层菜单（含子菜单时展开根 key）
   const root = '/' + (location.pathname.split('/')[1] || 'dashboard');
-  const openKeys = NAV?.filter((n) => n && typeof n === 'object' && 'key' in n && (n.key as string) === root).map((n) => (n as { key: string }).key);
+  const routeOpenKey = NAV?.find(
+    (n) => n && typeof n === 'object' && 'key' in n && 'children' in n && (n.key as string) === root,
+  );
+  const routeOpenKeyValue = routeOpenKey && typeof routeOpenKey === 'object' && 'key' in routeOpenKey
+    ? String(routeOpenKey.key)
+    : null;
+
+  useEffect(() => {
+    if (collapsed || !routeOpenKeyValue) return;
+    setMenuOpenKeys((keys) => {
+      const nextKeys = Array.from(new Set([...keys, routeOpenKeyValue]));
+      return nextKeys.length === keys.length ? keys : nextKeys;
+    });
+  }, [collapsed, routeOpenKeyValue]);
 
   const handleTaskOpen = (task: RunningTask) => {
     if (task.link) navigate(task.link);
@@ -234,9 +248,10 @@ export default function App() {
         <Menu
           mode="inline"
           selectedKeys={selectedKeys}
-          openKeys={collapsed ? [] : undefined}
+          openKeys={collapsed ? [] : menuOpenKeys}
           style={{ borderRight: 'none', padding: '8px 6px' }}
           items={NAV}
+          onOpenChange={(keys) => setMenuOpenKeys(keys as string[])}
           onClick={({ key }) => navigate(key)}
         />
       </Sider>

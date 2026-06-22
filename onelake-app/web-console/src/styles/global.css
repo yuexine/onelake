@@ -136,6 +136,25 @@ body {
 .ant-table {
   background: transparent;
 }
+.ol-section-card__body {
+  min-width: 0;
+}
+.ol-section-card--edge-body .ant-table-wrapper {
+  padding-inline: var(--ol-space-lg);
+}
+.ol-section-card--edge-body .ant-table-wrapper:first-child {
+  padding-top: var(--ol-space-sm);
+}
+.ol-section-card--edge-body .ant-table-wrapper:last-child {
+  padding-bottom: var(--ol-space-sm);
+}
+.ol-section-card--edge-body .ant-tabs .ant-table-wrapper {
+  padding-inline: 0;
+}
+.ol-section-card--edge-body .ant-table-container,
+.ol-section-card--edge-body .ant-table {
+  border-radius: var(--ol-radius-md);
+}
 .ant-table-thead > tr > th {
   font-weight: 600;
   font-size: 12px;
@@ -302,6 +321,42 @@ body {
 .ol-divider-v   { width: 1px; height: 16px; background: var(--ol-line); margin: 0 var(--ol-space-sm); display: inline-block; vertical-align: middle; }
 .ol-truncate    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ol-clamp-2     { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+.ol-asset-tree .ant-tree-treenode {
+  width: 100%;
+  min-width: 0;
+}
+
+.ol-asset-tree .ant-tree-switcher {
+  flex: 0 0 auto;
+}
+
+.ol-asset-tree .ant-tree-node-content-wrapper {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ol-asset-tree .ant-tree-title {
+  display: block;
+  min-width: 0;
+}
+
+.ol-tree-node-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  vertical-align: top;
+}
+
+.ol-tree-node-title__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .ol-chip {
   display: inline-flex;

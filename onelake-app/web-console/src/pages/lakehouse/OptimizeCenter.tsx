@@ -1,20 +1,88 @@
 /**
  * 存储优化中心（对应原型 §8.3.7 升级版）。
  */
-import { Row, Col, Table, Tag, Space, Button, Progress, message, Typography } from 'antd';
-import { useState } from 'react';
+import { Alert, App as AntdApp, Button, Space, Table, Tag, Typography } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ThunderboltOutlined, FileSearchOutlined, HddOutlined,
   ReloadOutlined, CloudOutlined,
 } from '@ant-design/icons';
-import { optimizeSuggestions } from '../../mock';
-import { PageHeader, SectionCard, StatCard, useAsyncAction, DangerConfirm } from '../../components';
+import { PageHeader, SectionCard, StatCard, StateView, useAsyncAction, DangerConfirm } from '../../components';
+import { CatalogAPI } from '../../api';
+import type { AssetMaintenanceAssessment, AssetMaintenanceOperation } from '../../types';
 
 const { Text } = Typography;
 
+const operationLabels: Record<AssetMaintenanceOperation, string> = {
+  OPTIMIZE: 'Compaction',
+  EXPIRE_SNAPSHOTS: '清理快照',
+  REMOVE_ORPHAN_FILES: '清理孤儿文件',
+};
+
+function fmtBytes(value?: number) {
+  if (value == null) return '-';
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function statusColor(status: string) {
+  if (status === 'OK') return 'success';
+  if (status === 'CRITICAL') return 'error';
+  return 'warning';
+}
+
 export default function OptimizeCenter() {
+  const { message } = AntdApp.useApp();
   const [batchOpen, setBatchOpen] = useState(false);
+  const [assessments, setAssessments] = useState<AssetMaintenanceAssessment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [runningKey, setRunningKey] = useState<string | null>(null);
   const { run, isLoading } = useAsyncAction();
+
+  const loadAssessments = async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      setAssessments(await CatalogAPI.listMaintenance());
+    } catch (e) {
+      setAssessments([]);
+      setLoadError(e instanceof Error ? e.message : '存储优化状态加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAssessments();
+  }, []);
+
+  const stats = useMemo(() => {
+    const pending = assessments.filter((item) => item.status !== 'OK').length;
+    const smallFiles = assessments.reduce((sum, item) => sum + (item.smallFileCount || 0), 0);
+    const totalBytes = assessments.reduce((sum, item) => sum + (item.totalBytes || 0), 0);
+    const freshnessBreached = assessments.filter((item) => item.freshnessStatus === 'BREACHED').length;
+    return { pending, smallFiles, totalBytes, freshnessBreached };
+  }, [assessments]);
+
+  const batchTargets = assessments.filter((item) => item.suggestedOperations.includes('OPTIMIZE'));
+
+  const triggerMaintenance = async (item: AssetMaintenanceAssessment, operation: AssetMaintenanceOperation) => {
+    const key = `${item.assetId}-${operation}`;
+    setRunningKey(key);
+    try {
+      const result = await CatalogAPI.runMaintenance(item.assetId, operation);
+      message.success(result.message);
+      await loadAssessments();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : `${operationLabels[operation]} 失败`);
+    } finally {
+      setRunningKey(null);
+    }
+  };
+
   return (
     <div className="ol-page">
       <PageHeader
@@ -23,100 +91,102 @@ export default function OptimizeCenter() {
         subtitle={<span className="ol-chip">湖仓 · L2-3</span>}
         description="自动检测小文件、孤儿文件、冷数据，给出优化建议与进度跟踪"
         actions={
-          <Button
-            type="primary" icon={<ThunderboltOutlined />}
-            onClick={() => setBatchOpen(true)}
-          >
-            批量优化
-          </Button>
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={loadAssessments} loading={loading}>刷新</Button>
+            <Button
+              type="primary" icon={<ThunderboltOutlined />}
+              disabled={batchTargets.length === 0}
+              loading={isLoading('batch-optimize')}
+              onClick={() => setBatchOpen(true)}
+            >
+              批量 Compaction
+            </Button>
+          </Space>
         }
       />
 
       <div className="ol-grid-stats">
-        <StatCard icon={<ThunderboltOutlined />} intent="warning" label="待优化表" value={18} suffix="张" hint="含小文件/孤儿文件/冷数据" />
-        <StatCard icon={<FileSearchOutlined />} intent="error" label="孤儿文件" value={23000} suffix="个" hint="待清理" />
-        <StatCard icon={<HddOutlined />} intent="info" label="冷数据可下沉" value={1.2} suffix="TB" hint="下沉 Glacier 节省 60%" />
-        <StatCard icon={<ReloadOutlined />} intent="success" label="本周已优化" value={42} suffix="张" hint="释放 320 GB" />
+        <StatCard icon={<ThunderboltOutlined />} intent="warning" label="待优化表" value={stats.pending} suffix="张" hint="DWD 运维评估非 OK" />
+        <StatCard icon={<FileSearchOutlined />} intent="error" label="小文件" value={stats.smallFiles} suffix="个" hint="低于阈值的 Iceberg data files" />
+        <StatCard icon={<HddOutlined />} intent="info" label="DWD 数据量" value={fmtBytes(stats.totalBytes)} hint="来自 Iceberg $files" />
+        <StatCard icon={<CloudOutlined />} intent="success" label="SLA 违约" value={stats.freshnessBreached} suffix="张" hint="DWD 新鲜度超过 1h" />
       </div>
 
-      <SectionCard title="优化建议" icon={<ThunderboltOutlined />} subtitle={`${optimizeSuggestions.length} 条建议`} flatBody>
-        <Table
-          size="middle"
-          rowKey="table"
-          dataSource={optimizeSuggestions}
-          pagination={false}
-          columns={[
-            { title: '表', dataIndex: 'table', render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text> },
-            { title: '小文件数', dataIndex: 'smallFiles', align: 'right' as const, render: (v: number) => v ? (
-              <Tag color="warning" style={{ margin: 0 }}>{v.toLocaleString()}</Tag>
-            ) : '-' },
-            { title: '状态', dataIndex: 'status', render: (s: string) => (
-              <span style={{
-                padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                background: s.includes('冷') ? 'var(--ol-info-soft)' : s.includes('正常') ? 'var(--ol-success-soft)' : 'var(--ol-warning-soft)',
-                color: s.includes('冷') ? '#0369A1' : s.includes('正常') ? 'var(--ol-success)' : '#B45309',
-              }}>{s}</span>
-            ) },
-            { title: '建议', dataIndex: 'suggestion' },
-            { title: '操作', width: 120, render: (_: unknown, r: any) => (
-              <Button type="primary" size="small" ghost
-                loading={isLoading(`opt-${r.table}`)}
-                onClick={() => run(`opt-${r.table}`, async () => {
-                  await new Promise((resolve) => setTimeout(resolve, 600));
-                }, { successMsg: `${r.suggestion} 已触发`, duration: 2.5 })}
-                icon={<ThunderboltOutlined />}>{r.action}</Button>
-            ) },
-          ]}
-        />
-      </SectionCard>
-
-      <SectionCard title="优化任务进度" icon={<ReloadOutlined />}>
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          {[
-            { name: 'dwd_order_df Compaction', percent: 80, color: 'var(--ol-brand)' },
-            { name: 'dwd_user_df 小文件合并', percent: 45, color: 'var(--ol-info)' },
-            { name: '冷数据下沉 Glacier', percent: 30, color: '#7C3AED' },
-          ].map((t) => (
-            <div key={t.name}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                <Space size={8}>
-                  <CloudOutlined style={{ color: t.color }} />
-                  <Text style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</Text>
+      <SectionCard title="优化建议" icon={<ThunderboltOutlined />} subtitle={`${assessments.length} 张 DWD 表`} flatBody>
+        {loadError && <Alert type="error" showIcon message="优化状态加载失败" description={loadError} style={{ marginBottom: 12 }} />}
+        {loading ? (
+          <StateView state="loading" rows={5} />
+        ) : assessments.length === 0 ? (
+          <StateView state="empty" title="暂无 DWD 运维对象" description="当前租户下还没有可评估的 DWD 资产" />
+        ) : (
+          <Table
+            size="middle"
+            rowKey="assetId"
+            dataSource={assessments}
+            pagination={false}
+            columns={[
+              { title: '表', dataIndex: 'fqn', render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text> },
+              { title: '状态', dataIndex: 'status', width: 110, render: (v: string) => <Tag color={statusColor(v)}>{v}</Tag> },
+              { title: '文件', dataIndex: 'fileCount', align: 'right' as const, render: (v?: number) => v ?? '-' },
+              { title: '小文件', dataIndex: 'smallFileCount', align: 'right' as const, render: (v?: number) => v ? <Tag color="warning">{v}</Tag> : (v ?? '-') },
+              { title: '大小', dataIndex: 'totalBytes', align: 'right' as const, render: (v?: number) => fmtBytes(v) },
+              { title: '新鲜度', dataIndex: 'freshnessLagMinutes', render: (_: unknown, r) => (
+                <Space size={6}>
+                  <Tag color={r.freshnessStatus === 'BREACHED' ? 'error' : r.freshnessStatus === 'OK' ? 'success' : 'default'}>
+                    {r.freshnessStatus}
+                  </Tag>
+                  <span className="mono tnum">{r.freshnessLagMinutes ?? '-'} / {r.freshnessSlaMinutes} min</span>
                 </Space>
-                <span className="mono tnum" style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{t.percent}%</span>
-              </div>
-              <Progress
-                percent={t.percent}
-                size="small"
-                strokeColor={t.color}
-                showInfo={false}
-                style={{ margin: 0 }}
-              />
-            </div>
-          ))}
-        </Space>
+              ) },
+              { title: '风险', dataIndex: 'risks', render: (risks: string[]) => risks.length ? risks.map((risk) => <Tag key={risk}>{risk}</Tag>) : '-' },
+              { title: '操作', width: 240, render: (_: unknown, item) => {
+                const operations = item.suggestedOperations.length ? item.suggestedOperations : (['OPTIMIZE'] as AssetMaintenanceOperation[]);
+                return (
+                  <Space wrap>
+                    {operations.map((operation) => (
+                      <Button
+                        key={operation}
+                        size="small"
+                        type={operation === 'OPTIMIZE' ? 'primary' : 'default'}
+                        ghost={operation === 'OPTIMIZE'}
+                        icon={<ThunderboltOutlined />}
+                        loading={runningKey === `${item.assetId}-${operation}`}
+                        onClick={() => triggerMaintenance(item, operation)}
+                      >
+                        {operationLabels[operation]}
+                      </Button>
+                    ))}
+                  </Space>
+                );
+              } },
+            ]}
+          />
+        )}
       </SectionCard>
 
       <DangerConfirm
         open={batchOpen}
-        title={`批量触发 ${optimizeSuggestions.length} 条优化建议`}
-        description="将启动 Compaction / 冷数据下沉 / 排序等操作，过程中可能短暂影响读取性能。"
+        title={`批量触发 ${batchTargets.length} 张 DWD 表 Compaction`}
+        description="将对存在小文件风险的 DWD 表提交 Iceberg optimize 操作。"
         impacts={[
-          { label: '优化任务', value: optimizeSuggestions.length },
-          { label: '影响范围', value: '全租户' },
-          { label: '预计耗时', value: '数十分钟' },
+          { label: '优化任务', value: batchTargets.length },
+          { label: '影响范围', value: 'DWD' },
+          { label: '执行方式', value: 'Trino Iceberg ALTER TABLE EXECUTE' },
         ]}
         impactLevel="MEDIUM"
-        confirmName="批量优化"
+        confirmName="批量 Compaction"
         okText="确认触发"
         okType="primary"
         onCancel={() => setBatchOpen(false)}
         onConfirm={() => run('batch-optimize', async () => {
-          await new Promise((r) => setTimeout(r, 1000));
+          for (const item of batchTargets) {
+            await CatalogAPI.runMaintenance(item.assetId, 'OPTIMIZE');
+          }
           setBatchOpen(false);
+          await loadAssessments();
         }, {
-          successMsg: `已批量触发 ${optimizeSuggestions.length} 条优化建议`,
-          errorMsg: '批量优化触发失败，请重试',
+          successMsg: `已批量触发 ${batchTargets.length} 张表 Compaction`,
+          errorMsg: '批量 Compaction 触发失败，请重试',
           duration: 3,
         })}
       />

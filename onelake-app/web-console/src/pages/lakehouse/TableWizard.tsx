@@ -5,11 +5,11 @@
  *   - 逆向依赖检测（ODS 不能依赖上层）
  *   - PII 自动识别 → 联动密级
  */
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Steps, Button, Space, Form, Input, Select, Radio, InputNumber,
-  Typography, Tag, Alert, Table, Switch, Tooltip, message,
+  Typography, Tag, Alert, Table, Switch, Tooltip,
 } from 'antd';
 import {
   ArrowLeftOutlined, ArrowRightOutlined, CheckOutlined,
@@ -20,7 +20,9 @@ import {
   PageHeader, SectionCard, ClassificationBadge, IntentBadge,
   useAsyncAction, DangerConfirm, layerColor,
 } from '../../components';
-import type { Classification } from '../../types';
+import type { AssetDetail, Classification } from '../../types';
+import { CatalogAPI, ModelingAPI } from '../../api';
+import { normalizeCatalogAsset } from './assetAdapter';
 
 const { Text } = Typography;
 
@@ -30,6 +32,10 @@ interface ColumnDef {
   type: string;
   pk: boolean;
   classification?: Classification;
+  piiType?: string;
+  suggestLevel?: Classification;
+  sourceName?: string;
+  sourceType?: string;
   comment: string;
 }
 
@@ -44,12 +50,45 @@ const GRANULARITIES: Record<string, string> = {
 
 // 命名规范：layer_domain_business_granularity
 const NAME_PATTERN = /^(ods|dwd|dws|ads)_([a-z]+)_([a-z_]+)_(df|di|dms|d|w|m|y|app)$/;
+const DOMAIN_CODE: Record<typeof DOMAINS[number], string> = {
+  交易: 'trade',
+  用户: 'user',
+  风控: 'risk',
+  营销: 'marketing',
+  商品: 'product',
+};
+
+function inferDwdName(sourceFqn: string, domainValue: typeof DOMAINS[number]) {
+  const sourceName = sourceFqn.split('.').pop() || 'detail';
+  const business = sourceName
+    .replace(/^(ods|dwd|dws|ads)_/, '')
+    .replace(/_(df|di|dms|d|w|m|y|app)$/, '')
+    .replace(/[^a-z0-9_]/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase() || 'detail';
+  const domainCode = DOMAIN_CODE[domainValue] || 'trade';
+  return `dwd_${domainCode}_${business}_df`;
+}
+
+function pickPartitionStrategy(columnNames: string[]) {
+  const candidates = ['order_time', 'created_at', 'updated_at', 'event_time', 'dt'];
+  const lower = new Set(columnNames.map((name) => name.toLowerCase()));
+  const found = candidates.find((name) => lower.has(name));
+  return found ? `days(${found})` : 'none';
+}
 
 export default function TableWizard() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const deriveMode = searchParams.get('derive') === 'dwd';
+  const sourceAssetId = searchParams.get('sourceAssetId');
   const { run, isLoading } = useAsyncAction();
   const [step, setStep] = useState(0);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [sourceDetail, setSourceDetail] = useState<AssetDetail>();
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
 
   // step 1 state
   const [layer, setLayer] = useState<typeof LAYERS[number]>('DWD');
@@ -73,6 +112,57 @@ export default function TableWizard() {
   const [ttl, setTtl] = useState(365);
   const [coldStorageAfter, setColdStorageAfter] = useState(90);
 
+  useEffect(() => {
+    if (!deriveMode || !sourceAssetId) return;
+    let cancelled = false;
+    setSourceLoading(true);
+    setSourceError(null);
+    CatalogAPI.getAssetDetail(sourceAssetId)
+      .then((item) => {
+        if (cancelled) return;
+        const normalized = { ...item, asset: normalizeCatalogAsset(item.asset) };
+        setSourceDetail(normalized);
+        if (normalized.asset.layer !== 'ODS') {
+          setSourceError('DWD 草稿只能从 ODS 资产派生');
+          return;
+        }
+        const nextDomain = DOMAINS.includes(normalized.asset.domain as typeof DOMAINS[number])
+          ? normalized.asset.domain as typeof DOMAINS[number]
+          : '交易';
+        const nextColumns = normalized.asset.columns.map((column, index) => ({
+          key: `${column.name}-${index}`,
+          name: column.name,
+          type: column.type || 'STRING',
+          pk: ['id', 'order_id'].includes(column.name.toLowerCase()),
+          classification: column.suggestLevel || column.classification,
+          piiType: column.piiType,
+          suggestLevel: column.suggestLevel,
+          sourceName: column.name,
+          sourceType: column.type || 'STRING',
+          comment: column.description || `源字段 ${column.name}`,
+        }));
+        setLayer('DWD');
+        setDomain(nextDomain);
+        setName(inferDwdName(normalized.asset.fqn, nextDomain));
+        if (nextColumns.length > 0) {
+          setColumns(nextColumns);
+          setPartitionStrategy(pickPartitionStrategy(nextColumns.map((column) => column.name)));
+        }
+        setFormat(normalized.asset.format || 'ICEBERG');
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setSourceError(e instanceof Error ? e.message : '源 ODS 资产加载失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSourceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deriveMode, sourceAssetId]);
+
   // 校验
   const nameValidation = (() => {
     if (!name) return { ok: false, msg: '请输入表名' };
@@ -83,7 +173,7 @@ export default function TableWizard() {
       };
     }
     const [_, nameLayer] = name.match(NAME_PATTERN)!;
-    if (nameLayer.toUpperCase() !== layer.toLowerCase()) {
+    if (nameLayer.toUpperCase() !== layer) {
       return {
         ok: false,
         msg: `表名前缀 ${nameLayer} 与所选分层 ${layer} 不一致`,
@@ -102,6 +192,20 @@ export default function TableWizard() {
     }
     return { ok: true, msg: '✓ 依赖关系合法' };
   })();
+
+  const sourceAsset = sourceDetail?.asset;
+  const actionKey = deriveMode ? 'create-dwd-draft' : 'create-table';
+  const cancelPath = deriveMode && sourceAssetId ? `/lakehouse/tables/${sourceAssetId}` : '/lakehouse/tables';
+  const deriveUnavailable = deriveMode && (!sourceAssetId || sourceLoading || !!sourceError);
+  const partitionOptions = [
+    { label: '按天分区 days(created_at)', value: 'days(created_at)' },
+    { label: '按月分区 months(created_at)', value: 'months(created_at)' },
+    { label: '按小时分区 hours(created_at)', value: 'hours(created_at)' },
+    { label: '不分区（仅小表）', value: 'none' },
+  ];
+  if (partitionStrategy !== 'none' && !partitionOptions.some((item) => item.value === partitionStrategy)) {
+    partitionOptions.unshift({ label: `按天分区 ${partitionStrategy}`, value: partitionStrategy });
+  }
 
   const steps = [
     { title: '选层与域', icon: <ApartmentOutlined /> },
@@ -141,11 +245,13 @@ export default function TableWizard() {
     <div className="ol-page">
       <div className="ol-section" style={{ padding: '14px 20px' }}>
         <Space size={12}>
-          <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/lakehouse/tables')} />
+          <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate(cancelPath)} />
           <div>
-            <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--ol-ink)' }}>建表 / 建模向导</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--ol-ink)' }}>
+              {deriveMode ? 'ODS 派生 DWD 草稿' : '建表 / 建模向导'}
+            </div>
             <div style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
-              四步配置：分层与域 → 字段 → 分区与格式 → 生命周期
+              {deriveMode ? '四步配置：源表确认 → 字段映射 → 分区与格式 → 生命周期' : '四步配置：分层与域 → 字段 → 分区与格式 → 生命周期'}
             </div>
           </div>
         </Space>
@@ -170,9 +276,20 @@ export default function TableWizard() {
         <div key={step} className="ol-anim-fade" style={{ maxWidth: 880 }}>
 
           {step === 0 && (
+            <>
+            {deriveMode && (
+              <Alert
+                type={sourceError ? 'error' : 'info'}
+                showIcon
+                style={{ marginBottom: 16 }}
+                message={sourceError || (sourceLoading
+                  ? '正在加载源 ODS 资产'
+                  : `源 ODS：${sourceAsset?.fqn || sourceAssetId || '-'}`)}
+              />
+            )}
             <Form layout="vertical" requiredMark="optional">
               <Form.Item label="分层" required>
-                <Radio.Group value={layer} onChange={(e) => setLayer(e.target.value)}>
+                <Radio.Group value={layer} disabled={deriveMode} onChange={(e) => setLayer(e.target.value)}>
                   <Space wrap>
                     {LAYERS.map((l) => (
                       <Radio.Button key={l} value={l} style={{
@@ -214,12 +331,15 @@ export default function TableWizard() {
                 />
               )}
             </Form>
+            </>
           )}
 
           {step === 1 && (
             <>
               <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>共 {columns.length} 列，自动识别 PII 字段会自动联动密级</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {deriveMode ? `源字段 ${sourceAsset?.fqn || '-'} → DWD 目标字段，共 ${columns.length} 列` : `共 ${columns.length} 列，自动识别 PII 字段会自动联动密级`}
+                </Text>
                 <Button type="primary" ghost size="small" icon={<PlusOutlined />} onClick={addColumn}>加字段</Button>
               </div>
               <Table
@@ -228,6 +348,12 @@ export default function TableWizard() {
                 dataSource={columns}
                 pagination={false}
                 columns={[
+                  ...(deriveMode ? [{
+                    title: '源字段',
+                    dataIndex: 'sourceName',
+                    width: 180,
+                    render: (v: string, r: ColumnDef) => <Text code style={{ fontSize: 12 }}>{v || r.name}</Text>,
+                  }] : []),
                   { title: '字段名', dataIndex: 'name', width: 200, render: (v: string, r: ColumnDef) => (
                     <Input value={v} size="small" placeholder="field_name"
                       onChange={(e) => {
@@ -297,12 +423,7 @@ export default function TableWizard() {
             <Form layout="vertical">
               <Form.Item label="分区策略" tooltip="隐藏分区可显著提升查询性能">
                 <Select value={partitionStrategy} onChange={setPartitionStrategy} style={{ width: 280 }}
-                  options={[
-                    { label: '按天分区 days(created_at)', value: 'days(created_at)' },
-                    { label: '按月分区 months(created_at)', value: 'months(created_at)' },
-                    { label: '按小时分区 hours(created_at)', value: 'hours(created_at)' },
-                    { label: '不分区（仅小表）', value: 'none' },
-                  ]}
+                  options={partitionOptions}
                 />
               </Form.Item>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -367,7 +488,7 @@ export default function TableWizard() {
         >
           <Space>
             {step === 0 ? (
-              <Button onClick={() => navigate('/lakehouse/tables')}>取消</Button>
+              <Button onClick={() => navigate(cancelPath)}>取消</Button>
             ) : (
               <Button onClick={() => setStep(step - 1)}><ArrowLeftOutlined /> 上一步</Button>
             )}
@@ -375,7 +496,7 @@ export default function TableWizard() {
           <Space>
             {step < 3 && (
               <Button type="primary"
-                disabled={step === 0 && !nameValidation.ok}
+                disabled={(step === 0 && (!nameValidation.ok || deriveUnavailable))}
                 onClick={() => setStep(step + 1)}
               >
                 下一步 <ArrowRightOutlined />
@@ -383,10 +504,11 @@ export default function TableWizard() {
             )}
             {step === 3 && (
               <Button type="primary" icon={<CheckOutlined />}
-                disabled={!nameValidation.ok || !reverseDepCheck.ok}
+                loading={isLoading(actionKey)}
+                disabled={!nameValidation.ok || !reverseDepCheck.ok || deriveUnavailable}
                 onClick={() => setPublishOpen(true)}
               >
-                发布
+                {deriveMode ? '保存草稿' : '发布'}
               </Button>
             )}
           </Space>
@@ -395,27 +517,74 @@ export default function TableWizard() {
 
       <DangerConfirm
         open={publishOpen}
-        title={`发布建表：${name}`}
-        description="建表后将在湖仓注册新表，并自动创建对应 Iceberg 表与分区策略。表创建后字段变更需走 Schema 变更审批。"
+        title={deriveMode ? `保存 DWD 草稿：${name}` : `发布建表：${name}`}
+        description={deriveMode
+          ? '保存后将在建模控制面生成 DWD 模型草稿，记录 ODS 源表、字段映射、分区与编排占位信息。'
+          : '建表后将在湖仓注册新表，并自动创建对应 Iceberg 表与分区策略。表创建后字段变更需走 Schema 变更审批。'}
         impacts={[
           { label: '分层 / 域', value: `${layer} · ${domain} 域` },
+          ...(deriveMode ? [{ label: '源 ODS', value: sourceAsset?.fqn || sourceAssetId || '-' }] : []),
           { label: '字段数', value: columns.length },
           { label: '敏感字段', value: columns.filter((c) => c.classification === 'L3' || c.classification === 'L4').length },
           { label: '总存储', value: `${ttl} 天` },
         ]}
         impactLevel="MEDIUM"
         confirmName={name}
-        okText="确认建表"
+        okText={deriveMode ? '确认保存' : '确认建表'}
         okType="primary"
         onCancel={() => setPublishOpen(false)}
-        onConfirm={() => run('create-table', async () => {
-          await new Promise((r) => setTimeout(r, 800));
+        onConfirm={() => run(actionKey, async () => {
+          if (isLoading(actionKey)) return;
+          if (deriveMode) {
+            if (!sourceAsset) {
+              throw new Error('源 ODS 资产尚未加载完成');
+            }
+            const created = await ModelingAPI.createDwdDraft({
+              name,
+              domain,
+              sourceFqn: sourceAsset.fqn,
+              targetFqn: `dwd.${name}`,
+              materialization: 'TABLE',
+              uniqueKey: columns.find((c) => c.pk)?.name,
+              partitionExpr: partitionStrategy === 'none' ? undefined : partitionStrategy,
+              columnMappings: columns.map((c) => ({
+                source: c.sourceName || c.name,
+                target: c.name,
+                sourceType: c.sourceType || c.type,
+                targetType: c.type,
+                primaryKey: c.pk,
+                classification: c.classification,
+                piiType: c.piiType,
+                suggestLevel: c.suggestLevel || c.classification,
+              })),
+            });
+            setPublishOpen(false);
+            navigate(`/lakehouse/tables/${sourceAsset.id}?dwdModelId=${created.id}`);
+            return;
+          }
+          const created = await CatalogAPI.createTable({
+            layer,
+            domain,
+            name,
+            description: `${domain} 域 ${layer} 表`,
+            columns: columns.map((c) => ({
+              name: c.name,
+              type: c.type,
+              primaryKey: c.pk,
+              classification: c.classification,
+              comment: c.comment,
+            })),
+            partitionStrategy,
+            format,
+            compression,
+            ttlDays: ttl,
+            coldStorageAfterDays: coldStorageAfter,
+          });
           setPublishOpen(false);
-          message.success('建表成功，已注册到目录');
-          navigate('/lakehouse/tables');
+          navigate(`/lakehouse/tables/${created.id}`);
         }, {
-          successMsg: '建表成功，已注册到目录',
-          errorMsg: '建表失败，请检查命名规范与依赖关系',
+          successMsg: deriveMode ? 'DWD 模型草稿已保存' : '建表成功，已注册到目录',
+          errorMsg: (e) => e instanceof Error ? e.message : deriveMode ? 'DWD 草稿保存失败' : '建表失败，请检查 Trino/Iceberg 运行状态',
           duration: 3,
         })}
       />

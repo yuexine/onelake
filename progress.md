@@ -761,6 +761,168 @@
   - `findings.md`
   - `progress.md`
 
+### 阶段 36：SQL 执行前 Catalog 资产授权
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - `ReadOnlySqlValidator` 增加 `referencedTables`，从 SQL AST 提取真实表引用。
+  - `SecurityService` 增加 `requireQueryAccess`，校验当前用户 ACTIVE 且未过期的 `query=true` 授权。
+  - `AccessGrantRepository` 增加按 `tenantId + subjectId + status` 查询。
+  - `SqlWorkbenchService` 在执行、提交和异步 worker 连接 Trino 前校验 Catalog 资产存在与查询授权。
+  - `SqlApiRuntimeService` 在参数绑定后、连接 Trino 前校验 Catalog 资产存在与查询授权。
+  - 补充 common、security、catalog、dataservice 单测。
+- 创建/修改的文件：
+  - `onelake-app/module-common/src/main/java/com/onelake/common/sql/ReadOnlySqlValidator.java`
+  - `onelake-app/module-common/src/test/java/com/onelake/common/sql/ReadOnlySqlValidatorTest.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/repository/AccessGrantRepository.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/SecurityService.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/service/SecurityServiceTest.java`
+  - `onelake-app/module-catalog/pom.xml`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/service/sql/SqlWorkbenchServiceTest.java`
+  - `onelake-app/module-dataservice/pom.xml`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/SqlApiRuntimeService.java`
+  - `onelake-app/module-dataservice/src/test/java/com/onelake/dataservice/service/SqlApiRuntimeServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 37：SQL 结果字段脱敏与密级策略
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 新增 `SqlAssetSecurityService.SqlAssetSecurityContext` 的字段保护上下文，读取 Catalog `asset.columns` 中的 `classification`、`piiType`、`suggestLevel`。
+  - `SecurityService` 增加 `maskRows`，按字段 FQN 查询显式 `MaskingPolicy`，支持 `NULLIFY/HASH/MASK/PARTIAL`。
+  - 未配置显式策略时，PII 字段或 L3/L4 字段默认执行部分脱敏。
+  - join 同名列保守合并候选字段 FQN，显式策略会检查所有候选来源，避免因歧义跳过敏感字段。
+  - `SqlWorkbenchService` 同步执行和异步执行结果返回前调用 `maskRows`。
+  - `SqlApiRuntimeService` 调试结果返回前调用同一套 `maskRows`。
+  - 串行运行 common、security、catalog、dataservice 模块测试，全量跳测安装和 diff 空白检查。
+- 创建/修改的文件：
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlAssetSecurityService.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/service/sql/SqlAssetSecurityServiceTest.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/service/sql/SqlWorkbenchServiceTest.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/SecurityService.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/service/SecurityServiceTest.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/SqlApiRuntimeService.java`
+  - `onelake-app/module-dataservice/src/test/java/com/onelake/dataservice/service/SqlApiRuntimeServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 38：SQL 安全边界前端真实表达
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - SQL 工作台错误 Alert 保留后端真实错误，并为 Catalog 未登记、无授权、只读校验失败补充解释。
+  - SQL 工作台结果区根据返回列名和值形态提示可能存在策略脱敏，避免用户误认为预览是源表明文。
+  - SQL 工作台疑似敏感列列头增加“策略”标记和 tooltip。
+  - SQL 工作台查询历史增加“失败原因”列，直接展示后端记录的错误信息。
+  - API 详情调试区新增可见错误 Alert，透传 `DataserviceAPI.debugApi` 后端错误。
+  - API 详情调试区对疑似敏感/脱敏响应显示安全策略提示。
+  - 运行 `pnpm exec tsc --noEmit`、`pnpm build`、`git diff --check`。
+  - 浏览器验证：登录 `dev/dev123456` 后打开 `/lakehouse/sql`，确认表树真实加载、历史表头包含“失败原因”；打开 `/dataservice/apis/api-1` 调试 tab，确认真实后端 404 错误可见。
+- 创建/修改的文件：
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/pages/dataservice/ApiDetail.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 39：SQL 工作台 P1/P2 效率、估算与联动
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - `SqlWorkbenchService#estimate` 接入 Trino `EXPLAIN (TYPE IO, FORMAT JSON)`，解析扫描量并返回阈值判断；EXPLAIN 不可用时不伪造扫描量。
+  - `SqlExecuteRequest` 增加 `confirmLargeQuery`，同步执行和异步提交都会在后端按扫描阈值二次拦截。
+  - P2 Spark/自动路由保持真实边界：AUTO 明确路由 Trino，Spark batch 未接入可执行 runtime 前不作为可选执行引擎。
+  - 保存查询新增 `PUT /saved-queries/{id}` 与 `DELETE /saved-queries/{id}`；前端支持载入、更新、共享/取消共享、删除。
+  - SQL 工作台表树使用 Catalog `Asset.columns` 渲染字段层级，点击字段插入当前编辑器光标位置。
+  - Monaco 增加 Catalog 表/字段 completion、`select-limit`/`where-date` snippet 和格式化按钮。
+  - 数据服务 API 草稿新增 `requestParams`、`responseSchema` JSONB 字段，API 向导保存 SQL 参数和返回字段 schema。
+  - Orchestration DAG DTO 返回 `definition`，创建 DAG 支持 `enabled=false` 草稿；修复 `definition` jsonb 写入转换。
+  - SQL 工作台“加入流水线”调用真实 DAG API 创建 SQL 节点草稿，并跳转画布展示。
+  - 运行 catalog、dataservice、orchestration 模块测试，全量跳测安装、前端 TypeScript、前端 build。
+  - 浏览器验证：`/lakehouse/sql` 可打开；“加入流水线”创建真实 DAG id `3dc4f1c7-29a8-43ab-996b-c5df5b1195aa` 并跳转画布显示 SQL 工作台查询节点。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/dataservice/V2__api_definition_sql_contract.sql`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/api/sql/SqlWorkbenchController.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/sql/SqlEstimateDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/sql/SqlExecuteRequest.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/service/sql/SqlWorkbenchServiceTest.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/domain/entity/ApiDefinition.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/api/DagController.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/domain/entity/Dag.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/dto/DagDTO.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OrchestrationService.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/dataservice/ApiWizard.tsx`
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/pages/orchestration/DagCanvas.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 40：SQL 工作台 P0.5/P1 生产化收口
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - `SecurityService` 新增 `maskRowsWithNotices`，返回 rows、`maskedColumns`、`securityNotices`；旧 `maskRows` 保持兼容。
+  - `SqlExecuteResultDTO` 与 `SqlApiDebugResultDTO` 增加结构化安全提示字段。
+  - SQL 工作台和 API 详情前端改为消费后端安全提示，不再靠敏感字段正则和 `****` 猜测脱敏。
+  - `SqlAssetSecurityService` 基于 JSqlParser select item 增加简单列别名保护映射，覆盖 `select phone as p`。
+  - SQL estimate 在 EXPLAIN 失败时返回可观测原因，仍不伪造扫描量。
+  - 新增 `CatalogColumnRefreshService` 和 `POST /api/v1/catalog/assets/refresh-columns`，从 Trino `information_schema.columns` 补全字段为空的 Catalog 资产。
+  - SQL 工作台表树加载时发现字段为空会自动尝试字段补全，失败提示真实 warning。
+  - 数据服务新增 AppKey 运行时：`GET /api/v1/dataservice/apis/runtime/**`，校验 AppKey、租户、PUBLISHED 状态、APPROVED 订阅、日配额，并记录调用日志。
+  - `SecurityConfig` 只放行 SQL API runtime 前缀，其余数据服务接口继续要求 JWT。
+  - 新增 `ApiCallLogRepository`、`QuotaUsageRepository`，扩展 API/订阅 Repository 查询方法。
+  - 修复 Flyway 迁移入口：新增 `scripts/flyway-migrate.sh`，`make migrate` 改为按 schema 顺序执行；integration 重复 `V2` 改为幂等 `V6`。
+  - 修复 integration/security seed 迁移中的 psql 变量、非法 demo UUID 和 security V2 重复索引问题。
+  - 检查 Dagster code location，仅存在 schedule reconcile job；未伪装 SQL DAG 已可执行。
+  - 运行 `bash -n onelake-app/scripts/flyway-migrate.sh`，并检查 migration 目录无重复版本。
+  - 运行 `make migrate`，按 schema 顺序完整通过。
+  - 运行 `mvn -q -pl module-security -am test -Djacoco.skip=true`。
+  - 运行 `mvn -q -pl module-catalog -am test -Djacoco.skip=true`。
+  - 运行 `mvn -q -pl module-dataservice -am test -Djacoco.skip=true`。
+  - 运行 `mvn -q install -DskipTests -Djacoco.skip=true`。
+  - 运行 `pnpm exec tsc --noEmit` 与 `pnpm build`。
+  - 运行 `git diff --check`。
+- 创建/修改的文件：
+  - `onelake-app/Makefile`
+  - `onelake-app/scripts/flyway-migrate.sh`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/integration/V6__integration_first_iteration.sql`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/integration/V4__integration_seed.sql`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/security/V2__pii_scan_record.sql`
+  - `onelake-app/bootstrap/src/main/resources/db/migration/security/V3__security_seed.sql`
+  - `onelake-app/module-common/src/main/java/com/onelake/common/security/SecurityConfig.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/api/CatalogController.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/dto/sql/SqlExecuteResultDTO.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/CatalogColumnRefreshService.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlAssetSecurityService.java`
+  - `onelake-app/module-catalog/src/main/java/com/onelake/catalog/service/sql/SqlWorkbenchService.java`
+  - `onelake-app/module-catalog/src/test/java/com/onelake/catalog/service/sql/SqlAssetSecurityServiceTest.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/api/DataServiceController.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/dto/SqlApiDebugResultDTO.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/repository/ApiCallLogRepository.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/repository/ApiDefinitionRepository.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/repository/QuotaUsageRepository.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/repository/SubscriptionRepository.java`
+  - `onelake-app/module-dataservice/src/main/java/com/onelake/dataservice/service/SqlApiRuntimeService.java`
+  - `onelake-app/module-dataservice/src/test/java/com/onelake/dataservice/service/SqlApiRuntimeServiceTest.java`
+  - `onelake-app/module-security/src/main/java/com/onelake/security/service/SecurityService.java`
+  - `onelake-app/module-security/src/test/java/com/onelake/security/service/SecurityServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/dataservice/ApiDetail.tsx`
+  - `onelake-app/web-console/src/pages/lakehouse/SqlWorkbench.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
@@ -779,6 +941,7 @@
 | 2026-06-16 10:40 CST | 发布失败 toast 显示 `Request failed with status code 400` | 1 | 全局 axios 错误拦截器读取 `ApiResponse.message` 后复测通过 |
 | 2026-06-16 CST | 阶段 15 首次后端测试失败：既有测试仍假设 trigger 只 save 一次且 reconcile 只读 `getJobStatus` | 1 | 更新测试契约为 `QUEUED -> RUNNING` 双阶段落库和 `AirbyteJobSnapshot` 回写 |
 | 2026-06-16 CST | dry-run 单测 payload 自带 `airbyteConnectionId` 导致进入 connection 检查并默认失败 | 1 | 改为无 connection、具备动态创建配置的 dry-run 用例 |
+| 2026-06-22 CST | `make migrate` 首次复验失败：integration/security seed 使用 psql `\set`，integration demo UUID 非法，security V2 索引重复 | 3 | 移除 psql 变量、替换合法 UUID、让 seed/索引幂等后 `make migrate` 完整通过 |
 
 ## 五问重启检查
 | 问题 | 答案 |

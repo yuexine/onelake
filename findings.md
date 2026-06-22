@@ -226,6 +226,57 @@
 - SQL API 调试中的 `:param` 命名参数当前可被 JSqlParser 4.9 正常解析；已有缺参数单测仍在 bind 阶段返回业务错误。
 - 本轮仍未实现执行前 Catalog 资产授权，也未接 Security 模块字段脱敏和密级策略；parser 只是 P0 安全网关底座。
 
+## 2026-06-22 SQL 执行前 Catalog 资产授权实施发现
+- `ReadOnlySqlValidator` 已基于 JSqlParser `TablesNamesFinder` 提取 SQL 引用表，CTE 名不会被误当作资产，`SHOW` 无表引用时不触发资产校验。
+- `SecurityService.requireQueryAccess` 会按当前 `TenantContext` 的租户和用户读取 ACTIVE 授权，只接受未过期且 `permissions.query=true` 的授权。
+- SQL 工作台执行链路现在会在连接 Trino 前校验：所有引用表必须存在于当前租户 `catalog.asset.omFqn`，资产 owner 可直接查询，非 owner 必须有 Security 查询授权。
+- SQL API 草稿调试链路也接入同样的 Catalog 资产授权；顺序是只读 parser 校验、命名参数绑定、资产授权、连接 Trino。
+- 未登记资产会返回“SQL 引用资产未登记到 Catalog”或“SQL API 引用资产未登记到 Catalog”；无授权会返回“无权查询资产: <fqn>”。
+- 本轮仍未实现结果返回前字段脱敏和密级策略，也未对 SQL 中字段级引用做列授权；下一步 P0 应接 Security masking/classification。
+
+## 2026-06-22 SQL 结果字段脱敏与密级策略实施发现
+- SQL 工作台和 SQL API 调试现在会复用 Catalog 资产校验阶段生成的字段保护上下文，按结果列名匹配 `asset.columns` 元数据。
+- 字段保护上下文会读取 `classification`、`piiType`、`suggestLevel`，并把字段映射为 `<assetFqn>.<columnName>`，用于查询 Security 脱敏策略。
+- `SecurityService.maskRows` 返回新的行集合，不修改原始 ResultSet 读取结果；显式策略支持 `NULLIFY`、`HASH`、`MASK`、`PARTIAL`，按 priority 取最高优先级。
+- 当前角色范围通过 Spring Security authorities 判断，`roleScope` 可写 `ADMIN` 或 `ROLE_ADMIN`；没有登录鉴权对象时仅无角色范围策略生效。
+- 未配置显式策略时，PII 字段或 L3/L4 字段默认部分脱敏，例如手机号形态会返回 `138****8000`。
+- 多表 join 出现同名字段时不再跳过保护，而是合并所有候选字段 FQN；任一候选字段有显式策略即可命中，任一来源敏感也会触发默认脱敏。
+- 当前脱敏匹配依赖 ResultSet column label 与 Catalog 字段名一致；如果用户通过 `select phone as p` 重命名敏感列，后续仍需基于 SQL select item/lineage 做 alias 回溯。
+- 当前还没有列级授权、行级策略、下载/导出脱敏、外部 API 网关运行态 AppKey 调用脱敏；这些仍属于 P1/P2 安全闭环扩展。
+
+## 2026-06-22 SQL 安全边界前端真实表达实施发现
+- SQL 工作台现在不会只显示泛化失败，而是保留后端错误文案；对“未登记到 Catalog”“无权查询资产”“只读/多语句校验失败”补充用户可理解的边界说明。
+- 查询历史表已增加“失败原因”，失败状态可以看到后端记录的错误，便于区分 SQL 语法、安全授权和 Trino 执行失败。
+- 结果区和 API 调试区的脱敏提示当前是前端推断式：基于敏感字段名或返回值中出现 `****`/hash 形态触发；后续更稳妥的契约是后端 DTO 显式返回 `maskedColumns` 或 `securityNotices`。
+- API 详情调试区现在把 `DataserviceAPI.debugApi` 的真实错误展示成页面内 Alert，并同步给 message；本地 mock API `api-1` 没有真实后端记录时会显示“接口不存在: api/v1/dataservice/apis/api-1/debug”。
+- 浏览器验证已登录本地 `dev` 用户，`/lakehouse/sql` 表树可加载真实资产，`/dataservice/apis/api-1` 可进入调试 tab；控制台中观察到的 404 属于点击 mock API 调试真实后端时的预期错误。
+
+## 2026-06-22 SQL 工作台 P1/P2 效率、估算与联动实施发现
+- `estimate` 现在会尝试执行 Trino `EXPLAIN (TYPE IO, FORMAT JSON)` 并解析 `estimatedSizeInBytes` 等字段；如果本地 Trino 或 EXPLAIN 不可用，返回空扫描量并明确“不伪造”，执行阶段仍采集真实 query stats。
+- 资源控制采用前后端双层：前端在估算超阈时弹出确认，后端在 `execute/submit` 前用同一阈值二次校验 `confirmLargeQuery`，防止绕过 UI。
+- P2 Spark/自动路由没有伪装完成：AUTO 继续路由 Trino；Spark batch 在缺少可执行 runtime、长查询结果落盘、成本/血缘回写前不重新暴露为可执行选项。
+- SQL 工作台表树已支持 Catalog 字段层级；本地当前两张真实资产没有返回 columns，所以浏览器只显示表节点，这是数据状态而非前端 fallback。
+- Monaco completion 现在来自真实 Catalog 表/字段，加上 `select-limit`、`where-date` 常用片段；格式化按钮只是轻量 SQL 换行格式化，不是完整 SQL formatter。
+- 保存查询从“按名称 upsert”扩展为可显式更新、删除和切换共享范围；删除按租户查询记录后执行，避免跨租户删除。
+- API 草稿新增 `requestParams` 和 `responseSchema` JSONB 字段，API 向导会保存从 SQL `:param` 提取的参数和工作台传来的返回字段。
+- SQL 工作台加入流水线现在创建真实 `orchestration.dag` 草稿，`enabled=false`，definition 中包含 SQL 节点；画布可从路由 state 或后端 DAG definition 初始化显示 SQL。
+- 本轮修复了 `orchestration.dag.definition` jsonb 写入映射，否则本地创建 DAG 会因 varchar 写入 jsonb 返回 500。
+- 本地浏览器验证过程中发现库缺少旧迁移 `catalog/V6__sql_query_history_trino_query_id.sql` 和本轮 `dataservice/V2__api_definition_sql_contract.sql`，已手工应用以恢复运行态；后续仍需修复 Flyway 多目录迁移命令，避免手工补 DDL。
+
+## 2026-06-22 SQL 工作台 P0.5/P1 生产化收口发现
+- SQL 工作台和 SQL API 调试结果已从“前端猜测脱敏”改为后端明确返回 `maskedColumns` 与 `securityNotices`；前端仅根据这两个字段展示策略提示和列头标记。
+- `SecurityService.maskRowsWithNotices` 会返回脱敏后的 rows、实际处理列和安全提示；旧 `maskRows` 保留为兼容入口。
+- 简单列别名保护已接入 JSqlParser：`select phone as p from ods.orders` 会让结果列 `p` 继承 `phone` 的 Catalog/Security 保护；函数、表达式和复杂血缘仍不硬猜。
+- `estimate` 的 Trino EXPLAIN 失败现在会在 message 中带上真实原因，例如 Trino 不可达、SHOW/DESCRIBE 不产生扫描量或 EXPLAIN JSON 缺少可解析字段；扫描量仍保持空值而不是 mock。
+- Catalog 新增 `POST /api/v1/catalog/assets/refresh-columns`，会对当前租户字段为空的 TABLE/VIEW 资产查询 Trino `information_schema.columns` 并回写 `asset.columns`，同时保留已有 PII/密级标注。
+- SQL 工作台表树加载真实 Catalog 后，如果发现资产缺字段，会自动尝试调用字段补全接口并重新读取；补全失败显示真实 warning，不回退 mock。
+- 数据服务新增已发布 SQL API 的运行时入口 `GET /api/v1/dataservice/apis/runtime/**`：使用 `X-App-Key` 找到租户，再按 `tenantId + apiPath` 定位 `PUBLISHED` API，校验 APPROVED 订阅、日配额，执行参数绑定 SQL，并复用 Catalog 授权与结果脱敏。
+- API 运行时调用会写入 `dataservice.api_call_log`，日配额使用 `dataservice.quota_usage`；当前是最小控制面网关，尚未接 APISIX consumer 动态注册、secret_hash 签名校验和 IP 白名单。
+- Flyway 迁移从旧的“一次扫描所有 schema 目录”改为 `scripts/flyway-migrate.sh` 按 schema 顺序执行；integration 目录重复 `V2` 已消除，first iteration 迁移改为幂等 `V6`。
+- 实际执行 `make migrate` 后继续发现并修复了 seed 迁移兼容问题：integration/security seed 中的 psql `\set` 变量不被 Flyway 支持，integration demo sync_task/run 使用了非法 UUID，security V2 索引重复缺少 `IF NOT EXISTS`。
+- 修复后 `make migrate` 已按 common、integration、orchestration、catalog、modeling、quality、security、dataservice 顺序完整执行通过。
+- 检查 Dagster code location 后确认当前只有 `onelake_sync_task_schedule_reconcile`，没有真实 SQL node job；因此本轮没有把 SQL 工作台 DAG 草稿伪装成可执行流水线，后续需要先补 Dagster SQL job 与 run config 契约。
+
 ## 技术决策
 | 决策 | 理由 |
 |------|------|

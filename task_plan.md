@@ -298,6 +298,56 @@
 - [x] 补充 common 单测并运行 common、catalog、dataservice 模块测试
 - **状态：** complete
 
+### 阶段 36：SQL 执行前 Catalog 资产授权
+- [x] `ReadOnlySqlValidator` 增加 SQL AST 表引用提取能力
+- [x] Security 授权服务增加 `requireQueryAccess`，按租户、用户、ACTIVE 状态、过期时间和 `query=true` 校验
+- [x] SQL 工作台执行/提交/异步 worker 在连接 Trino 前校验引用资产已登记到 Catalog
+- [x] SQL 工作台对非资产 owner 的表要求 Security 查询授权
+- [x] SQL API 草稿调试在参数绑定后、连接 Trino 前执行同样的 Catalog 资产授权校验
+- [x] 补充 common、security、catalog、dataservice 单测
+- **状态：** complete
+
+### 阶段 37：SQL 结果字段脱敏与密级策略
+- [x] Catalog 资产校验服务返回字段保护上下文，基于 `asset.columns` 中的 `classification`、`piiType` 和 `suggestLevel` 识别敏感字段
+- [x] Security 服务增加 `maskRows`，返回结果前按字段 FQN 解析显式脱敏策略
+- [x] 无显式策略时，对 PII 字段或 L3/L4 字段默认执行部分脱敏，避免敏感数据明文返回
+- [x] 多表 join 同名字段保守合并候选字段 FQN，只要任一来源敏感或配置策略就执行保护
+- [x] SQL 工作台同步执行、异步执行和 SQL API 草稿调试均在结果返回前调用脱敏
+- [x] 补充 security、catalog、dataservice 单测，运行全量跳测编译和 diff 空白检查
+- **状态：** complete
+
+### 阶段 38：SQL 安全边界前端真实表达
+- [x] SQL 工作台错误 Alert 透传后端真实错误，并对 Catalog 未登记、无查询授权、只读校验失败给出边界说明
+- [x] SQL 工作台结果区在疑似敏感/脱敏字段返回时提示“预览结果不代表源表明文”
+- [x] SQL 工作台结果列对疑似敏感列增加轻量策略标记和 tooltip
+- [x] SQL 工作台查询历史增加失败原因列，保留后端错误信息
+- [x] API 详情调试区透传真实后端调试错误，并在疑似脱敏响应时显示安全策略提示
+- [x] 保持现有页面布局和视觉风格不变，运行前端 TypeScript、build、浏览器冒烟和 diff 空白检查
+- **状态：** complete
+
+### 阶段 39：SQL 工作台 P1/P2 效率、估算与联动
+- [x] SQL estimate 接入 Trino `EXPLAIN (TYPE IO, FORMAT JSON)`，可解析扫描量时返回真实 `estimatedScanBytes`
+- [x] 执行/提交前按扫描阈值做资源控制，超阈需前端确认并由后端二次校验
+- [x] AUTO 路由继续真实指向 Trino，Spark batch 明确为尚未接入可执行运行时，不重新暴露假 Spark 执行
+- [x] 表树支持 table/columns 两级，点击字段插入 SQL；Catalog 无字段时保持真实空子树
+- [x] Monaco 增加 Catalog 表/字段 completion、常用 snippet 和格式化按钮
+- [x] 保存查询增加显式更新、共享切换和删除接口及前端操作
+- [x] API 草稿保存 `requestParams` 与 `responseSchema`，形成参数化 SQL 契约
+- [x] SQL 工作台“加入流水线”创建真实 orchestration DAG 草稿，并在画布显示 SQL 节点
+- [x] 修复 orchestration DAG `definition` jsonb 写入映射
+- **状态：** complete
+
+### 阶段 40：SQL 工作台 P0.5/P1 生产化收口
+- [x] SQL 工作台与 SQL API 调试结果 DTO 增加 `maskedColumns`、`securityNotices`，前端改为读取后端明确安全提示
+- [x] Security 脱敏服务返回结构化脱敏结果，保留原 `maskRows` 兼容调用
+- [x] 基于 JSqlParser 增加简单列别名保护映射，覆盖 `select phone as p` 这类确定来源别名
+- [x] SQL estimate 失败时返回 EXPLAIN 不可用/不可解析的真实原因，不伪造扫描量
+- [x] Catalog 增加从 Trino `information_schema.columns` 刷新缺失字段的后端能力，前端表树加载时自动尝试补全字段
+- [x] 数据服务增加已发布 SQL API 的 AppKey 运行时入口，校验 AppKey、租户、订阅、状态、日配额并写调用日志
+- [x] 修复 Flyway 迁移入口：按 schema 顺序迁移，integration 重复 V2 改为幂等 V6
+- [x] 跑通 security/catalog/dataservice 模块测试、全量后端跳测编译、前端 TypeScript、前端 build、diff 空白检查
+- **状态：** complete
+
 ## 关键问题
 1. 当前 `module-integration` 已落库和暴露的能力边界是什么？
 2. 前端数据集成页面实际需要哪些后端接口和异步状态？
@@ -323,7 +373,7 @@
 | 刷新模块后启动失败：两个 `Alert` Entity 默认实体名冲突 | 1 | 为通用告警和质量告警实体分别指定 `CommonAlert`、`QualityAlert` |
 | 发布按钮创建任务阶段 500：`field_mapping` 是 `jsonb` 但 Hibernate 以 varchar 写入 | 1 | 为 `SyncTask.fieldMapping` 增加 `@ColumnTransformer(write = "?::jsonb")` |
 | Outbox 定时任务报 `aggregate_type` 缺列 | 1 | 本地执行 `common/V4__outbox_stream_contract.sql` 补齐缺失列 |
-| `make migrate` 因 Flyway 多目录重复 `V1` 与环境变量解析问题不可用 | 2 | 本轮仅手工应用缺失的 common V4 DDL，后续需单独修复迁移命令 |
+| `make migrate` 因 Flyway 多目录重复 `V1`、环境变量解析、seed 语法/UUID/索引幂等问题不可用 | 5 | 阶段 40 改为按 schema 顺序迁移，修复 integration/security seed 和重复索引，`make migrate` 已完整通过 |
 | 异步消费 `integration.sync_task.created` 时审计日志 `tenant_id` 为空 | 1 | 在 `RedisStreamDomainEventConsumer` 中按事件 envelope 临时恢复 `TenantContext` |
 | 安全模块 PII 扫描表缺失且 V3 种子 UUID 非法 | 1 | 应用 security V2，并将 V3 种子 UUID 改为合法 UUID 后重新执行 |
 | 发布失败 toast 显示 `Request failed with status code 400` | 1 | 前端全局 axios 错误拦截器提取 `error.response.data.message` 后显示后端业务文案 |

@@ -12,5 +12,3 @@ onelake:
       schema: "{{ env_var('DBT_SCHEMA', 'ods') }}"
       threads: 4
       http_scheme: http
-      session_properties:
-        iceberg.compression-codec: ZSTD

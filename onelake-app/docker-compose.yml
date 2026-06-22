@@ -169,6 +169,14 @@ services:
       DAGSTER_POSTGRES_PASSWORD: dagster123
       DAGSTER_POSTGRES_DB: dagster
       DAGSTER_CURRENT_IMAGE: onelake-dagster-user-code:latest
+      ONELAKE_DBT_PROJECT_DIR: /opt/onelake/dbt
+      ONELAKE_DBT_PROFILES_DIR: /opt/onelake/dbt
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+      TRINO_USER: onelake
+      DBT_SCHEMA: ods
+    volumes:
+      - ./dbt:/opt/onelake/dbt
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
       interval: 5s

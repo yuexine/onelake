@@ -27,6 +27,9 @@ public class WebClientConfig {
     @Value("${onelake.webclient.read-timeout-ms:15000}")
     private int readTimeoutMs;
 
+    @Value("${onelake.webclient.max-in-memory-size-bytes:8388608}")
+    private int maxInMemorySizeBytes;
+
     @Bean
     WebClient.Builder webClientBuilder() {
         HttpClient http = HttpClient.create()
@@ -35,6 +38,7 @@ public class WebClientConfig {
                 .addHandlerLast(new ReadTimeoutHandler(readTimeoutMs, TimeUnit.MILLISECONDS))
                 .addHandlerLast(new WriteTimeoutHandler(readTimeoutMs, TimeUnit.MILLISECONDS)));
         return WebClient.builder()
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(maxInMemorySizeBytes))
             .clientConnector(new ReactorClientHttpConnector(http))
             .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
             .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE);

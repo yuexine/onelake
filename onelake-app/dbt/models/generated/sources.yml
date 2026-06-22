@@ -1,0 +1,21 @@
+version: 2
+sources:
+  - name: ods
+    schema: ods
+    description: "OneLake generated source for ods.ods_codex_orders"
+    tables:
+      - name: ods_codex_orders
+        description: "Generated from Catalog asset ods.ods_codex_orders"
+        columns:
+          - name: order_id
+            description: "Source column order_id (BIGINT)"
+          - name: user_id
+            description: "Source column user_id (BIGINT)"
+          - name: amount
+            description: "Source column amount (DECIMAL(18,2))"
+          - name: status
+            description: "Source column status (VARCHAR)"
+          - name: order_time
+            description: "Source column order_time (TIMESTAMP)"
+          - name: updated_at
+            description: "Source column updated_at (TIMESTAMP)"

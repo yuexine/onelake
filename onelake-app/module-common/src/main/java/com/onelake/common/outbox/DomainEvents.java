@@ -24,6 +24,8 @@ public final class DomainEvents {
     public static final String CATALOG_LINEAGE_UPDATED = "catalog.lineage.updated";
 
     public static final String MODELING_MODEL_PUBLISHED = "modeling.model.published";
+    public static final String MODELING_MODEL_LOADED = "modeling.model.loaded";
+    public static final String MODELING_MODEL_FAILED = "modeling.model.failed";
     public static final String MODELING_TRANSFORM_COMPLETED = "modeling.transform.completed";
 
     public static final String QUALITY_CHECK_COMPLETED = "quality.check.completed";

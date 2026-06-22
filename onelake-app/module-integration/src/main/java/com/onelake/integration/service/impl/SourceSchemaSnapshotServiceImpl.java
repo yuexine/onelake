@@ -15,6 +15,7 @@ import com.onelake.integration.dto.DiscoveredColumnDTO;
 import com.onelake.integration.dto.SourceSchemaSnapshotDTO;
 import com.onelake.integration.repository.DataSourceRepository;
 import com.onelake.integration.repository.SourceSchemaSnapshotRepository;
+import com.onelake.integration.repository.SyncTaskRepository;
 import com.onelake.integration.service.SourceSchemaSnapshotService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.RequiredArgsConstructor;
@@ -46,6 +47,7 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
 
     private final SourceSchemaSnapshotRepository repo;
     private final DataSourceRepository dataSourceRepo;
+    private final SyncTaskRepository syncTaskRepo;
     private final DatabaseDiscoveryClient discoveryClient;
     private final AuditLogger audit;
     private final OutboxPublisher outbox;
@@ -200,13 +202,24 @@ public class SourceSchemaSnapshotServiceImpl implements SourceSchemaSnapshotServ
             return;
         }
         List<ColumnChange> changes = diffColumns(previous.getColumns(), current.getColumns());
+        List<String> targetTables = syncTaskRepo.findBySourceId(sourceId).stream()
+            .filter(task -> objectName.equals(task.getSourceTable()))
+            .map(task -> task.getTargetTable())
+            .distinct()
+            .toList();
         outbox.publish(DomainEvents.INTEGRATION_SCHEMA_DRIFT, current.getId().toString(), Map.of(
+            "tenantId", nullToEmpty(TenantContext.getTenantId()),
             "sourceId", sourceId.toString(),
             "object", objectName,
+            "targetTables", targetTables,
             "previousChecksum", previous.getChecksum(),
             "currentChecksum", current.getChecksum(),
             "changes", changes
         ));
+    }
+
+    private String nullToEmpty(Object value) {
+        return value == null ? "" : value.toString();
     }
 
     private java.util.Map<String, String> columnsToMap(JsonNode arr) {

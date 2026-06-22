@@ -1,7 +1,7 @@
 COMPOSE := docker compose -f docker-compose.yml
 MVN := mvn -q
 
-.PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down down ps logs seed migrate backend debug frontend dev clean help fmt
+.PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down down ps logs seed migrate ods-dwd-baseline ods-dwd-verify backend debug frontend dev clean help fmt
 
 help:
 	@echo "OneLake 控制面 - 本地开发 Makefile"
@@ -15,6 +15,8 @@ help:
 	@echo "  make logs        跟踪数据面日志"
 	@echo "  make seed        初始化 Keycloak realm + MinIO bucket"
 	@echo "  make migrate     Flyway 按 schema 顺序执行迁移"
+	@echo "  make ods-dwd-baseline  准备 ODS->DWD 样例源表与 Iceberg ODS 表"
+	@echo "  make ods-dwd-verify    验证 ODS->DWD 样例基线"
 	@echo "  make backend     本地运行控制面（带 devtools 热重载）"
 	@echo "  make debug       以 JDWP 5005 端口启动，供 IDE 远程挂载"
 	@echo "  make frontend    启动前端 + 自动生成 API SDK"
@@ -66,10 +68,18 @@ seed:
 migrate:
 	MVN="$(MVN)" ./scripts/flyway-migrate.sh
 
+ods-dwd-baseline:
+	./scripts/ods-dwd-baseline.sh all
+
+ods-dwd-verify:
+	./scripts/ods-dwd-baseline.sh verify
+
 backend:
+	$(MVN) -pl bootstrap -am compile
 	$(MVN) -pl bootstrap spring-boot:run
 
 debug:
+	$(MVN) -pl bootstrap -am compile
 	$(MVN) -pl bootstrap spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
 
 frontend:

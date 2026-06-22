@@ -1,4 +1,12 @@
 {# 增量过滤宏：基于水位列增量抽取 - 对应功能清单 L1-1.2.2 #}
+{% macro generate_schema_name(custom_schema_name, node) -%}
+  {%- if custom_schema_name is none -%}
+    {{ target.schema }}
+  {%- else -%}
+    {{ custom_schema_name | trim }}
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro incremental_filter(watermark_col, lookback_minutes=5) %}
   WHERE {{ watermark_col }} > '{{ var("last_watermark") }}'
     AND {{ watermark_col }} <= now() - interval '{{ lookback_minutes }}' minute

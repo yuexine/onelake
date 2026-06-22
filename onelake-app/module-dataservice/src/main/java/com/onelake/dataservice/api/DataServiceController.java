@@ -5,11 +5,15 @@ import com.onelake.dataservice.domain.entity.ApiDefinition;
 import com.onelake.dataservice.dto.SqlApiDebugResultDTO;
 import com.onelake.dataservice.service.DataServicePublisher;
 import com.onelake.dataservice.service.SqlApiRuntimeService;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -54,6 +58,17 @@ public class DataServiceController {
         return ApiResponse.ok(runtimeService.debug(id, params));
     }
 
+    @GetMapping("/runtime/**")
+    public ApiResponse<SqlApiDebugResultDTO> invoke(
+        HttpServletRequest request,
+        @RequestParam Map<String, String> params,
+        @RequestHeader(value = "X-App-Key", required = false) String appKey
+    ) {
+        String apiPath = runtimePath(request);
+        Map<String, Object> values = new LinkedHashMap<>(params);
+        return ApiResponse.ok(runtimeService.invoke(apiPath, values, appKey, request.getRemoteAddr()));
+    }
+
     @GetMapping
     public ApiResponse<List<ApiDefinition>> list() {
         return ApiResponse.ok(publisher.list());
@@ -64,5 +79,12 @@ public class DataServiceController {
     public ApiResponse<Void> offline(@PathVariable UUID id) {
         publisher.offline(id);
         return ApiResponse.ok();
+    }
+
+    private String runtimePath(HttpServletRequest request) {
+        String prefix = request.getContextPath() + "/api/v1/dataservice/apis/runtime";
+        String uri = request.getRequestURI();
+        String path = uri.startsWith(prefix) ? uri.substring(prefix.length()) : "";
+        return URLDecoder.decode(path, StandardCharsets.UTF_8);
     }
 }

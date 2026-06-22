@@ -3,7 +3,7 @@
  * Tab: 文档 / 版本 / 调试 / 订阅方 / 监控
  */
 import { useParams, useNavigate } from 'react-router-dom';
-import { Tabs, Tag, Space, Button, Typography, Input, Table, message } from 'antd';
+import { Alert, Tabs, Tag, Space, Button, Typography, Input, Table, message } from 'antd';
 import { CloudOutlined, ApiOutlined, FileTextOutlined, CodeOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { apis, apiVersions, subscriptions, apiCallTrend } from '../../mock';
@@ -14,13 +14,33 @@ import ReactECharts from 'echarts-for-react';
 
 const { Text } = Typography;
 
+interface ApiDebugResult {
+  columns: { name: string; type: string }[];
+  rows: Record<string, unknown>[];
+  durationMs: number;
+  rowCount: number;
+  truncated: boolean;
+  maskedColumns?: string[];
+  securityNotices?: string[];
+}
+
+function hasProtectedDebugResult(result?: ApiDebugResult) {
+  if (!result) return false;
+  return Boolean(result.securityNotices?.length || result.maskedColumns?.length);
+}
+
+function errorMessage(e: unknown) {
+  return e instanceof Error && e.message ? e.message : '调试失败，请检查 API 是否可用';
+}
+
 export default function ApiDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [api, setApi] = useState<ApiDefinition>(apis.find((a) => a.id === id) || apis[0]);
   const [offlineOpen, setOfflineOpen] = useState(false);
   const [debugParams, setDebugParams] = useState('{\n  "order_id": 1001\n}');
-  const [debugResult, setDebugResult] = useState<Record<string, unknown>>();
+  const [debugResult, setDebugResult] = useState<ApiDebugResult>();
+  const [debugError, setDebugError] = useState<string>();
   const { run, isLoading } = useAsyncAction();
 
   useEffect(() => {
@@ -81,23 +101,47 @@ export default function ApiDetail() {
             type="primary"
             loading={isLoading('debug-send')}
             onClick={() => run('debug-send', async () => {
+              setDebugError(undefined);
               let params: Record<string, unknown>;
               try {
                 params = debugParams.trim() ? JSON.parse(debugParams) : {};
               } catch {
-                throw new Error('请求参数不是合法 JSON');
+                const error = '请求参数不是合法 JSON';
+                setDebugError(error);
+                throw new Error(error);
               }
-              const data = await DataserviceAPI.debugApi(api.id, params);
-              setDebugResult(data);
-              return data;
+              try {
+                const data = await DataserviceAPI.debugApi(api.id, params);
+                setDebugResult(data);
+                return data;
+              } catch (e) {
+                setDebugError(errorMessage(e));
+                throw e;
+              }
             }, {
               successMsg: '200 OK · 响应正常',
-              errorMsg: '调试失败，请检查 API 是否可用',
+              errorMsg: errorMessage,
               duration: 2.5,
             })}
           >
             发送
           </Button>
+          {debugError && (
+            <Alert
+              type="error"
+              showIcon
+              style={{ borderRadius: 6 }}
+              message={<span style={{ fontSize: 13 }}>{debugError}</span>}
+            />
+          )}
+          {hasProtectedDebugResult(debugResult) && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ borderRadius: 6 }}
+              message={<span style={{ fontSize: 13 }}>{debugResult?.securityNotices?.join('；') || '调试响应已按 Catalog 密级与 Security 脱敏策略处理。'}</span>}
+            />
+          )}
         </Space>
         <pre style={{
           marginTop: 12, padding: 14, background: 'var(--ol-ink)', color: 'var(--ol-card)',

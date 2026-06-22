@@ -3,10 +3,20 @@ package com.onelake.dataservice.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.sql.ReadOnlySqlValidator;
+import com.onelake.catalog.service.sql.SqlAssetSecurityService;
+import com.onelake.dataservice.domain.entity.ApiCallLog;
 import com.onelake.dataservice.domain.entity.ApiDefinition;
+import com.onelake.dataservice.domain.entity.AppKey;
+import com.onelake.dataservice.domain.entity.QuotaUsage;
 import com.onelake.dataservice.dto.SqlApiDebugResultDTO;
+import com.onelake.dataservice.repository.ApiCallLogRepository;
 import com.onelake.dataservice.repository.ApiDefinitionRepository;
+import com.onelake.dataservice.repository.AppKeyRepository;
+import com.onelake.dataservice.repository.QuotaUsageRepository;
+import com.onelake.dataservice.repository.SubscriptionRepository;
+import com.onelake.security.service.SecurityService;
 import lombok.RequiredArgsConstructor;
+import net.sf.jsqlparser.statement.Statement;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -16,6 +26,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +39,12 @@ import java.util.UUID;
 public class SqlApiRuntimeService {
 
     private final ApiDefinitionRepository apiRepo;
+    private final AppKeyRepository appKeyRepo;
+    private final SubscriptionRepository subscriptionRepo;
+    private final ApiCallLogRepository callLogRepo;
+    private final QuotaUsageRepository quotaUsageRepo;
+    private final SqlAssetSecurityService assetSecurityService;
+    private final SecurityService securityService;
 
     @Value("${onelake.dataplane.trino.jdbc-url:jdbc:trino://localhost:18080/iceberg}")
     private String trinoJdbcUrl;
@@ -50,10 +67,56 @@ public class SqlApiRuntimeService {
         String sql = normalizeSql(api.getSelectSql());
         validateReadOnly(sql);
         BoundSql boundSql = bindNamedParams(sql, params == null ? Map.of() : params);
-        return execute(boundSql);
+        SqlAssetSecurityService.SqlAssetSecurityContext securityContext = validateCatalogAccess(sql);
+        return execute(boundSql, securityContext);
     }
 
-    private SqlApiDebugResultDTO execute(BoundSql boundSql) {
+    public SqlApiDebugResultDTO invoke(
+        String apiPath,
+        Map<String, Object> params,
+        String appKeyValue,
+        String requestIp
+    ) {
+        Instant started = Instant.now();
+        ApiDefinition api = null;
+        AppKey appKey = null;
+        int statusCode = 200;
+        try {
+            appKey = loadActiveAppKey(appKeyValue);
+            TenantContext.setTenantId(appKey.getTenantId());
+            TenantContext.setUserId(appKey.getOwnerId());
+            TenantContext.setUsername("appkey:" + appKey.getAppKey());
+            api = apiRepo.findByTenantIdAndApiPath(appKey.getTenantId(), normalizeApiPath(apiPath))
+                .orElseThrow(() -> new BizException(40400, "API 不存在"));
+            if (!"PUBLISHED".equalsIgnoreCase(api.getStatus())) {
+                throw new BizException(40400, "API 未发布或已下线");
+            }
+            requireSubscription(appKey, api);
+            reserveQuota(appKey, api);
+
+            String sql = normalizeSql(api.getSelectSql());
+            validateReadOnly(sql);
+            BoundSql boundSql = bindNamedParams(sql, params == null ? Map.of() : params);
+            SqlAssetSecurityService.SqlAssetSecurityContext securityContext = validateCatalogAccess(sql);
+            return execute(boundSql, securityContext);
+        } catch (BizException e) {
+            statusCode = statusCodeOf(e.getCode());
+            throw e;
+        } catch (Exception e) {
+            statusCode = 500;
+            throw new BizException(50052, "SQL API 调用失败: " + rootMessage(e), e);
+        } finally {
+            if (api != null) {
+                recordCall(api, appKey, statusCode, started, requestIp);
+            }
+            TenantContext.clear();
+        }
+    }
+
+    private SqlApiDebugResultDTO execute(
+        BoundSql boundSql,
+        SqlAssetSecurityService.SqlAssetSecurityContext securityContext
+    ) {
         Instant started = Instant.now();
         try {
             Class.forName("io.trino.jdbc.TrinoDriver");
@@ -90,12 +153,18 @@ public class SqlApiRuntimeService {
                         }
                         rows.add(row);
                     }
+                    SecurityService.MaskingResult masking = securityService.maskRowsWithNotices(
+                        rows,
+                        securityContext.protectionsByColumn()
+                    );
                     return new SqlApiDebugResultDTO(
                         columns,
-                        rows,
+                        masking.rows(),
                         Duration.between(started, Instant.now()).toMillis(),
-                        rows.size(),
-                        truncated
+                        masking.rows().size(),
+                        truncated,
+                        masking.maskedColumns(),
+                        masking.securityNotices()
                     );
                 }
             }
@@ -147,13 +216,87 @@ public class SqlApiRuntimeService {
         return new BoundSql(prepared.toString(), values);
     }
 
-    private void validateReadOnly(String sql) {
-        ReadOnlySqlValidator.requireSingleReadOnlyStatement(
+    private Statement validateReadOnly(String sql) {
+        return ReadOnlySqlValidator.requireSingleReadOnlyStatement(
             sql,
             40050,
             "SQL API 调试仅允许只读查询",
             "SQL API 调试不允许一次提交多条语句"
         );
+    }
+
+    private SqlAssetSecurityService.SqlAssetSecurityContext validateCatalogAccess(String sql) {
+        return assetSecurityService.validateAndPlan(sql, 40351, "SQL API 引用资产未登记到 Catalog: ");
+    }
+
+    private AppKey loadActiveAppKey(String appKeyValue) {
+        if (appKeyValue == null || appKeyValue.isBlank()) {
+            throw new BizException(40100, "缺少 X-App-Key");
+        }
+        AppKey appKey = appKeyRepo.findByAppKey(appKeyValue)
+            .orElseThrow(() -> new BizException(40100, "AppKey 不存在或已失效"));
+        if (!"ACTIVE".equalsIgnoreCase(appKey.getStatus())
+            || (appKey.getExpiresAt() != null && appKey.getExpiresAt().isBefore(Instant.now()))) {
+            throw new BizException(40100, "AppKey 不存在或已失效");
+        }
+        return appKey;
+    }
+
+    private void requireSubscription(AppKey appKey, ApiDefinition api) {
+        boolean approved = subscriptionRepo.findByApiIdAndAppKeyIdAndStatus(api.getId(), appKey.getId(), "APPROVED")
+            .stream()
+            .findFirst()
+            .isPresent();
+        if (!approved) {
+            throw new BizException(40352, "AppKey 未订阅或未获批该 API");
+        }
+    }
+
+    private void reserveQuota(AppKey appKey, ApiDefinition api) {
+        if (appKey.getQuotaDaily() == null || appKey.getQuotaDaily() <= 0) {
+            return;
+        }
+        LocalDate today = LocalDate.now();
+        QuotaUsage usage = quotaUsageRepo.findByAppKeyIdAndApiIdAndStatDate(appKey.getId(), api.getId(), today)
+            .orElseGet(() -> {
+                QuotaUsage next = new QuotaUsage();
+                next.setAppKeyId(appKey.getId());
+                next.setApiId(api.getId());
+                next.setStatDate(today);
+                next.setCallCount(0L);
+                return next;
+            });
+        if (usage.getCallCount() >= appKey.getQuotaDaily()) {
+            throw new BizException(42900, "API 日配额已用尽");
+        }
+        usage.setCallCount(usage.getCallCount() + 1);
+        quotaUsageRepo.save(usage);
+    }
+
+    private void recordCall(ApiDefinition api, AppKey appKey, int statusCode, Instant started, String requestIp) {
+        ApiCallLog log = new ApiCallLog();
+        log.setApiId(api.getId());
+        log.setAppKeyId(appKey == null ? null : appKey.getId());
+        log.setStatusCode(statusCode);
+        log.setLatencyMs((int) Duration.between(started, Instant.now()).toMillis());
+        log.setRequestIp(requestIp);
+        callLogRepo.save(log);
+    }
+
+    private String normalizeApiPath(String apiPath) {
+        if (apiPath == null || apiPath.isBlank()) {
+            throw new BizException(40400, "API 不存在");
+        }
+        return apiPath.startsWith("/") ? apiPath : "/" + apiPath;
+    }
+
+    private int statusCodeOf(int code) {
+        if (code >= 50000) return 500;
+        if (code == 40400) return 404;
+        if (code == 40100) return 401;
+        if (code >= 40300 && code < 40400) return 403;
+        if (code == 42900) return 429;
+        return 400;
     }
 
     private String normalizeSql(String sql) {

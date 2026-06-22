@@ -3,6 +3,7 @@ package com.onelake.dataservice.domain.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -18,6 +19,12 @@ public class ApiDefinition {
     @Column(nullable = false) private String viewName;
     @Column(nullable = false, columnDefinition = "text") private String selectSql;
     private String sourceFqn;
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String requestParams;
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String responseSchema;
     private Integer qpsLimit = 20;
     @Column(nullable = false, length = 16) private String status = "DRAFT";   // DRAFT/PUBLISHED/DEPRECATED/OFFLINE
     private Integer currentVersion = 1;

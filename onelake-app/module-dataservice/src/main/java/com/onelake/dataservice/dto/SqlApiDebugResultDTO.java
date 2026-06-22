@@ -8,7 +8,9 @@ public record SqlApiDebugResultDTO(
     List<Map<String, Object>> rows,
     long durationMs,
     long rowCount,
-    boolean truncated
+    boolean truncated,
+    List<String> maskedColumns,
+    List<String> securityNotices
 ) {
     public record SqlApiColumnDTO(
         String name,

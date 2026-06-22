@@ -6,19 +6,23 @@
 import { Row, Col, Space, Button, Select, Tag, Typography, Drawer, Form, Input, Alert, Modal, message } from 'antd';
 import {
   PlayCircleOutlined, SaveOutlined, CheckCircleOutlined, WarningOutlined,
-  DatabaseOutlined, FilterOutlined, LockOutlined, ExportOutlined, AppstoreOutlined,
+  DatabaseOutlined, FilterOutlined, LockOutlined, ExportOutlined, AppstoreOutlined, CodeOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useLocation, useParams } from 'react-router-dom';
 import { ClassificationBadge, PageHeader, SectionCard } from '../../components';
+import { OrchestrationAPI } from '../../api';
+import type { Dag } from '../../types';
 
 const { Text, Title } = Typography;
 
-interface Node { id: string; type: string; name: string; x: number; y: number; }
+interface Node { id: string; type: string; name: string; x: number; y: number; sql?: string; engine?: string; }
 interface Edge { from: string; to: string; valid: boolean; }
 
 const OPERATORS = [
   { category: '输入', items: [
     { key: 'input-table', icon: <DatabaseOutlined />, name: '表/查询', color: '#1677ff' },
+    { key: 'SQL', icon: <CodeOutlined />, name: 'SQL 节点', color: '#0f766e' },
   ]},
   { category: '治理', items: [
     { key: 'clean', icon: <FilterOutlined />, name: '清洗去重', color: '#52c41a' },
@@ -47,17 +51,57 @@ const INITIAL_EDGES: Edge[] = [
 ];
 
 export default function DagCanvas() {
+  const { id } = useParams();
+  const location = useLocation();
+  const incoming = (location.state || {}) as { dag?: Dag; sql?: string };
   const [env, setEnv] = useState('dev');
-  const [nodes] = useState<Node[]>(INITIAL_NODES);
-  const [edges] = useState<Edge[]>(INITIAL_EDGES);
+  const [pipelineName, setPipelineName] = useState('order_pipeline');
+  const [nodes, setNodes] = useState<Node[]>(INITIAL_NODES);
+  const [edges, setEdges] = useState<Edge[]>(INITIAL_EDGES);
   const [selected, setSelected] = useState<Node | null>(INITIAL_NODES[2]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [versionOpen, setVersionOpen] = useState(false);
   const [validateOpen, setValidateOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
 
+  useEffect(() => {
+    const applyDag = (dag: Dag) => {
+      setPipelineName(dag.name);
+      const definition = Array.isArray(dag.definition) ? { nodes: dag.definition, edges: dag.edges || [] } : dag.definition;
+      const draftNodes = ((definition.nodes || []) as any[]).map((node, index) => ({
+        id: String(node.id || `n-${index + 1}`),
+        type: String(node.type || 'SQL'),
+        name: String(node.name || node.type || `节点 ${index + 1}`),
+        sql: typeof node.sql === 'string' ? node.sql : undefined,
+        engine: typeof node.engine === 'string' ? node.engine : undefined,
+        x: typeof node.x === 'number' ? node.x : 80 + index * 220,
+        y: typeof node.y === 'number' ? node.y : 100,
+      }));
+      const draftEdges = ((definition.edges || []) as any[]).map((edge) => ({
+        from: String(edge.from || edge.source),
+        to: String(edge.to || edge.target),
+        valid: edge.valid !== false,
+      }));
+      if (draftNodes.length > 0) {
+        setNodes(draftNodes);
+        setEdges(draftEdges);
+        setSelected(draftNodes[0]);
+      }
+    };
+    if (incoming.dag) {
+      applyDag(incoming.dag);
+      return;
+    }
+    if (id && id !== 'new' && !id.startsWith('p-')) {
+      OrchestrationAPI.getDag(id)
+        .then(applyDag)
+        .catch((e) => message.error(e.message || '流水线草稿加载失败'));
+    }
+  }, [id, incoming.dag]);
+
   const renderNode = (n: Node) => {
-    const op = OPERATORS.flatMap((c) => c.items).find((i) => i.key === n.type)!;
+    const op = OPERATORS.flatMap((c) => c.items).find((i) => i.key === n.type)
+      || { key: n.type, icon: <CodeOutlined />, name: n.type, color: '#0f766e' };
     const isMask = n.type === 'mask';
     return (
       <div key={n.id} onClick={() => setSelected(n)}
@@ -83,8 +127,10 @@ export default function DagCanvas() {
         title={
           <Space size={8}>
             流水线
-            <Text code style={{ fontSize: 14 }}>order_pipeline</Text>
-            <Tag color="processing" style={{ margin: 0 }}>已配置</Tag>
+            <Text code style={{ fontSize: 14 }}>{pipelineName}</Text>
+            <Tag color={pipelineName.startsWith('sql_workbench_') ? 'default' : 'processing'} style={{ margin: 0 }}>
+              {pipelineName.startsWith('sql_workbench_') ? '草稿' : '已配置'}
+            </Tag>
           </Space>
         }
         subtitle={<span className="ol-chip">编排 · L4-4.1</span>}
@@ -169,8 +215,14 @@ export default function DagCanvas() {
                 </div>
                 <div>
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>字段</Text>
-                  <div style={{ marginTop: 4 }}><Text code style={{ fontSize: 12 }}>phone</Text></div>
+                  <div style={{ marginTop: 4 }}><Text code style={{ fontSize: 12 }}>{selected.type === 'SQL' ? selected.engine || 'TRINO' : 'phone'}</Text></div>
                 </div>
+                {selected.sql && (
+                  <div>
+                    <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>SQL</Text>
+                    <pre style={{ marginTop: 4, padding: 10, background: 'var(--ol-fill-soft)', borderRadius: 6, fontSize: 12, whiteSpace: 'pre-wrap' }}>{selected.sql}</pre>
+                  </div>
+                )}
                 <div>
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>算法</Text>
                   <div style={{ marginTop: 4 }}>

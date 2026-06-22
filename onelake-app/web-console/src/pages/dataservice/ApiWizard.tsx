@@ -66,6 +66,8 @@ export default function ApiWizard() {
       viewName: draft.viewName,
       selectSql: draft.selectSql,
       sourceFqn: draft.sourceFqn,
+      requestParams: JSON.stringify(params),
+      responseSchema: JSON.stringify(returns),
       qpsLimit: draft.qpsLimit,
     })
       .then((api) => {

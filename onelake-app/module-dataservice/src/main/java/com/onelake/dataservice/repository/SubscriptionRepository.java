@@ -10,4 +10,5 @@ public interface SubscriptionRepository extends JpaRepository<Subscription, UUID
     List<Subscription> findByApiId(UUID apiId);
     List<Subscription> findBySubscriberId(UUID subscriberId);
     List<Subscription> findByApiIdAndStatus(UUID apiId, String status);
+    List<Subscription> findByApiIdAndAppKeyIdAndStatus(UUID apiId, UUID appKeyId, String status);
 }

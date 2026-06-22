@@ -34,13 +34,25 @@ public class OrchestrationService {
     @Transactional
     public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
                             String scheduleCron) {
+        return createDag(name, dagsterJob, definition, scheduleCron, true);
+    }
+
+    @Transactional
+    public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
+                            String scheduleCron, Boolean enabled) {
+        if (name == null || name.isBlank()) {
+            throw new BizException(40020, "DAG 名称不能为空");
+        }
+        if (definition == null || definition.isEmpty()) {
+            throw new BizException(40021, "DAG definition 不能为空");
+        }
         Dag dag = new Dag();
         dag.setTenantId(TenantContext.getTenantId());
-        dag.setName(name);
-        dag.setDagsterJob(dagsterJob);
+        dag.setName(name.trim());
+        dag.setDagsterJob(dagsterJob == null || dagsterJob.isBlank() ? "sql_workbench_draft" : dagsterJob);
         dag.setDefinition(JsonUtil.toJson(definition));
         dag.setScheduleCron(scheduleCron);
-        dag.setEnabled(true);
+        dag.setEnabled(enabled == null ? true : enabled);
         dag.setVersion(1);
         dagRepo.save(dag);
         return toDTO(dag);
@@ -86,7 +98,11 @@ public class OrchestrationService {
     }
 
     private DagDTO toDTO(Dag d) {
-        return new DagDTO(d.getId(), d.getName(), d.getDagsterJob(),
+        @SuppressWarnings("unchecked")
+        Map<String, Object> definition = d.getDefinition() == null || d.getDefinition().isBlank()
+            ? Map.of()
+            : JsonUtil.fromJson(d.getDefinition(), Map.class);
+        return new DagDTO(d.getId(), d.getName(), d.getDagsterJob(), definition,
             d.getScheduleCron(), d.getEnabled(), d.getVersion(), d.getCreatedAt());
     }
 }

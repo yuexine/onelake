@@ -30,7 +30,8 @@ public class DagController {
         @SuppressWarnings("unchecked")
         Map<String, Object> definition = (Map<String, Object>) body.get("definition");
         String cron = (String) body.get("scheduleCron");
-        return ApiResponse.ok(service.createDag(name, dagsterJob, definition, cron));
+        Boolean enabled = body.get("enabled") instanceof Boolean value ? value : null;
+        return ApiResponse.ok(service.createDag(name, dagsterJob, definition, cron, enabled));
     }
 
     @GetMapping("/{id}")

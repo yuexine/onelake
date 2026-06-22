@@ -6,6 +6,8 @@ import com.onelake.common.exception.BizException;
 import com.onelake.integration.client.FileCollectorClient;
 import com.onelake.integration.domain.entity.FileSource;
 import com.onelake.integration.repository.FileSourceRepository;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -16,11 +18,16 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/v1/integration/file-sources")
 @RequiredArgsConstructor
+@Tag(name = "文件采集源", description = "文件采集源和源端文件列表接口，对应文件采集页面。")
 public class FileSourceController {
 
     private final FileSourceRepository repo;
     private final FileCollectorClient fileClient;
 
+    @Operation(
+        summary = "创建文件采集源",
+        description = "用途：保存 SFTP/MinIO 等文件源配置。前端对接：当前 IntegrationAPI 未封装创建入口，FileCollect 目前只读取已配置源。"
+    )
     @PostMapping
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<FileSource> create(@RequestBody Map<String, String> body) {
@@ -39,6 +46,10 @@ public class FileSourceController {
         return ApiResponse.ok(fs);
     }
 
+    @Operation(
+        summary = "查询文件采集源列表",
+        description = "用途：返回当前租户的文件源清单。前端对接：IntegrationAPI.listFileSources，由 FileCollect 页面加载源列表。"
+    )
     @GetMapping
     public ApiResponse<List<FileSource>> list() {
         UUID tid = TenantContext.getTenantId();
@@ -47,6 +58,10 @@ public class FileSourceController {
     }
 
     /** 列出文件源下的文件（含大小、ETag、去重标记）。 */
+    @Operation(
+        summary = "列出文件源下文件",
+        description = "用途：展示文件源 bucket/prefix 下的文件、大小、ETag 和去重信息。前端对接：IntegrationAPI.listFileSourceFiles，由 FileCollect 页面在选中源后调用。"
+    )
     @GetMapping("/{id}/files")
     public ApiResponse<List<Map<String, Object>>> listFiles(@PathVariable UUID id) {
         FileSource fs = repo.findById(id)

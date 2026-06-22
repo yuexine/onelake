@@ -5,6 +5,8 @@ import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.service.OrchestrationService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -18,10 +20,15 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1/orchestration/dags")
 @RequiredArgsConstructor
+@Tag(name = "任务编排", description = "DAG 创建、查询、触发和运行历史接口。")
 public class DagController {
 
     private final OrchestrationService service;
 
+    @Operation(
+        summary = "创建 DAG",
+        description = "用途：保存编排画布或 SQL 工作台生成的 Dagster 作业定义。前端对接：OrchestrationAPI.createDag，由 SqlWorkbench 发布到编排和 DagCanvas 扩展流程使用。"
+    )
     @PostMapping
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<DagDTO> create(@RequestBody Map<String, Object> body) {
@@ -34,16 +41,28 @@ public class DagController {
         return ApiResponse.ok(service.createDag(name, dagsterJob, definition, cron, enabled));
     }
 
+    @Operation(
+        summary = "获取 DAG 详情",
+        description = "用途：读取 DAG 定义、作业名和调度配置。前端对接：OrchestrationAPI.getDag，由 DagCanvas 详情页加载。"
+    )
     @GetMapping("/{id}")
     public ApiResponse<DagDTO> get(@PathVariable UUID id) {
         return ApiResponse.ok(service.getDag(id));
     }
 
+    @Operation(
+        summary = "查询 DAG 列表",
+        description = "用途：返回当前租户下的编排 DAG。前端对接：OrchestrationAPI.listDags 已封装，当前页面未直接调用。"
+    )
     @GetMapping
     public ApiResponse<List<DagDTO>> list() {
         return ApiResponse.ok(service.listDags());
     }
 
+    @Operation(
+        summary = "触发 DAG 运行",
+        description = "用途：按触发类型启动一次 Dagster 作业运行。前端对接：OrchestrationAPI.triggerDag 已封装，当前页面未直接调用。"
+    )
     @PostMapping("/{id}/run")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Map<String, Object>> run(@PathVariable UUID id,
@@ -52,6 +71,10 @@ public class DagController {
         return ApiResponse.ok(Map.of("runId", runId));
     }
 
+    @Operation(
+        summary = "分页查询 DAG 运行历史",
+        description = "用途：返回 DAG 运行实例列表。前端对接：当前 OrchestrationAPI 未封装，供后续 RunInstances 页面接入。"
+    )
     @GetMapping("/{id}/runs")
     public ApiResponse<Page<JobRunDTO>> runs(@PathVariable UUID id,
                                              @RequestParam(defaultValue = "0") int page,

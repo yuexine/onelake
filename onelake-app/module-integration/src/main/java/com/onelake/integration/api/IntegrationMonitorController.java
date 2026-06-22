@@ -6,6 +6,8 @@ import com.onelake.common.exception.BizException;
 import com.onelake.integration.domain.entity.SyncRun;
 import com.onelake.integration.domain.enums.RunStatus;
 import com.onelake.integration.repository.SyncRunRepository;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -23,11 +25,16 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/v1/integration/monitor")
 @RequiredArgsConstructor
+@Tag(name = "采集监控", description = "基于 sync_run 聚合采集健康、失败排行等监控数据。")
 public class IntegrationMonitorController {
 
     private final SyncRunRepository runRepo;
 
     /** 健康汇总：成功率 / 运行中 / 失败 / 平均时延。 */
+    @Operation(
+        summary = "查询采集健康汇总",
+        description = "用途：聚合最近 N 小时采集总数、成功率、失败数、运行中数和平均耗时。前端对接：IntegrationAPI.healthSummary，由 CollectMonitor 页面使用。"
+    )
     @GetMapping("/health-summary")
     public ApiResponse<Map<String, Object>> healthSummary(
             @RequestParam(defaultValue = "24") int hours) {
@@ -60,6 +67,10 @@ public class IntegrationMonitorController {
     }
 
     /** 失败 Top：按 taskId 聚合最近 N 小时的失败次数。 */
+    @Operation(
+        summary = "查询失败任务排行",
+        description = "用途：按任务聚合最近 N 小时失败次数。前端对接：IntegrationAPI.failTop，由 CollectMonitor 页面展示失败 Top 列表。"
+    )
     @GetMapping("/fail-top")
     public ApiResponse<List<Map<String, Object>>> failTop(
             @RequestParam(defaultValue = "24") int hours,

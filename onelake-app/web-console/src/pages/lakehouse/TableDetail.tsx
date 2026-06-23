@@ -4,7 +4,7 @@
  */
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
-import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, HistoryOutlined, PlayCircleOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, HistoryOutlined, PlayCircleOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { DetailPageLayout, ClassificationBadge, SectionCard, StateView } from '../../components';
 import type { AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, DataModel, DwdModelRun } from '../../types';
@@ -564,7 +564,7 @@ export default function TableDetail() {
         title={asset.fqn}
         subtitle={<Space size={8}><Tag color="blue">{asset.layer}</Tag><Text type="secondary" style={{ fontSize: 13 }}>{asset.description}</Text></Space>}
         status={<ClassificationBadge level={asset.classification} />}
-        breadcrumb={[{ path: '/lakehouse/tables', label: '分层浏览' }, { label: asset.fqn }]}
+        breadcrumb={[{ path: '/lakehouse/tables', label: '分层表管理' }, { label: asset.fqn }]}
         tabs={tabs}
         actions={[
           ...(asset.layer === 'ODS' ? [
@@ -586,6 +586,7 @@ export default function TableDetail() {
           >
             立即优化
           </Button>,
+          <Button key="profile" icon={<DatabaseOutlined />} onClick={() => navigate(`/catalog/assets/${asset.id}?from=lakehouse`)}>资产画像</Button>,
           <Button key="api" onClick={() => navigate(`/dataservice/apis/new?sourceFqn=${asset.fqn}`)}>发布为 API</Button>,
           <Button key="add-col" disabled title="暂未接入 Schema 变更接口">加列</Button>,
           <Button key="del" danger disabled title="暂未接入 Schema 变更审批接口">删除字段</Button>,

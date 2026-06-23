@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button, App as AntdApp } from 'antd';
+import { Layout, Menu, Dropdown, Avatar, Badge, Space, Typography, Tooltip, Button, App as AntdApp, type MenuProps } from 'antd';
 import {
   ClusterOutlined, SearchOutlined,
   SafetyOutlined, LockOutlined, CloudOutlined, DashboardOutlined,
@@ -30,7 +30,7 @@ import type { RunningTask } from './types';
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
-const NAV: import('antd').MenuProps['items'] = [
+const NAV: MenuProps['items'] = [
   { key: '/dashboard', icon: <DashboardOutlined />, label: '工作台' },
   { key: '/integration', icon: <CloudSyncOutlined />, label: '数据集成',
     children: [
@@ -44,7 +44,7 @@ const NAV: import('antd').MenuProps['items'] = [
   },
   { key: '/lakehouse', icon: <ClusterOutlined />, label: '湖仓与建模',
     children: [
-      { key: '/lakehouse/tables', label: '分层表浏览' },
+      { key: '/lakehouse/tables', label: '分层表管理' },
       { key: '/lakehouse/sql', label: 'SQL 工作台' },
       { key: '/lakehouse/optimize', label: '存储优化' },
     ],
@@ -65,7 +65,7 @@ const NAV: import('antd').MenuProps['items'] = [
   },
   { key: '/catalog', icon: <FileSearchOutlined />, label: '数据目录与血缘',
     children: [
-      { key: '/catalog/search', label: '搜索浏览' },
+      { key: '/catalog/search', label: '资产发现' },
       { key: '/catalog/glossary', label: '业务术语表' },
       { key: '/catalog/lineage', label: '血缘图' },
     ],
@@ -104,6 +104,28 @@ const NAV: import('antd').MenuProps['items'] = [
     ],
   },
 ];
+
+function collectMenuKeys(items: MenuProps['items']): string[] {
+  return (items ?? []).flatMap((item) => {
+    if (!item || typeof item !== 'object' || !('key' in item)) {
+      return [];
+    }
+
+    const key = String(item.key);
+    const children =
+      'children' in item && Array.isArray(item.children)
+        ? collectMenuKeys(item.children as MenuProps['items'])
+        : [];
+
+    return [key, ...children];
+  });
+}
+
+const MENU_KEYS = collectMenuKeys(NAV);
+
+function matchesMenuPath(pathname: string, menuKey: string) {
+  return pathname === menuKey || pathname.startsWith(`${menuKey}/`);
+}
 
 const ROLE_LABELS: Record<string, string> = {
   ADMIN: 'ADMIN',
@@ -157,16 +179,11 @@ export default function App() {
     }
   }, [setUser]);
 
-  // 当前选中菜单（最长前缀匹配）
+  // 当前选中菜单（按菜单 key 做最长前缀匹配，详情页仍高亮所属功能入口）
   const selectedKeys = (() => {
-    const paths = location.pathname.split('/').filter(Boolean);
-    const candidates: string[] = [];
-    let cur = '';
-    for (const p of paths) {
-      cur += '/' + p;
-      candidates.push(cur);
-    }
-    return candidates.length > 0 ? [candidates[candidates.length - 1]] : ['/dashboard'];
+    const pathname = location.pathname === '/' ? '/dashboard' : location.pathname;
+    const selected = MENU_KEYS.filter((key) => matchesMenuPath(pathname, key)).sort((a, b) => b.length - a.length)[0];
+    return [selected ?? '/dashboard'];
   })();
 
   // 顶层菜单（含子菜单时展开根 key）

@@ -1206,6 +1206,25 @@
 | 2026-06-22 CST | 后端重启后仍返回旧 OpenAPI schema，compile 响应缺少 2.5 字段 | 2 | 发现 `make backend` 只运行 bootstrap，没有先编译 reactor 依赖；改为先 `mvn -pl bootstrap -am compile`，再运行 bootstrap |
 | 2026-06-22 CST | 通知 API 验证脚本用 Python 从环境变量读取 `TOKEN`，但 shell 未 export，导致清理 SQL receiver_id 为空 | 1 | 改为直接用接口返回的通知 id 验证已读；后续脚本用 stdin 或显式 export 传 token |
 
+### 阶段 70：资产发现与湖仓分层表管理边界升级
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取现有规划文件、工作区状态、`CatalogSearch`、`Tables`、`AssetDetail`、`TableDetail`、导航和资产 DTO。
+  - 确认本轮只做前端 P0 边界升级与文档同步，不改后端接口，不回滚既有编排/建模改动。
+- 核对：
+  - 当前工作区已有未提交改动，涉及 `App.tsx`、`api/index.ts`、`TableDetail.tsx`、`types/index.ts` 等；本轮将在当前内容上叠加，避免覆盖用户/前序改动。
+  - 第 1 项导航与页面定位命名已完成：`/catalog/search` 菜单为“资产发现”，页头为“数据资产发现”；`/lakehouse/tables` 菜单为“分层表管理”，页头为“湖仓分层表”。
+  - 核对命令：`rg -n "搜索浏览|资产发现|分层表浏览|分层表管理|湖仓分层表|数据资产发现" ...`、`pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false`，均通过。
+  - 第 2 项资产发现页差异化已完成：筛选改为资产类型/业务标签/密级/质量/负责人/湖仓分层，结果区改为“可用资产”，主操作为申请访问与资产画像，热门资产按订阅/访问热度排序。
+  - 核对命令：`pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过；`rg` 确认旧硬编码负责人、旧搜索结果文案和警示符号未残留在 `CatalogSearch.tsx`。
+  - 第 3 项分层表管理页差异化已完成：接入 `CatalogAPI.listMaintenance()` 作为维护状态增强，左侧分层树显示待治理数，表格改为表格式/分区、规模、质量门禁、同步维护和治理动作。
+  - 核对命令：`pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过；`rg` 确认旧“资产清单/搜表名字段”入口文案已替换。
+  - 第 4 项详情页互跳已完成：资产详情面包屑改为“资产发现”并新增“湖仓治理详情”；表详情面包屑改为“分层表管理”并新增“资产画像”。
+  - 核对命令：`pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过；`rg` 确认 `from=catalog/from=lakehouse` 互跳入口已存在。
+  - 第 5 项文档与总体验证已完成：`docs/FRONTEND_VERIFICATION.md` 同步资产发现、分层表管理和详情页互跳连续性。
+  - 核对命令：`pnpm --dir onelake-app/web-console build` 通过；`git diff --check` 通过；浏览器访问 `/catalog/search` 显示“数据资产发现/发现筛选/可用资产/热门资产”，访问 `/lakehouse/tables` 显示“湖仓分层表/表治理清单/贴源 ODS/明细 DWD/治理详情”。
+
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|

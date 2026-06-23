@@ -89,7 +89,7 @@
 
 | 线框 | 文件 | 状态 |
 |------|------|------|
-| §8.3.1 分层表浏览（层级树 + 表列表 + 域筛选） | `Tables.tsx` | ✅ |
+| §8.3.1 分层表管理（层级树 + 表治理清单 + 域筛选 + 维护状态） | `Tables.tsx` | ✅ |
 | §8.3.2 表详情（Schema/快照/优化/血缘/权限 Tab） | `TableDetail.tsx` | ✅ |
 | §8.3.3 SQL 工作台（Monaco + 表树 + 结果 + 另存/发布/加入流水线） | `SqlWorkbench.tsx` | ✅ |
 | §8.3.7 存储优化中心（小文件/孤儿/冷数据 + 进度） | `OptimizeCenter.tsx` | ✅ |
@@ -123,7 +123,7 @@
 
 | 线框 | 文件 | 状态 |
 |------|------|------|
-| §8.6.1 资产搜索浏览（分面筛选 + 卡片结果 + 猜你需要） | `CatalogSearch.tsx` | ✅ |
+| §8.6.1 资产发现（发现筛选 + 可用资产 + 热门资产 + 申请入口） | `CatalogSearch.tsx` | ✅ |
 | §8.6.2 资产详情（6 Tab：概览/Schema/血缘/质量/访问订阅/变更历史） | `AssetDetail.tsx` | ✅ |
 | §8.6.3 血缘图（交互画布 + 字段级 + 影响分析） | `LineageGraph.tsx` SVG 节点连线 | ✅ |
 | §8.6.4 业务术语表 / 数据字典 | `Glossary.tsx` | ✅ |
@@ -207,6 +207,8 @@
 | 来源 | 触发 | 目标 | 实现 | 状态 |
 |------|------|------|------|------|
 | 资产详情 | 发布为 API | API 构建向导（带 sourceFqn） | navigate(`/dataservice/apis/new?sourceFqn=${fqn}`) | ✅ |
+| 资产画像 | 湖仓治理详情 | 表治理详情（带 from=catalog） | navigate(`/lakehouse/tables/${id}?from=catalog`) | ✅ |
+| 表治理详情 | 资产画像 | 资产详情（带 from=lakehouse） | navigate(`/catalog/assets/${id}?from=lakehouse`) | ✅ |
 | 连接详情 | 基于此连接建采集 | 采集向导（带 sourceId） | navigate(`/integration/sync-tasks/new?sourceId=${id}`) | ✅ |
 | 采集监控 | 查看下游影响 | 血缘图（预选） | navigate('/catalog/lineage') | ✅ |
 | SQL 工作台 | 另存为模型/发布 API/加入流水线 | navigate 三按钮 | ✅ |

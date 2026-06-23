@@ -3,8 +3,8 @@
  * Tab: 概览 / Schema / 血缘 / 质量 / 访问·订阅 / 变更历史
  */
 import { useParams, useNavigate } from 'react-router-dom';
-import { Table, Tag, Space, Button, Typography, message } from 'antd';
-import { DatabaseOutlined, BranchesOutlined, SafetyOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
+import { DatabaseOutlined, BranchesOutlined, SafetyOutlined, AppstoreOutlined, TableOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { lakehouseAssets, metadataChanges, accessGrants } from '../../mock';
 import { DetailPageLayout, ClassificationBadge, StatusBadge, SectionCard } from '../../components';
@@ -17,6 +17,7 @@ const { Text } = Typography;
 export default function AssetDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { message } = AntdApp.useApp();
   const [asset, setAsset] = useState<Asset>(() => lakehouseAssets.find((a) => a.id === id) || lakehouseAssets[1]);
   const [applyOpen, setApplyOpen] = useState(false);
   const myGrant = accessGrants.find((g) => g.assetFqn === asset.fqn);
@@ -26,7 +27,7 @@ export default function AssetDetail() {
     CatalogAPI.getAsset(id)
       .then(setAsset)
       .catch(() => message.error('资产详情加载失败，已显示本地示例数据'));
-  }, [id]);
+  }, [id, message]);
 
   const tabs = [
     { key: 'overview', label: '概览', children: (
@@ -148,11 +149,12 @@ export default function AssetDetail() {
         title={asset.fqn}
         subtitle={<Space size={8}><Tag color="blue">{asset.layer}</Tag><Text type="secondary" style={{ fontSize: 13 }}>{asset.description} · 每日更新</Text></Space>}
         status={<ClassificationBadge level={asset.classification} />}
-        breadcrumb={[{ path: '/catalog/search', label: '数据目录' }, { label: asset.fqn }]}
+        breadcrumb={[{ path: '/catalog/search', label: '资产发现' }, { label: asset.fqn }]}
         tabs={tabs}
         actions={[
-          <Button key="apply" onClick={() => setApplyOpen(true)}>申请访问</Button>,
-          <Button key="api" type="primary" onClick={() => navigate(`/dataservice/apis/new?sourceFqn=${asset.fqn}`)}>发布为 API</Button>,
+          <Button key="apply" type="primary" onClick={() => setApplyOpen(true)}>申请访问</Button>,
+          <Button key="lakehouse" icon={<TableOutlined />} onClick={() => navigate(`/lakehouse/tables/${asset.id}?from=catalog`)}>湖仓治理详情</Button>,
+          <Button key="api" onClick={() => navigate(`/dataservice/apis/new?sourceFqn=${asset.fqn}`)}>发布为 API</Button>,
         ]}
         meta={[
           { label: '负责人', value: asset.ownerName },

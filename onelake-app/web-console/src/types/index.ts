@@ -156,8 +156,16 @@ export interface AssetColumn {
   classification?: Classification;
   piiType?: string;
   suggestLevel?: Classification;
+  terms?: AssetColumnTerm[];
   upstreamFqn?: string;
   stats?: { nullRate?: number; cardinality?: number; min?: string; max?: string };
+}
+
+export interface AssetColumnTerm {
+  id: UUID;
+  code: string;
+  name: string;
+  status: string;
 }
 
 export interface AssetDetail {

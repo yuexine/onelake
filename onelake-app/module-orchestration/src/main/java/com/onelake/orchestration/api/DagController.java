@@ -42,6 +42,22 @@ public class DagController {
     }
 
     @Operation(
+        summary = "更新 DAG 草稿",
+        description = "用途：保存编排画布修改后的 DAG definition。前端对接：OrchestrationAPI.updateDag，由 DagCanvas 保存按钮调用。"
+    )
+    @PutMapping("/{id}")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<DagDTO> update(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+        String name = (String) body.get("name");
+        String dagsterJob = (String) body.get("dagsterJob");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> definition = (Map<String, Object>) body.get("definition");
+        String cron = (String) body.get("scheduleCron");
+        Boolean enabled = body.get("enabled") instanceof Boolean value ? value : null;
+        return ApiResponse.ok(service.updateDag(id, name, dagsterJob, definition, cron, enabled));
+    }
+
+    @Operation(
         summary = "获取 DAG 详情",
         description = "用途：读取 DAG 定义、作业名和调度配置。前端对接：OrchestrationAPI.getDag，由 DagCanvas 详情页加载。"
     )

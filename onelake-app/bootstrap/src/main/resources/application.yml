@@ -77,6 +77,12 @@ onelake:
   webclient:
     connect-timeout-ms: 3000
     read-timeout-ms: 60000
+  catalog:
+    lineage:
+      default-depth: ${CATALOG_LINEAGE_DEFAULT_DEPTH:3}
+      impact:
+        subscription-high-threshold: ${CATALOG_LINEAGE_SUB_HIGH:10}
+        jobs-medium-threshold: ${CATALOG_LINEAGE_JOBS_MED:5}
   dataplane:
     airbyte:
       base-url: ${AIRBYTE_URL:http://localhost:8000/api/v1}

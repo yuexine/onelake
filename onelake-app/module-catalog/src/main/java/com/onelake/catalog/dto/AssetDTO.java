@@ -34,6 +34,14 @@ public record AssetDTO(
         String description,
         String classification,
         String piiType,
-        String suggestLevel
+        String suggestLevel,
+        List<AssetColumnTermDTO> terms
+    ) {}
+
+    public record AssetColumnTermDTO(
+        UUID id,
+        String code,
+        String name,
+        String status
     ) {}
 }

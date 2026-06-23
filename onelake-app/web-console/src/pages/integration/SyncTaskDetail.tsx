@@ -268,7 +268,7 @@ export default function SyncTaskDetail() {
           title="上下游血缘"
           icon={<ApartmentOutlined />}
           subtitle={`聚焦 ${task.targetTable}`}
-          extra={<Button size="small" type="link" icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?focus=${encodeURIComponent(task.targetTable)}&from=sync-task`)}>展开整页血缘 →</Button>}
+          extra={<Button size="small" type="link" icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(task.targetTable)}&from=sync-task`)}>展开整页血缘 →</Button>}
         >
           <LineageMiniGraph sourceFqn={`${task.sourceName}.${task.targetTable.split('.')[1]}`} targetFqn={task.targetTable} />
         </SectionCard>

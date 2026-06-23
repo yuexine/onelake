@@ -2,7 +2,7 @@ version: 2
 sources:
   - name: ods
     schema: ods
-    description: "OneLake generated source for ods.ods_codex_orders"
+    description: "OneLake generated sources for ods"
     tables:
       - name: ods_codex_orders
         description: "Generated from Catalog asset ods.ods_codex_orders"
@@ -19,3 +19,46 @@ sources:
             description: "Source column order_time (TIMESTAMP)"
           - name: updated_at
             description: "Source column updated_at (TIMESTAMP)"
+      - name: ods_customers_100k
+        description: "Generated from Catalog asset ods.ods_customers_100k"
+        columns:
+          - name: id
+            description: "Source column id (BIGINT)"
+          - name: customer_no
+            description: "Source column customer_no (STRING)"
+          - name: full_name
+            description: "Source column full_name (STRING)"
+          - name: gender
+            description: "Source column gender (STRING)"
+          - name: age
+            description: "Source column age (INT)"
+          - name: phone_hash
+            description: "Source column phone_hash (STRING)"
+          - name: email_hash
+            description: "Source column email_hash (STRING)"
+          - name: id_card_hash
+            description: "Source column id_card_hash (STRING)"
+          - name: member_level
+            description: "Source column member_level (STRING)"
+          - name: signup_channel
+            description: "Source column signup_channel (STRING)"
+          - name: province
+            description: "Source column province (STRING)"
+          - name: city
+            description: "Source column city (STRING)"
+          - name: total_orders
+            description: "Source column total_orders (INT)"
+          - name: total_amount
+            description: "Source column total_amount (DECIMAL)"
+          - name: credit_score
+            description: "Source column credit_score (INT)"
+          - name: risk_level
+            description: "Source column risk_level (STRING)"
+          - name: last_login_at
+            description: "Source column last_login_at (TIMESTAMP)"
+          - name: created_at
+            description: "Source column created_at (TIMESTAMP)"
+          - name: updated_at
+            description: "Source column updated_at (TIMESTAMP)"
+          - name: ext_json
+            description: "Source column ext_json (STRING)"

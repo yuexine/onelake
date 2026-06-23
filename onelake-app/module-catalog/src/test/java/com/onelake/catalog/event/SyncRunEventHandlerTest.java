@@ -154,6 +154,61 @@ class SyncRunEventHandlerTest {
         verify(lineageRepo, never()).save(any());
     }
 
+    @Test
+    void tableLoadedPersistsTransformExpression() {
+        when(assetRepo.findByTenantIdAndOmFqn(TENANT_ID, "ods.orders")).thenReturn(Optional.empty());
+
+        handler.handle(event(DomainEvents.INTEGRATION_TABLE_LOADED, Map.of(
+            "tenantId", TENANT_ID.toString(),
+            "runId", "run-002",
+            "sourceTable", "mysql.orders",
+            "targetTable", "ods.orders",
+            "namespace", "ods",
+            "table", "orders",
+            "status", "SUCCEEDED",
+            "fieldMapping", List.of(
+                Map.of("source", "amount", "target", "amount",
+                       "sourceType", "int", "targetType", "DECIMAL(18,2)",
+                       "transform", "CAST(amount AS DECIMAL(18,2))"),
+                Map.of("source", "ts", "target", "ts",
+                       "sourceType", "bigint", "targetType", "TIMESTAMP",
+                       "transform", "FROM_UNIXTIME(ts)")
+            )
+        )));
+
+        org.mockito.ArgumentCaptor<LineageEdge> captor = org.mockito.ArgumentCaptor.forClass(LineageEdge.class);
+        verify(lineageRepo).save(captor.capture());
+        String columnLevel = captor.getValue().getColumnLevel();
+        assertThat(columnLevel).contains("\"transform\":\"CAST(amount AS DECIMAL(18,2))\"");
+        assertThat(columnLevel).contains("\"transform\":\"FROM_UNIXTIME(ts)\"");
+    }
+
+    @Test
+    void tableLoadedFallsBackToExpressionFieldWhenTransformMissing() {
+        // modeling 的 fieldMapping payload 输出的是 expression 字段（不是 transform）
+        when(assetRepo.findByTenantIdAndOmFqn(TENANT_ID, "ods.orders")).thenReturn(Optional.empty());
+
+        handler.handle(event(DomainEvents.INTEGRATION_TABLE_LOADED, Map.of(
+            "tenantId", TENANT_ID.toString(),
+            "runId", "run-003",
+            "sourceTable", "mysql.orders",
+            "targetTable", "ods.orders",
+            "namespace", "ods",
+            "table", "orders",
+            "status", "SUCCEEDED",
+            "fieldMapping", List.of(
+                Map.of("source", "amount", "target", "amount",
+                       "sourceType", "int", "targetType", "DECIMAL(18,2)",
+                       "expression", "CAST(amount AS DECIMAL(18,2))")
+            )
+        )));
+
+        org.mockito.ArgumentCaptor<LineageEdge> captor = org.mockito.ArgumentCaptor.forClass(LineageEdge.class);
+        verify(lineageRepo).save(captor.capture());
+        assertThat(captor.getValue().getColumnLevel())
+            .contains("\"transform\":\"CAST(amount AS DECIMAL(18,2))\"");
+    }
+
     private OutboxEvent event(String eventType, Map<String, Object> payload) {
         OutboxEvent event = new OutboxEvent();
         event.setId(UUID.randomUUID());

@@ -104,8 +104,24 @@ export interface Dag {
   edges?: DagEdge[];
   scheduleCron?: string;
   enabled: boolean;
+  triggerable?: boolean;
+  triggerBlockedReason?: string;
   version: number;
   createdAt: string;
+  lastRun?: JobRun;
+}
+
+export interface JobRun {
+  id: UUID;
+  dagId: UUID;
+  dagName?: string;
+  dagsterJob?: string;
+  dagsterRunId?: string;
+  triggerType: 'CRON' | 'MANUAL' | 'EVENT' | string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | string;
+  startedAt?: string;
+  finishedAt?: string;
+  triggeredBy?: UUID;
 }
 
 export interface DagNode {
@@ -117,12 +133,74 @@ export interface DagNode {
   schema?: string;
   status?: 'idle' | 'configured' | 'error' | 'running' | 'success' | 'failed';
   params?: Record<string, unknown>;
+  operatorRef?: string;
+  operatorVersion?: string;
+  config?: Record<string, unknown>;
 }
 
 export interface DagEdge {
   source: string;
   target: string;
   valid?: boolean;
+}
+
+export interface OperatorPort {
+  name: string;
+  cardinality: 'ONE' | 'MANY' | string;
+  accept: 'TABLE' | 'COLUMN' | string;
+}
+
+export interface OperatorManifest {
+  operatorRef: string;
+  version: string;
+  category: string;
+  scope: 'BUILTIN' | 'CUSTOM' | 'TENANT_PRIVATE' | string;
+  displayName: string;
+  description?: string;
+  icon?: string;
+  tags?: string[];
+  inputPorts?: OperatorPort[];
+  outputSchema?: { mode?: string; modifies?: string[]; [key: string]: unknown };
+  paramsSchema?: Record<string, unknown>;
+  compileTarget?: 'SQL_DBT' | 'SPARK' | 'PYTHON' | string;
+  template?: { kind?: string; sql?: string; [key: string]: unknown };
+  lineageRule?: Record<string, unknown>;
+  securityRule?: Record<string, unknown>;
+  qualityEmit?: boolean;
+  policy?: Record<string, unknown>;
+  resourceHint?: Record<string, unknown>;
+  examples?: { title: string; params: Record<string, unknown> }[];
+}
+
+export interface OperatorVersion {
+  id: UUID;
+  version: string;
+  manifest?: OperatorManifest;
+  changelog?: string;
+  createdBy?: UUID;
+  createdAt?: string;
+}
+
+export interface Operator {
+  id: UUID;
+  operatorRef: string;
+  category: string;
+  scope: 'BUILTIN' | 'CUSTOM' | 'TENANT_PRIVATE' | string;
+  displayName: string;
+  description?: string;
+  latestVersion: string;
+  status: 'ACTIVE' | 'DEPRECATED' | string;
+  installed: boolean;
+  pinnedVersion?: string;
+  manifest?: OperatorManifest;
+  versions?: OperatorVersion[];
+  createdAt?: string;
+}
+
+export interface OperatorValidationResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
 }
 
 export interface Asset {
@@ -165,7 +243,7 @@ export interface AssetColumnTerm {
   id: UUID;
   code: string;
   name: string;
-  status: string;
+  status: BusinessTermStatus;
 }
 
 export interface AssetDetail {
@@ -255,6 +333,152 @@ export interface AssetSubscriptionSummary {
   popularity: number;
 }
 
+export type BusinessTermStatus = 'DRAFT' | 'REVIEWING' | 'APPROVED' | 'REJECTED' | 'DEPRECATED' | 'ARCHIVED' | string;
+
+export interface BusinessTerm {
+  id: UUID;
+  code: string;
+  name: string;
+  domainId?: UUID;
+  domainName?: string;
+  definition?: string;
+  caliberSql?: string;
+  synonyms: string[];
+  ownerId?: UUID;
+  ownerName?: string;
+  stewardId?: UUID;
+  status: BusinessTermStatus;
+  version: number;
+  sensitivityLevel?: Classification | string;
+  tags: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  approvedAt?: string;
+  bindingCount?: number;
+  bindings: BusinessTermBinding[];
+}
+
+export interface BusinessTermBinding {
+  id: UUID;
+  termId: UUID;
+  termCode: string;
+  termName: string;
+  assetId?: UUID;
+  assetFqn: string;
+  columnName?: string;
+  relationType: 'DEFINES' | 'USES' | 'DERIVES' | string;
+  source: 'MANUAL' | 'CATALOG' | 'MODELING' | 'IMPORT' | 'SUGGESTED' | string;
+  confidence?: number;
+  status: 'ACTIVE' | 'PENDING' | 'REJECTED' | 'STALE' | string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface BusinessTermVersion {
+  id: UUID;
+  termId: UUID;
+  version: number;
+  snapshot: string;
+  changeReason?: string;
+  changedBy?: UUID;
+  createdAt?: string;
+}
+
+export interface BusinessTermImpact {
+  termId: UUID;
+  termCode: string;
+  termName: string;
+  status: BusinessTermStatus;
+  version: number;
+  sensitivityLevel?: string;
+  bindings: BusinessTermBinding[];
+  downstreamAssets: BusinessTermImpactAsset[];
+  qualityRules: BusinessTermImpactQualityRule[];
+  apis: BusinessTermImpactApi[];
+  dags: BusinessTermImpactDag[];
+  securityNotices: BusinessTermImpactSecurityNotice[];
+  approvals: BusinessTermImpactApproval[];
+  warnings: string[];
+  impactScore: number;
+}
+
+export interface BusinessTermImpactAsset {
+  id?: UUID;
+  fqn: string;
+  displayName?: string;
+  layer?: string;
+  relation: 'BOUND' | 'DOWNSTREAM' | string;
+}
+
+export interface BusinessTermImpactQualityRule {
+  id: UUID;
+  targetFqn: string;
+  targetColumn?: string;
+  ruleType: string;
+  severity?: string;
+  enabled?: boolean;
+}
+
+export interface BusinessTermImpactApi {
+  id: UUID;
+  apiPath: string;
+  sourceFqn?: string;
+  status: string;
+}
+
+export interface BusinessTermImpactDag {
+  id: UUID;
+  name: string;
+  dagsterJob?: string;
+  enabled?: boolean;
+}
+
+export interface BusinessTermImpactSecurityNotice {
+  type: string;
+  fqn: string;
+  level?: string;
+  status?: string;
+  message: string;
+}
+
+export interface BusinessTermImpactApproval {
+  id: UUID;
+  requestType: string;
+  targetRef: string;
+  status: string;
+  createdAt?: string;
+}
+
+export interface BusinessTermVersionDiff {
+  termId: UUID;
+  fromVersion?: number;
+  toVersion?: number;
+  changes: { field: string; before?: unknown; after?: unknown }[];
+}
+
+export interface BusinessTermRequest {
+  code?: string;
+  name?: string;
+  domainId?: UUID;
+  definition?: string;
+  caliberSql?: string;
+  synonyms?: string[];
+  ownerId?: UUID;
+  ownerName?: string;
+  stewardId?: UUID;
+  sensitivityLevel?: string;
+  tags?: string[];
+}
+
+export interface BusinessTermBindingRequest {
+  assetId?: UUID;
+  assetFqn: string;
+  columnName?: string;
+  relationType?: string;
+  source?: string;
+  confidence?: number;
+}
+
 export interface TableCreateRequest {
   layer: Asset['layer'];
   domain: string;
@@ -298,6 +522,9 @@ export interface DwdModelColumnMappingRequest {
   classification?: Classification;
   piiType?: string;
   suggestLevel?: Classification;
+  termId?: UUID;
+  termCode?: string;
+  termName?: string;
 }
 
 export interface DataModel {
@@ -352,6 +579,9 @@ export interface DataModelColumnMapping {
   classification?: Classification;
   piiType?: string;
   suggestLevel?: Classification;
+  termId?: UUID;
+  termCode?: string;
+  termName?: string;
   sortNo?: number;
 }
 
@@ -411,6 +641,47 @@ export interface DwdModelRun {
   retryCount?: number;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface ComputeProfile {
+  id: UUID;
+  code: string;
+  displayName: string;
+  engine: string;
+  status: string;
+  cpuCores?: number;
+  memoryGb?: number;
+  maxScanBytes?: number;
+  timeoutSeconds?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ResourceGroup {
+  id: UUID;
+  code: string;
+  displayName: string;
+  engine: string;
+  status: string;
+  builtin: boolean;
+  maxConcurrency?: number;
+  quotaCpu?: number;
+  quotaMemoryGb?: number;
+  costPolicy?: Record<string, unknown>;
+  computeProfiles: ComputeProfile[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface RuntimeContract {
+  compileTarget: string;
+  engine: string;
+  dagsterJob: string;
+  manifestSupported: boolean;
+  graphExecutionSupported: boolean;
+  dagsterJobAvailable: boolean;
+  status: string;
+  blockedReason?: string;
 }
 
 export interface SqlColumn {
@@ -483,6 +754,43 @@ export interface LineageEdge {
   downstreamFqn: string;
   columnMapping?: { from: string; to: string; transform?: string }[];
   jobRef?: string;
+}
+
+export interface LineageGraphData {
+  rootFqn: string;
+  nodes: LineageGraphNode[];
+  edges: LineageGraphEdge[];
+}
+
+export interface LineageGraphNode {
+  fqn: string;
+  name: string;
+  layer: string;            // SOURCE/ODS/DWD/DWS/ADS/API
+  nodeType: string;         // TABLE / API / JOB
+  classification?: string | null;
+  qualityScore?: number | null;
+  ownerName?: string | null;
+  rowCount?: number | null;
+  syncedAt?: string | null;
+  columns?: { name: string; type: string; classification?: string | null }[];
+}
+
+export interface LineageGraphEdge {
+  fromFqn: string;
+  toFqn: string;
+  jobRef?: string | null;
+  columnEdges?: { fromColumn: string; toColumn: string; transform?: string | null }[];
+}
+
+export interface ImpactReport {
+  rootFqn: string;
+  directDownstream: string[];
+  indirectDownstream: string[];
+  affectedJobs: number;
+  affectedApis: number;
+  affectedSubscribers: number;
+  severity: 'HIGH' | 'MEDIUM' | 'LOW' | string;
+  severityReasons: string[];
 }
 
 export interface Metric {
@@ -662,7 +970,14 @@ export interface ApiReturnField {
   name: string;
   type: string;
   classification?: Classification;
+  suggestLevel?: Classification | string;
   masked?: boolean;
+  termId?: UUID;
+  termCode?: string;
+  termName?: string;
+  termDefinition?: string;
+  caliberSql?: string;
+  termStatus?: string;
 }
 
 export interface AppKey {

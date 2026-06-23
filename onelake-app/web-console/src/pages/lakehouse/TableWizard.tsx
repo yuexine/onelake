@@ -20,8 +20,8 @@ import {
   PageHeader, SectionCard, ClassificationBadge, IntentBadge,
   useAsyncAction, DangerConfirm, layerColor,
 } from '../../components';
-import type { AssetDetail, Classification } from '../../types';
-import { CatalogAPI, ModelingAPI } from '../../api';
+import type { AssetDetail, BusinessTerm, Classification } from '../../types';
+import { CatalogAPI, GlossaryAPI, ModelingAPI } from '../../api';
 import { normalizeCatalogAsset } from './assetAdapter';
 
 const { Text } = Typography;
@@ -34,6 +34,9 @@ interface ColumnDef {
   classification?: Classification;
   piiType?: string;
   suggestLevel?: Classification;
+  termId?: string;
+  termCode?: string;
+  termName?: string;
   sourceName?: string;
   sourceType?: string;
   comment: string;
@@ -87,6 +90,7 @@ export default function TableWizard() {
   const [step, setStep] = useState(0);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sourceDetail, setSourceDetail] = useState<AssetDetail>();
+  const [approvedTerms, setApprovedTerms] = useState<BusinessTerm[]>([]);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
 
@@ -113,6 +117,12 @@ export default function TableWizard() {
   const [coldStorageAfter, setColdStorageAfter] = useState(90);
 
   useEffect(() => {
+    GlossaryAPI.listTerms({ status: 'APPROVED' })
+      .then(setApprovedTerms)
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     if (!deriveMode || !sourceAssetId) return;
     let cancelled = false;
     setSourceLoading(true);
@@ -129,7 +139,9 @@ export default function TableWizard() {
         const nextDomain = DOMAINS.includes(normalized.asset.domain as typeof DOMAINS[number])
           ? normalized.asset.domain as typeof DOMAINS[number]
           : '交易';
-        const nextColumns = normalized.asset.columns.map((column, index) => ({
+        const nextColumns = normalized.asset.columns.map((column, index) => {
+          const firstTerm = column.terms?.find((item) => item.status === 'APPROVED') || column.terms?.[0];
+          return {
           key: `${column.name}-${index}`,
           name: column.name,
           type: column.type || 'STRING',
@@ -137,10 +149,14 @@ export default function TableWizard() {
           classification: column.suggestLevel || column.classification,
           piiType: column.piiType,
           suggestLevel: column.suggestLevel,
+          termId: firstTerm?.id,
+          termCode: firstTerm?.code,
+          termName: firstTerm?.name,
           sourceName: column.name,
           sourceType: column.type || 'STRING',
-          comment: column.description || `源字段 ${column.name}`,
-        }));
+          comment: firstTerm?.name || column.description || `源字段 ${column.name}`,
+        };
+        });
         setLayer('DWD');
         setDomain(nextDomain);
         setName(inferDwdName(normalized.asset.fqn, nextDomain));
@@ -363,6 +379,29 @@ export default function TableWizard() {
                       }}
                     />
                   ) },
+                  { title: '业务术语', dataIndex: 'termId', width: 210, render: (v: string | undefined, r: ColumnDef) => (
+                    <Select
+                      value={v}
+                      size="small"
+                      allowClear
+                      showSearch
+                      optionFilterProp="label"
+                      placeholder="选择术语"
+                      style={{ width: '100%' }}
+                      options={approvedTerms.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))}
+                      onChange={(value) => {
+                        const selected = approvedTerms.find((item) => item.id === value);
+                        updateColumn(r.key, {
+                          termId: selected?.id,
+                          termCode: selected?.code,
+                          termName: selected?.name,
+                          comment: selected?.name || r.comment,
+                          classification: (selected?.sensitivityLevel as Classification) || r.classification,
+                          suggestLevel: (selected?.sensitivityLevel as Classification) || r.suggestLevel,
+                        });
+                      }}
+                    />
+                  ) },
                   { title: '类型', dataIndex: 'type', width: 180, render: (v: string, r: ColumnDef) => (
                     <Select value={v} size="small" style={{ width: '100%' }}
                       options={['BIGINT', 'STRING', 'INT', 'DECIMAL(18,2)', 'DOUBLE', 'TIMESTAMP', 'DATE', 'BOOLEAN'].map((t) => ({ label: t, value: t }))}
@@ -556,6 +595,9 @@ export default function TableWizard() {
                 classification: c.classification,
                 piiType: c.piiType,
                 suggestLevel: c.suggestLevel || c.classification,
+                termId: c.termId,
+                termCode: c.termCode,
+                termName: c.termName,
               })),
             });
             setPublishOpen(false);

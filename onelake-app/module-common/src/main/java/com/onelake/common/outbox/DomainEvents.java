@@ -27,6 +27,11 @@ public final class DomainEvents {
     public static final String MODELING_MODEL_LOADED = "modeling.model.loaded";
     public static final String MODELING_MODEL_FAILED = "modeling.model.failed";
     public static final String MODELING_TRANSFORM_COMPLETED = "modeling.transform.completed";
+    public static final String MODELING_TERM_CREATED = "modeling.term.created";
+    public static final String MODELING_TERM_UPDATED = "modeling.term.updated";
+    public static final String MODELING_TERM_APPROVED = "modeling.term.approved";
+    public static final String MODELING_TERM_DEPRECATED = "modeling.term.deprecated";
+    public static final String MODELING_TERM_BINDING_CHANGED = "modeling.term.binding_changed";
 
     public static final String QUALITY_CHECK_COMPLETED = "quality.check.completed";
     public static final String QUALITY_CHECK_FAILED = "quality.check.failed";
@@ -37,4 +42,8 @@ public final class DomainEvents {
     public static final String SECURITY_ACCESS_CHANGED = "security.access.changed";
 
     public static final String DATASERVICE_API_PUBLISHED = "dataservice.api.published";
+    public static final String DATASERVICE_API_OFFLINE = "dataservice.api.offline";
+    public static final String DATASERVICE_SUBSCRIPTION_APPROVED = "dataservice.subscription.approved";
+    public static final String DATASERVICE_SUBSCRIPTION_REVOKED = "dataservice.subscription.revoked";
+    public static final String ORCHESTRATION_JOB_BOUND = "orchestration.job.bound";
 }

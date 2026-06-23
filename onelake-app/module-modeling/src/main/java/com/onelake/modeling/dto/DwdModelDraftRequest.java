@@ -1,6 +1,7 @@
 package com.onelake.modeling.dto;
 
 import java.util.List;
+import java.util.UUID;
 
 public record DwdModelDraftRequest(
     String name,
@@ -22,6 +23,9 @@ public record DwdModelDraftRequest(
         Boolean primaryKey,
         String classification,
         String piiType,
-        String suggestLevel
+        String suggestLevel,
+        UUID termId,
+        String termCode,
+        String termName
     ) {}
 }

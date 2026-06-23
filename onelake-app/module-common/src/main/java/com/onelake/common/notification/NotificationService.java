@@ -83,6 +83,55 @@ public class NotificationService {
         }
     }
 
+    /**
+     * 影响分析通知（对应《血缘图模块完善设计方案》§5.2.3 通知渠道）。
+     *
+     * <p>去重：依赖 {@code uk_notification_receiver_source} 唯一索引
+     * (tenant_id, receiver_id, source_ref_type, source_ref_id)。
+     * 同一 receiver 对同一 rootFqn 永远只收一条，配合 sourceRefId=rootFqn 实现「24h 去重」更严格的等价语义。
+     *
+     * @param receiverId 通知接收人
+     * @param rootFqn    影响分析根资产
+     * @param severity   HIGH/MEDIUM/LOW
+     * @param summary    摘要文本（含受影响数量）
+     * @return true 表示新建通知；false 表示重复被去重
+     */
+    @Transactional
+    public boolean notifyImpactAnalysis(UUID receiverId, String rootFqn, String severity, String summary) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null || receiverId == null || rootFqn == null || rootFqn.isBlank()) {
+            return false;
+        }
+        boolean exists = repo.findByTenantIdAndReceiverIdAndSourceRefTypeAndSourceRefId(
+            tenantId, receiverId, "IMPACT_ANALYSIS", rootFqn
+        ).isPresent();
+        if (exists) return false;
+        try {
+            repo.save(fromImpactAnalysis(tenantId, receiverId, rootFqn, severity, summary));
+            return true;
+        } catch (DataIntegrityViolationException e) {
+            log.debug("skip duplicated impact notification for {}", rootFqn);
+            return false;
+        }
+    }
+
+    private Notification fromImpactAnalysis(UUID tenantId, UUID receiverId, String rootFqn,
+                                            String severity, String summary) {
+        Notification n = new Notification();
+        n.setTenantId(tenantId);
+        n.setReceiverId(receiverId);
+        n.setCategory("IMPACT_ANALYSIS");
+        n.setTitle("影响分析：" + rootFqn + "（" + severity + "）");
+        n.setContent(summary);
+        n.setLink("/catalog/lineage?fqn=" + rootFqn);
+        n.setLevel("HIGH".equals(severity) ? "CRITICAL" : "MEDIUM".equals(severity) ? "WARNING" : "INFO");
+        n.setIsRead(false);
+        n.setSourceRefType("IMPACT_ANALYSIS");
+        n.setSourceRefId(rootFqn);
+        n.setCreatedAt(Instant.now());
+        return n;
+    }
+
     private Notification fromFailedTask(RunningTask task, UUID receiverId) {
         Notification notification = new Notification();
         notification.setTenantId(task.getTenantId());

@@ -55,6 +55,9 @@ public record DataModelDTO(
         String classification,
         String piiType,
         String suggestLevel,
+        UUID termId,
+        String termCode,
+        String termName,
         Integer sortNo
     ) {}
 }

@@ -8,11 +8,12 @@ import {
   DatabaseOutlined, SettingOutlined, LockOutlined, CodeOutlined, ApiOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { lakehouseAssets } from '../../mock';
-import { DataserviceAPI } from '../../api';
+import { CatalogAPI, DataserviceAPI } from '../../api';
 import { ClassificationBadge, SectionCard } from '../../components';
+import type { ApiReturnField, Asset } from '../../types';
 
 const { Text } = Typography;
 
@@ -23,12 +24,32 @@ function paramsFromSql(sql: string) {
     .map((name) => ({ name, type: 'STRING', required: true }));
 }
 
+function returnsFromAsset(asset?: Asset): ApiReturnField[] {
+  if (!asset) return [];
+  return asset.columns.map((column) => {
+    const term = column.terms?.[0];
+    const level = column.suggestLevel || column.classification;
+    return {
+      name: column.name,
+      type: column.type,
+      classification: column.classification,
+      suggestLevel: level,
+      masked: level === 'L3' || level === 'L4',
+      termId: term?.id,
+      termCode: term?.code,
+      termName: term?.name,
+      termStatus: term?.status,
+    };
+  });
+}
+
 export default function ApiWizard() {
   const navigate = useNavigate();
   const location = useLocation();
   const [sp] = useSearchParams();
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const incoming = (location.state || {}) as {
     from?: string;
     sql?: string;
@@ -49,7 +70,7 @@ export default function ApiWizard() {
     const extracted = paramsFromSql(initialSql);
     return extracted.length > 0 ? extracted : [];
   });
-  const [returns] = useState<any[]>(() => (
+  const [returns, setReturns] = useState<ApiReturnField[]>(() => (
     incoming.columns && incoming.columns.length > 0
       ? incoming.columns.map((column) => ({ name: column.name, type: column.type }))
       : [
@@ -58,6 +79,25 @@ export default function ApiWizard() {
           { name: 'amount', type: 'DECIMAL' },
         ]
   ));
+
+  useEffect(() => {
+    let cancelled = false;
+    CatalogAPI.listAssets()
+      .then((items) => {
+        if (cancelled) return;
+        setAssets(items);
+        const selected = items.find((asset) => asset.fqn === draft.sourceFqn);
+        const inherited = returnsFromAsset(selected);
+        if (inherited.length > 0) {
+          setReturns(inherited);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const saveDraft = () => {
     setSaving(true);
@@ -130,8 +170,21 @@ export default function ApiWizard() {
               <Form.Item label="来源（可从资产详情/SQL 工作台带参进入）" required>
                 <Select
                   value={draft.sourceFqn}
-                  onChange={(value) => setDraft((prev) => ({ ...prev, sourceFqn: value }))}
-                  options={lakehouseAssets.map((a) => ({ label: `${a.fqn} (${a.description || ''})`, value: a.fqn }))}
+                  showSearch
+                  optionFilterProp="label"
+                  onChange={(value) => {
+                    const selected = assets.find((asset) => asset.fqn === value);
+                    setDraft((prev) => ({
+                      ...prev,
+                      sourceFqn: value,
+                      selectSql: prev.sourceMode === 'table' && selected ? `SELECT * FROM ${selected.fqn}` : prev.selectSql,
+                    }));
+                    const inherited = returnsFromAsset(selected);
+                    if (inherited.length > 0) {
+                      setReturns(inherited);
+                    }
+                  }}
+                  options={(assets.length ? assets : lakehouseAssets as unknown as Asset[]).map((a) => ({ label: `${a.fqn} (${a.description || ''})`, value: a.fqn }))}
                 />
               </Form.Item>
               <Form.Item label="来源方式" name="sourceMode">
@@ -163,6 +216,7 @@ export default function ApiWizard() {
                     { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
                     { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
                     { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+                    { title: '术语', dataIndex: 'termName', width: 180, render: (_: string, row: ApiReturnField) => row.termCode ? <Tag color="blue">{row.termCode} · {row.termName}</Tag> : '-' },
                     { title: '动态脱敏', dataIndex: 'masked', render: (m?: boolean) => <Switch size="small" defaultChecked={m} /> },
                   ]} />
               </SectionCard>

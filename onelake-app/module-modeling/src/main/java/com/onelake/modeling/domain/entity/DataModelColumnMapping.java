@@ -41,5 +41,8 @@ public class DataModelColumnMapping {
     private String classification;
     private String piiType;
     private String suggestLevel;
+    private UUID termId;
+    private String termCode;
+    private String termName;
     private Integer sortNo = 0;
 }

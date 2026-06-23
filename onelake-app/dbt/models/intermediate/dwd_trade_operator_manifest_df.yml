@@ -1,0 +1,18 @@
+version: 2
+models:
+  - name: dwd_trade_operator_manifest_df
+    description: "OneLake generated DWD model from ods.ods_codex_orders"
+    columns:
+      - name: order_id
+        description: "Mapped from order_id"
+        tests:
+          - not_null
+          - unique
+      - name: user_id
+        description: "Mapped from user_id"
+      - name: amount
+        description: "Mapped from amount"
+      - name: status
+        description: "Mapped from status"
+      - name: order_time
+        description: "Mapped from order_time"

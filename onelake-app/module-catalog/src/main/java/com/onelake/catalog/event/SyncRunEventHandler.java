@@ -209,7 +209,14 @@ public class SyncRunEventHandler implements DomainEventHandler {
                 String source = item.path("source").asText("");
                 String target = item.path("target").asText("");
                 if (source.isBlank() || target.isBlank()) continue;
-                lineage.add(Map.of("from", source, "to", target));
+                // 兼容 modeling.payload 输出的 expression 字段名与 sync 事件的 transform 字段名
+                String transform = item.path("transform").asText("");
+                if (transform.isBlank()) transform = item.path("expression").asText("");
+                Map<String, String> entry = new java.util.HashMap<>();
+                entry.put("from", source);
+                entry.put("to", target);
+                if (!transform.isBlank()) entry.put("transform", transform);
+                lineage.add(entry);
             }
         }
         return lineage;

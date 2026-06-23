@@ -8,6 +8,7 @@ import com.onelake.common.context.TenantContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,7 @@ class CatalogServiceTest {
     private AssetRepository assetRepo;
     private LineageEdgeRepository lineageRepo;
     private CatalogRowCountResolver rowCountResolver;
+    private JdbcTemplate jdbc;
     private CatalogService service;
 
     @BeforeEach
@@ -33,8 +35,9 @@ class CatalogServiceTest {
         assetRepo = mock(AssetRepository.class);
         lineageRepo = mock(LineageEdgeRepository.class);
         rowCountResolver = mock(CatalogRowCountResolver.class);
+        jdbc = mock(JdbcTemplate.class);
         when(rowCountResolver.resolve(anyCollection())).thenReturn(Map.of());
-        service = new CatalogService(assetRepo, lineageRepo, rowCountResolver);
+        service = new CatalogService(assetRepo, lineageRepo, rowCountResolver, jdbc);
     }
 
     @AfterEach

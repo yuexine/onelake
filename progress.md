@@ -1179,6 +1179,357 @@
   - `findings.md`
   - `progress.md`
 
+### 阶段 53：流水线与算子市场阶段二后端市场底座
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取 `docs/流水线与算子市场算子标准设计方案.md`，确认阶段二目标是表、市场后端 API、65 内置算子 seed 和前端市场接真实 API。
+  - 读取 `module-orchestration` 当前 DAG/Run 实体、服务、控制器和 V1 迁移，确认原先没有 operator 表、API 或测试目录。
+  - 新增迁移 `orchestration/V2__operator_market.sql`，包含 `operator`、`operator_version`、`operator_install` 和索引。
+  - 新增算子实体、枚举、Repository、DTO、`OperatorService`、`OperatorController` 和 `OperatorSeeder`。
+  - 将设计方案里的 65 个内置算子落成 `BuiltInOperatorCatalog`，每个算子都有统一 Manifest、SQL_DBT template、输入端口、输出 schema、参数 schema、治理/资源提示和示例。
+  - `OperatorService` 支持当前租户可见列表、详情、Manifest 校验、自定义注册、版本发布、元信息更新、安装/版本锁定和内置算子幂等 seed。
+  - 补充 `OperatorServiceTest`，覆盖内置算子数量、seed 持久化、质量门禁策略校验、注册审计、安装版本校验和列表 manifest。
+  - 第一次运行 `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 发现 service 中少写 `OperatorCategory.QUALITY_GATE` 枚举限定名，已修复。
+  - 第二次测试发现两个 Mockito 多余 stub，删除后第三次测试通过。
+  - 运行 `git diff --check` 通过。
+- 创建/修改的文件：
+  - `onelake-app/bootstrap/src/main/resources/db/migration/orchestration/V2__operator_market.sql`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/api/OperatorController.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/config/BuiltInOperatorCatalog.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/config/OperatorSeeder.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/domain/entity/Operator.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/domain/entity/OperatorInstall.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/domain/entity/OperatorVersion.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/domain/enums/`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/dto/`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/repository/`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OperatorService.java`
+  - `onelake-app/module-orchestration/src/test/java/com/onelake/orchestration/service/OperatorServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 54：流水线与算子市场阶段二前端市场真实 API 接入
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取 `OperatorMarket.tsx`、`web-console/src/api/index.ts`、`web-console/src/types/index.ts`、`PageHeader`、`StateView` 和 `IntentBadge`。
+  - 新增前端 `OperatorManifest`、`OperatorVersion`、`Operator`、`OperatorValidationResult` 类型，并为 `DagNode` 增加 `operatorRef/operatorVersion/config` 可选字段。
+  - 在 `api/index.ts` 新增 `OperatorAPI`，封装 list/detail/validate/register/publish/update/install。
+  - 重写 `OperatorMarket.tsx`：从真实 API 拉取算子，支持 scope 分段、category 下拉、关键词搜索、刷新、详情弹窗、参数/版本/示例展示和安装/锁定版本。
+  - 第一次 `pnpm exec tsc --noEmit` 失败：`PageHeader` 不支持 `stats` 属性；改用组件已有 `meta` 属性后通过。
+  - `pnpm build` 通过。
+  - 本地 8080 旧进程未加载 operators controller；执行 `mvn -q -pl module-orchestration -am install -DskipTests -Djacoco.skip=true`、`make migrate` 并重启后端。
+  - 后端启动日志确认 `OperatorSeeder` 写入 65 个内置算子。
+  - API 验证：dev token 调用 `/api/v1/orchestration/operators?scope=BUILTIN` 返回 65，`/operators/mask.partial` 返回 1 个版本与 `COLUMN_EXPR` 模板。
+  - 浏览器打开 `http://localhost:5173/orchestration/operators`，页面显示真实算子卡片；详情请求、安装请求和刷新请求均为 200。
+  - 点击安装时发现 AntD 静态 message warning，改为 `AntApp.useApp()` 后复测浏览器控制台 0 error。
+  - 验证命令通过：`pnpm exec tsc --noEmit`、`pnpm build`、`git diff --check`。
+- 创建/修改的文件：
+  - `onelake-app/web-console/src/types/index.ts`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/orchestration/OperatorMarket.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 55：流水线与算子市场阶段三 OperatorCompiler 接入前置核对
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 重新读取 `task_plan.md`、`findings.md`、`progress.md`、`RTK.md` 摘要和阶段 53/54 记录。
+  - 读取 `DwdModelService` 的 compile、run、dag definition、operator graph 生成逻辑，以及 `DwdModelServiceTest` 现有覆盖。
+  - 读取 `module-modeling/pom.xml`，确认 modeling 只依赖 common，不直接依赖 orchestration。
+  - 读取 `dagster/definitions.py` 与 ODS->DWD 方案摘要，确认 `onelake_dbt_model_run` 和 dbt run/artifact 回写链路已经存在。
+- 当前结论：
+  - 阶段三第一轮实现不重复做 Dagster job，而是把 DWD 默认 operator graph 接入算子市场 manifest。
+  - 实现方式沿用 modeling 已有 `JdbcTemplate` 跨 schema 边界，读取 built-in operator latest manifest 并嵌入 graph。
+- 执行的实现：
+  - `DwdModelService.compileArtifacts` 在写 dbt 产物前解析 DWD 默认链所需的 built-in operator manifest。
+  - 生成的 operator graph 节点新增 `operatorRef/operatorVersion/operatorCategory/compileTarget/manifest/policy/emitsLineage/emitsQualityResult`。
+  - 默认链使用 `input.ods_table`、`transform.rename_columns`、`govern.drop_required_missing`、`gate.not_null` 和按物化方式选择的输出算子。
+  - 缺少 manifest、manifest JSON 非法、category 不匹配、`compileTarget` 非 `SQL_DBT` 或 template 缺失时阻断 compile。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl module-orchestration,module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - 真实 API 创建 DWD 草稿并 compile：`POST /api/v1/modeling/models/{id}/compile` 返回 200，operator refs 为 `input.ods_table,transform.rename_columns,govern.drop_required_missing,gate.not_null,output.iceberg_table`。
+  - DB 反查 `orchestration.dag.definition.nodes[*].operatorRef` 与 API 返回一致。
+  - `git diff --check` 通过。
+- 遇到的问题：
+  - 第一次重启后端后真实 API 仍返回旧 operator graph，因为 `bootstrap` 运行时使用本地 Maven 仓库的 `module-modeling` SNAPSHOT jar；执行 module install 并重启后复测通过。
+  - Spring Boot 优雅关闭在 `taskScheduler` 上等待较久，明确 PID 后使用强制结束完成重启。
+- 创建/修改的文件：
+  - `onelake-app/module-modeling/src/main/java/com/onelake/modeling/service/DwdModelService.java`
+  - `onelake-app/module-modeling/src/test/java/com/onelake/modeling/service/DwdModelServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 56：流水线与算子市场阶段三图级校验服务
+- **状态：** complete
+- **开始时间：** 2026-06-22 CST
+- 执行的操作：
+  - 读取 `OperatorService`、`OperatorController`、DAG definition 和 `OperatorServiceTest`，确认图级校验应复用市场 Manifest，不新增第二套契约。
+  - 在 `OperatorService` 新增 `validateGraph`，支持直接 graph、`operatorGraph`、`definition.operatorGraph` 等请求形态。
+  - 校验节点 id、边引用、环路、operatorRef/operatorVersion、Manifest 自校验、`compileTarget=SQL_DBT`、节点类型与 category、required params 和输入端口基数。
+  - 允许内部 `DBT_MODEL` 系统节点无 `operatorRef`，并返回 warning，避免把 dbt runtime 节点伪装成市场算子。
+  - `OperatorController` 暴露 `POST /api/v1/orchestration/operators/graph/validate`。
+  - 补充 `OperatorServiceTest`，覆盖合法 DWD 默认图、缺必填参数和环路。
+  - 运行 `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - 运行 `mvn -q -pl module-orchestration -am install -DskipTests -Djacoco.skip=true` 和进程级后端重启后，OpenAPI 已包含新端点。
+  - 真实 API 正向验证：DWD compile 生成的 DAG `94f21184-752f-40ea-9c65-1a5ee00b3699` 校验返回 `ok=true`，5 个市场算子 refs 均被校验。
+  - 真实 API 反向验证：修改 `definition.operatorGraph` 后返回 `ok=false`，错误包含 `DAG 存在环路`、`节点 transform_mapping 缺少必需参数: mapping`。
+  - 运行 `mvn -q install -DskipTests -Djacoco.skip=true` 和 `git diff --check` 通过。
+- 遇到的问题：
+  - 首次 runtime 验证 404，原因是后端进程未完整加载新 module-orchestration SNAPSHOT；强制停止旧 PID 并重启后 OpenAPI 映射恢复。
+  - 反向验证第一次误改 DAG 顶层 `nodes/edges`，但接口优先校验 `operatorGraph` 快照，导致仍返回合法；改为修改 `definition.operatorGraph` 后按预期返回错误。
+- 创建/修改的文件：
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/api/OperatorController.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OperatorService.java`
+  - `onelake-app/module-orchestration/src/test/java/com/onelake/orchestration/service/OperatorServiceTest.java`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 57：流水线与算子市场阶段三前端图级校验接入
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取 `DagCanvas.tsx`、`api/index.ts`、`types/index.ts` 中 DAG、Operator API 和节点类型现状。
+  - `OperatorAPI` 新增 `validateGraph`，调用 `POST /api/v1/orchestration/operators/graph/validate`。
+  - `DagCanvas` 保留从 DAG definition 读取到的 `operatorRef/operatorVersion/config`，并优先读取 `definition.operatorGraph`。
+  - 静态样例节点增加默认内置算子映射：`input.ods_table`、`govern.drop_required_missing`、`mask.partial`、`output.iceberg_table`，便于新建画布也能真实校验。
+  - 校验按钮改为请求真实 graph validate API，弹窗展示后端返回的 errors/warnings/success。
+  - 保存按钮改为保存前执行同一图级校验；本轮仍不持久化 DAG，下一轮补真实保存。
+  - 将 `DagCanvas` 的反馈消息切到 AntD `App.useApp()`，避免新增静态 message warning。
+  - 运行 `pnpm exec tsc --noEmit`、`pnpm build` 和 `git diff --check` 通过。
+  - 浏览器打开 `http://localhost:5173/orchestration/pipelines/new`，点击“校验”和“保存”各产生一次真实 `POST /api/v1/orchestration/operators/graph/validate => 200`，弹窗显示 `✓ 4 节点通过`，控制台 0 error。
+- 创建/修改的文件：
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/orchestration/DagCanvas.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 58：流水线与算子市场阶段三 DAG 草稿真实保存
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取 `DagController`、`OrchestrationService`、`DagRepository`、`Dag`、`DagDTO`、`PipelineList` 和 `DagCanvas`。
+  - 后端新增 `DagRepository.findByIdAndTenantId` 与 `OrchestrationService.updateDag`，保存修改后的 definition 并递增 version。
+  - `getDag`、`triggerDag`、`runs` 改为按当前租户查 DAG，避免跨租户读取、触发或查询运行历史。
+  - `DagController` 暴露 `PUT /api/v1/orchestration/dags/{id}`，供画布保存草稿。
+  - 新增 `OrchestrationServiceTest`，覆盖 update 持久化 definition、version 递增和跨租户拒绝。
+  - 前端 `OrchestrationAPI` 增加 `updateDag`。
+  - `DagCanvas` 保存按钮在图级校验通过后，新建路由调用 `createDag`，真实 UUID 路由调用 `updateDag`；新建成功后替换 URL 到 `/orchestration/pipelines/{dagId}`。
+  - 保存 payload 同时写顶层 `nodes/edges` 和 `operatorGraph`，兼容当前画布与 DWD 编译读取。
+  - 验证命令通过：`mvn -q -pl module-orchestration -am test -Djacoco.skip=true`、`pnpm exec tsc --noEmit`、`pnpm build`、`mvn -q install -DskipTests -Djacoco.skip=true`、`git diff --check`。
+  - 重启后端后 OpenAPI 确认 `/api/v1/orchestration/dags/{id}` 已包含 `put`。
+  - 浏览器验证：新建画布点击保存产生 `POST /operators/graph/validate => 200` 和 `POST /orchestration/dags => 200`，URL 替换为真实 DAG `a3504d0f-3a4f-4462-bba3-5d55f6857e40`。
+  - 重新导航到该 UUID URL 后，页面通过 `GET /orchestration/dags/{id} => 200` 从后端加载；DB 反查 `definition.kind=operator_graph`、`operatorGraph.nodes=4`。
+  - 再次点击保存产生 `POST /operators/graph/validate => 200` 和 `PUT /orchestration/dags/{id} => 200`，DB version 从 1 递增到 2。
+- 遇到的问题：
+  - 浏览器重载真实 UUID 时出现一次 Keycloak token endpoint 400 控制台资源错误，但 DAG GET/validate/create/update 均为 200，判定为既有认证刷新噪声，不阻塞本轮。
+- 创建/修改的文件：
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/api/DagController.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/repository/DagRepository.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OrchestrationService.java`
+  - `onelake-app/module-orchestration/src/test/java/com/onelake/orchestration/service/OrchestrationServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/orchestration/DagCanvas.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 59：流水线与算子市场阶段三流水线列表真实化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取 `PipelineList` 当前 mock 表格、`OrchestrationAPI.listDags/triggerDag` 和 `Dag` 类型。
+  - `PipelineList` 移除硬编码 `pipelines`，改为页面加载时调用 `OrchestrationAPI.listDags()`。
+  - 保留原表格布局，真实展示 DAG 名称、dagster job、version、enabled/DRAFT 状态和最近运行占位。
+  - 草稿 DAG 的触发按钮禁用，避免把 disabled DAG 伪装成可运行；已启用 DAG 才调用真实 `triggerDag`。
+  - 页面增加加载、错误和重试状态。
+  - 运行 `pnpm exec tsc --noEmit`、`pnpm build` 和 `git diff --check` 通过。
+  - 浏览器打开 `http://localhost:5173/orchestration/pipelines`，真实请求 `GET /api/v1/orchestration/dags => 200`，表格展示 4 条本地 DAG，其中包含 `order_pipeline` 草稿 v2。
+  - 点击 `order_pipeline` 的“打开画布”进入 `/orchestration/pipelines/a3504d0f-3a4f-4462-bba3-5d55f6857e40`，控制台 0 error。
+- 创建/修改的文件：
+  - `onelake-app/web-console/src/pages/orchestration/PipelineList.tsx`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 60：流水线与算子市场阶段三运行实例真实化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取 `RunInstances.tsx`、`OrchestrationAPI`、`JobRun`、`JobRunDTO`、`JobRunRepository`、`DagController` 和 `OrchestrationService`。
+  - 后端新增租户范围运行实例查询：`GET /api/v1/orchestration/runs?page=&size=`，先取当前租户 DAG，再以 DAG id 集合过滤 `orchestration.job_run`。
+  - `JobRunDTO` 补充 `dagName/dagsterJob`，避免前端用 mock 字段拼流水线名称。
+  - 前端新增 `JobRun` 类型与 `OrchestrationAPI.listRuns/listDagRuns`，`RunInstances` 移除静态数组，接入真实分页、加载、错误、空态和刷新。
+  - 移除原页面指向采集任务的假“日志/重试”动作，改为打开对应流水线，避免跨模块伪导航。
+  - 本地写入验证运行实例 `codex-stage60-run-001` 到 DAG `a3504d0f-3a4f-4462-bba3-5d55f6857e40`。
+  - 验证命令通过：`mvn -q -pl module-orchestration -am test -Djacoco.skip=true`、`mvn -q -pl bootstrap -am -DskipTests compile`、`mvn -q install -DskipTests -Djacoco.skip=true`、`pnpm exec tsc --noEmit`、`pnpm build`、`git diff --check`。
+  - 浏览器验证：登录 `dev/dev123456` 后打开 `/orchestration/runs`，`GET /api/v1/orchestration/runs?page=0&size=20 => 200`，表格展示 `codex-stage60-run-001`、`order_pipeline`、`SUCCESS`、耗时 3.0m，控制台 0 error。
+- 遇到的问题：
+  - 第一次 runtime 验证 `/api/v1/orchestration/runs` 返回 `NoResourceFoundException`，原因是后端启动使用 `.m2` 旧 `module-orchestration` SNAPSHOT jar；执行 `mvn install` 并进程级重启后 endpoint 注册正确，未登录直连返回 401，浏览器登录态返回 200。
+- 创建/修改的文件：
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/api/JobRunController.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/dto/JobRunDTO.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/repository/JobRunRepository.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OrchestrationService.java`
+  - `onelake-app/module-orchestration/src/test/java/com/onelake/orchestration/service/OrchestrationServiceTest.java`
+  - `onelake-app/web-console/src/api/index.ts`
+  - `onelake-app/web-console/src/pages/orchestration/RunInstances.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 61：流水线与算子市场阶段三流水线最近运行真实聚合
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 读取 `DagDTO`、`OrchestrationService.listDags`、`JobRunRepository`、`PipelineList` 和 `Dag/JobRun` 前端类型。
+  - `DagDTO` 新增 `lastRun: JobRunDTO`，`OrchestrationService.listDags/getDag` 为每条 DAG 附加最近一次运行摘要。
+  - `JobRunRepository` 新增 `findFirstByDagIdOrderByStartedAtDesc`。
+  - `PipelineList` 的“最近运行”列从固定 `-` 改为展示 `lastRun.status`、`dagsterRunId/id` 和开始时间。
+  - 补充 `OrchestrationServiceTest.listDagsIncludesLatestRunMetadata`，覆盖列表 DTO 最近运行聚合。
+  - 验证命令通过：`mvn -q -pl module-orchestration -am test -Djacoco.skip=true`、`mvn -q install -DskipTests -Djacoco.skip=true`、`pnpm exec tsc --noEmit`、`pnpm build`、`git diff --check`。
+  - 浏览器验证：打开 `/orchestration/pipelines`，`GET /api/v1/orchestration/dags => 200`，`order_pipeline` 行展示 `SUCCESS codex-stage60-run-001 2026/6/23 06:57:14`，控制台 0 error。
+- 创建/修改的文件：
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/dto/DagDTO.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/repository/JobRunRepository.java`
+  - `onelake-app/module-orchestration/src/main/java/com/onelake/orchestration/service/OrchestrationService.java`
+  - `onelake-app/module-orchestration/src/test/java/com/onelake/orchestration/service/OrchestrationServiceTest.java`
+  - `onelake-app/web-console/src/pages/orchestration/PipelineList.tsx`
+  - `onelake-app/web-console/src/types/index.ts`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### 阶段 62：流水线与算子市场阶段三触发运行失败可观测
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `triggerDag` 改为先保存 `QUEUED` run，再调用 Dagster；成功后更新 `RUNNING`，异常时更新 `FAILED/finishedAt`。
+  - 为业务异常增加 `@Transactional(noRollbackFor = BizException.class)`，避免 `Dagster 未返回 runId` 时失败 run 被事务回滚。
+  - `PipelineList` 触发成功或失败后都会重新加载 DAG 列表，让 `lastRun` 及时刷新。
+  - 本地临时启用 `order_pipeline` 后触发，`POST /api/v1/orchestration/dags/a3504d0f-3a4f-4462-bba3-5d55f6857e40/run?trigger=MANUAL` 返回 400。
+  - DB 验证最新 `job_run` 为 `b99b8175-bdc8-452d-b58d-0bab92081547`、`status=FAILED`、`finished_at` 已写入。
+  - 浏览器验证 `/orchestration/pipelines` 的 `order_pipeline.lastRun` 显示 `FAILED`，`/orchestration/runs` 显示同一条失败运行历史。
+  - 验证后将临时启用的 `order_pipeline` 恢复为 `enabled=false`。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm exec tsc --noEmit` 通过。
+  - `pnpm build` 通过。
+  - `git diff --check` 通过。
+  - 浏览器截图：`stage62-run-failure-visible.png`。
+
+### 阶段 63：流水线与算子市场阶段三触发就绪真实表达
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagDTO` 新增 `triggerable` 与 `triggerBlockedReason`。
+  - `OrchestrationService` 统一计算触发就绪：草稿/禁用、缺少 Dagster job、`sql_workbench_draft` 占位作业均返回不可触发原因。
+  - `triggerDag` 在创建 run 与调用 Dagster 前拦截不可执行草稿，避免把本地前置条件伪装成一次失败运行。
+  - `PipelineList` 改用后端触发就绪字段展示 `可触发/待绑定/草稿`，并禁用不可触发按钮。
+  - 浏览器临时将 `order_pipeline` 置为 `enabled=true`，API 返回 `triggerable=false`、`triggerBlockedReason=当前为画布草稿，尚未绑定可执行 Dagster 作业`；页面显示 `待绑定` 且触发按钮禁用。
+  - 验证后恢复 `order_pipeline enabled=false`，最终页面显示 `草稿`、最近运行保留阶段 62 的 `FAILED` 历史、触发按钮禁用。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm exec tsc --noEmit` 通过。
+  - `pnpm build` 通过。
+  - `git diff --check` 通过。
+  - 后端健康检查 `GET /actuator/health` 返回 200。
+  - 浏览器截图：`stage63-trigger-readiness.png`。
+
+### 阶段 64：流水线与算子市场阶段三 DWD DAG 真实触发闭环
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 复核 Dagster code location：`onelake` / `onelake-loc` 已暴露 `onelake_dbt_model_run` 和 `onelake_sync_task_schedule_reconcile`。
+  - 复核本地两条 VALIDATED DWD 模型，均有 `dbt_model_name`、`artifact_path`、`orchestration_dag_id` 和 `dagster_job=onelake_dbt_model_run`。
+  - 扩展 `DagsterClient`，支持携带 `runConfigData` 和 execution tags 的 `launchRun`。
+  - `OrchestrationService.triggerDag` 对 `definition.kind=DWD_MODEL_DAG` 创建 `modeling.model_run`，构造 `run_dwd_model` 所需配置，并将 model run id 写入 Dagster tags。
+  - 触发成功后同步回写 `orchestration.job_run.dagster_run_id/status` 与 `modeling.model_run.dagster_run_id/status`。
+  - 临时启用 DAG `94f21184-752f-40ea-9c65-1a5ee00b3699`，调用 `POST /api/v1/orchestration/dags/{id}/run?trigger=MANUAL` 返回 200，编排 run 为 `3f2ff034-0e63-4cf4-aac1-075399906580`。
+  - DB 验证 `orchestration.job_run` 与 `modeling.model_run` 都写入同一 Dagster run id `aa4375e6-1b6c-4dd9-90cc-bb0fbccda024`。
+  - Dagster GraphQL 验证 run `STARTED`，tags 包含 `onelake.model_id`、`onelake.model_run_id`、`onelake.orchestration_run_id`、`onelake.tenant_id`、`onelake.dbt_model`。
+  - 验证后恢复临时启用的 DWD DAG 为 `enabled=false`。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `git diff --check` 通过。
+  - `GET /actuator/health` 返回 200。
+
+### 阶段 65：流水线与算子市场阶段三 Dagster 运行状态刷新
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagsterClient` 增加 `getRunStatus`，读取 Dagster run `STARTED/SUCCESS/FAILURE/CANCELED` 与 started/finished 时间。
+  - 编排运行列表和 DAG 内运行列表读取时刷新非终态 `orchestration.job_run`，并同步刷新 `DagDTO.lastRun`。
+  - DWD DAG 的终态同步到 `modeling.model_run`，保持编排 run、模型 run 与 Dagster run 三方状态一致。
+  - 修复 PostgreSQL 无法推断 `Instant` 参数类型的问题，将 JDBC 写入时间显式转换为 `java.sql.Timestamp`。
+  - 对已终态 `job_run` 增加 DWD model_run 补偿同步，避免上一次同步失败后无法恢复。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `git diff --check` 通过。
+  - API `GET /api/v1/orchestration/dags/94f21184-752f-40ea-9c65-1a5ee00b3699/runs?page=0&size=20` 返回 run `3f2ff034-0e63-4cf4-aac1-075399906580` 为 `SUCCESS`。
+  - DB 验证 `orchestration.job_run` 与 `modeling.model_run` 均写入同一 Dagster run `aa4375e6-1b6c-4dd9-90cc-bb0fbccda024` 的终态和完成时间。
+
+### 阶段 66：流水线与算子市场阶段三编排触发 DWD 尾链一致性
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 新增 common 接口 `DwdModelRunSynchronizer`，由 `DwdModelService` 实现 `refreshByDagsterRunId`。
+  - `OrchestrationService` 在刷新 DWD Dagster 终态时优先调用 modeling 同步器，复用原有 artifact 解析、`modeling.model.loaded/failed` 事件发布和质量/血缘尾链。
+  - 保留 JDBC 状态兜底：同步器不存在或失败时仍可回写 `modeling.model_run` 基础状态。
+  - 为 modeling 同步器和 orchestration 委派路径补单元测试。
+  - 临时启用 DAG `94f21184-752f-40ea-9c65-1a5ee00b3699`，触发编排 run `34b4f37a-53ab-4d18-ae8c-8acbe1ecd724`，Dagster run 为 `b8907152-7e50-431a-b24a-6826653f947d`。
+  - 验证后恢复临时启用的 DWD DAG 为 `enabled=false`。
+- 验证：
+  - `mvn -q -pl module-orchestration,module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `git diff --check` 通过。
+  - Dagster GraphQL 验证 run `b8907152-7e50-431a-b24a-6826653f947d` 为 `SUCCESS`。
+  - API 运行列表返回 run `34b4f37a-53ab-4d18-ae8c-8acbe1ecd724` 为 `SUCCESS`，started/finished 时间来自 Dagster。
+  - DB 验证 `modeling.model_run f29186c4-5448-4e24-8add-42a8a0a0bbae` 为 `SUCCEEDED`，`artifacts_path=target/run_results.json`，`rows_written=10`。
+  - Outbox 事件 `modeling.model.loaded` 已发布，Redis consumer group `catalog/quality` lag 为 0。
+  - Catalog 资产 `dwd.dwd_trade_operator_manifest_df` 行数为 10、质量分为 100，血缘为 `ods.ods_codex_orders -> dwd.dwd_trade_operator_manifest_df`。
+  - Quality 结果包含 `DBT_BUILD/NOT_NULL/UNIQUE` 三条规则，均通过。
+
+### 阶段 67：流水线与算子市场阶段三 DWD 运行资源观测
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 复核 `DwdModelRunDTO` 和前端 `DwdModelRun` 已有 `resourceGroup/computeProfile/estimatedScanBytes/actualScanBytes/costEstimate/retryCount` 字段。
+  - 在资产详情 DWD 模型 tab 的“最近运行”摘要中展示资源组、计算画像、扫描量、成本估算和重试次数。
+- 验证：
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - `git diff --check` 通过。
+  - DB 验证 run `f29186c4-5448-4e24-8add-42a8a0a0bbae` 为 `SUCCEEDED`，`resource_group=default`，`compute_profile=trino-small`，`rows_written=10`。
+  - 浏览器访问 `/lakehouse/tables/6b9d7bfc-ad10-4a00-a0f8-12b828b30587`，DWD 模型 tab 显示 `SUCCEEDED/MANUAL/写入 10/default/trino-small/扫描 - / 成本 - / 重试 0`。
+
+### 阶段 68：流水线与算子市场阶段三画布算子面板真实化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagCanvas` 左侧算子面板从 `OperatorAPI.listOperators()` 读取真实算子市场数据，替换 7 个硬编码原型算子。
+  - 按 category 分组展示市场算子，并用 `operatorRef` 将画布节点外观与市场元数据对齐。
+  - 保留现有保存、图级校验和 DWD DAG 加载行为。
+- 验证：
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - `git diff --check` 通过。
+  - 浏览器访问 `/orchestration/pipelines/94f21184-752f-40ea-9c65-1a5ee00b3699` 控制台 0 error。
+  - 网络验证 `/api/v1/orchestration/operators` 和 `/api/v1/orchestration/dags/94f21184-752f-40ea-9c65-1a5ee00b3699` 均返回 200。
+  - 页面左侧展示标准化、关联、加密、聚合、输出、输入、脱敏、治理、质量门禁、转换等市场分类和完整内置算子名称。
+
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
@@ -1205,9 +1556,16 @@
 | 2026-06-22 CST | DWD compile 首次把 dbt 产物写入 `bootstrap/dbt` | 1 | 后端运行目录为 `bootstrap`，将默认 dbt project dir 改为 `../dbt` 并清理误生成目录 |
 | 2026-06-22 CST | 后端重启后仍返回旧 OpenAPI schema，compile 响应缺少 2.5 字段 | 2 | 发现 `make backend` 只运行 bootstrap，没有先编译 reactor 依赖；改为先 `mvn -pl bootstrap -am compile`，再运行 bootstrap |
 | 2026-06-22 CST | 通知 API 验证脚本用 Python 从环境变量读取 `TOKEN`，但 shell 未 export，导致清理 SQL receiver_id 为空 | 1 | 改为直接用接口返回的通知 id 验证已读；后续脚本用 stdin 或显式 export 传 token |
+| 2026-06-23 CST | Stage 65 同步 DWD `model_run` 时 PostgreSQL 无法推断 `java.time.Instant` 参数类型 | 1 | 将 JDBC 时间参数转换为 `java.sql.Timestamp`，并让终态 run 也可补偿同步 DWD 状态 |
+| 2026-06-23 CST | Stage 66 临时恢复 DWD DAG 时误写 `orchestration.dag.updated_at`，该表不存在该列 | 1 | 改为只更新 `enabled` 字段；验证完成后恢复 `enabled=false` |
+| 2026-06-23 CST | 浏览器验证资产详情时 Keycloak token endpoint 出现一次 400 | 1 | 判定为既有 token 刷新噪声；目标 catalog/modeling 接口均已返回 200，页面数据已加载 |
+| 2026-06-23 CST | Stage 69 注册弹窗初次“仅校验”时报 `Cannot read properties of undefined (reading 'trim')` | 1 | Modal/Form 挂载后再写默认值，并在构造 Manifest 前调用 `form.validateFields()` |
+| 2026-06-23 CST | Stage 69 发布版本弹窗叠在详情弹窗上方时点击被底层 Modal wrap 拦截 | 1 | 打开发布版本编辑器前先关闭详情弹窗，再打开版本 Modal |
+| 2026-06-23 CST | Stage 72 类型检查失败：`inferredOperator` 在声明前被动态属性面板引用 | 1 | 将 `inferredOperator` 提升为组件外函数后类型检查通过 |
+| 2026-06-23 CST | Stage 74 浏览器拖拽脚本首次命中外层 main 容器，节点坐标未变化 | 1 | 改为筛选 `position:absolute` 且宽度为 140、文本包含 `operatorRef` 的真实节点元素后验证通过 |
 
 ### 阶段 70：资产发现与湖仓分层表管理边界升级
-- **状态：** complete
+- **状态：** in_progress
 - **开始时间：** 2026-06-23 CST
 - 执行的操作：
   - 读取现有规划文件、工作区状态、`CatalogSearch`、`Tables`、`AssetDetail`、`TableDetail`、导航和资产 DTO。
@@ -1224,13 +1582,441 @@
   - 核对命令：`pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过；`rg` 确认 `from=catalog/from=lakehouse` 互跳入口已存在。
   - 第 5 项文档与总体验证已完成：`docs/FRONTEND_VERIFICATION.md` 同步资产发现、分层表管理和详情页互跳连续性。
   - 核对命令：`pnpm --dir onelake-app/web-console build` 通过；`git diff --check` 通过；浏览器访问 `/catalog/search` 显示“数据资产发现/发现筛选/可用资产/热门资产”，访问 `/lakehouse/tables` 显示“湖仓分层表/表治理清单/贴源 ODS/明细 DWD/治理详情”。
+  - 备注：浏览器 console 日志缓冲中仍有本轮修复前产生的 AntD static message warning；本轮触碰的 `CatalogSearch` 与 `AssetDetail` 已改为 `AntdApp.useApp()`。
+
+### 阶段 72：业务术语表生产化 P0 后端与 Catalog 联动
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 按推荐方案新增业务术语主数据、绑定、版本三张表和 `GlossaryController/GlossaryService`。
+  - 新增 `BusinessTerm*` DTO/Repository/Entity，支持术语 CRUD、提交审定、审定通过、退回、废弃、字段绑定、绑定失效和版本查询。
+  - `DomainEvents` 增加 `modeling.term.created/updated/approved/deprecated/binding_changed`。
+  - Catalog 资产查询支持 `keyword/term`，字段 DTO 增加 `terms`，用于资产详情 Schema 展示业务术语。
+  - 前端新增 `GlossaryAPI` 与业务术语类型，`Glossary` 页面改为真实接口驱动，支持术语检索、分业务域展示、创建/编辑、提交、审定、废弃和资产字段绑定。
+  - `CatalogSearch` 本地搜索纳入字段术语编码/名称，`AssetDetail` Schema 表新增“业务术语”列并可跳转术语表。
+- 检查：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `git diff --check -- module-common/src/main/java/com/onelake/common/outbox/DomainEvents.java module-modeling/src/main/java module-modeling/src/test/java bootstrap/src/main/resources/db/migration/modeling/V5__business_glossary.sql` 通过。
+  - `mvn -q -pl module-catalog -am test -Djacoco.skip=true` 通过。
+  - `git diff --check -- module-catalog/src/main/java module-catalog/src/test/java` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `mvn -q -pl module-modeling,module-catalog -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am compile -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮后端、前端和迁移文件通过。
+  - 本地只对 `modeling` schema 执行 Flyway V5，`modeling.business_term`、`business_term_binding`、`business_term_version` 均已存在，`modeling.flyway_schema_history` 记录 version `5` 成功。
+  - 后端重启后健康检查 `/actuator/health` 为 `UP`，OpenAPI 已暴露 `/api/v1/modeling/glossary/**`。
+  - API 冒烟通过：创建 `CODEX_GMV_102340`，提交后为 `REVIEWING`，审定后为 `APPROVED` v1，绑定 `dwd.dwd_trade_codex_orders_df.amount` 后 Catalog `term` 搜索命中该资产，资产详情 `amount` 字段返回该术语。
+  - 浏览器验证通过：`/catalog/glossary` 展示 `CODEX_GMV_102340`、字段绑定统计为 1；`/catalog/assets/70946dc2-d533-42b0-a94f-3af7e73d7b84` 切到 Schema 后 `amount` 展示业务术语；`/catalog/search` 搜索 `CODEX_GMV_102340` 后“可用资产 (1)”且命中 `dwd.dwd_trade_codex_orders_df`。
+  - 修复浏览器发现的问题：术语列表新增 `bindingCount`，避免顶部绑定统计为 0；`CatalogSearch` 重复 tag key 改为带来源/索引的 key，消除本轮新验证中的重复 key 风险。
+
+### 阶段 69：流水线与算子市场阶段四自定义算子前端注册发布入口
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `OperatorMarket.tsx` 新增“注册算子”入口，支持填写 Manifest 基础信息、端口、参数 schema、输出 schema、SQL/dbt 模板、质量门禁策略和版本说明。
+  - 注册/发布前调用 `OperatorAPI.validateOperator`，校验失败阻断落库；校验通过后分别调用 `registerOperator` 与 `publishVersion`。
+  - 自定义/租户私有算子详情中新增“发布新版本”入口，内置算子不展示该入口。
+  - 修复注册弹窗初次打开时表单默认值未挂载导致“仅校验”读取 undefined 的问题。
+  - 修复详情弹窗与发布版本弹窗叠加导致点击被底层 Modal 拦截的问题。
+- 验证：
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - API 冒烟：`custom.codex_stage69_phone` validate/register/publish 1.0.1/list 均返回 200。
+  - 浏览器验证：`/orchestration/operators` 注册 `custom.codex_stage69_ui`，仅校验通过，注册返回 200；发布新版本后列表展示 latestVersion `1.0.1`。
+
+### 阶段 71：流水线与算子市场阶段四画布从市场添加算子节点
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagCanvas` 左侧真实算子市场面板支持点击添加节点到当前 DAG 草稿。
+  - 新增节点使用市场算子的 `operatorRef/latestVersion/category/displayName`，并从 Manifest required params 生成默认 `config`。
+  - 如果当前选中节点存在且目标算子有输入端口，则自动创建一条临时边，便于进入后端图级校验链路。
+- 验证：
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - 浏览器打开 `/orchestration/pipelines/94f21184-752f-40ea-9c65-1a5ee00b3699`，`GET /api/v1/orchestration/operators` 与 `GET /api/v1/orchestration/dags/{id}` 均返回 200。
+  - 点击 `Codex Stage69 UI 注册算子` 后画布出现新节点，图级校验 `POST /api/v1/orchestration/operators/graph/validate` 返回 200，弹窗显示节点通过，仅保留 `dbt_model` 系统节点 warning。
+  - 未保存临时节点，避免污染真实 DWD DAG 草稿。
+
+### 阶段 72：流水线与算子市场阶段四画布节点属性动态化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 右侧属性面板改为按选中算子的 Manifest 展示 `operatorRef/version/category/compileTarget/inputPorts`。
+  - 按 `paramsSchema.properties` 动态生成字符串、数字、布尔、数组和对象参数输入；必填字段展示“必填”标识。
+  - 编辑节点名称、SQL 或动态参数时同步更新当前节点状态，图级校验和保存定义构造共用该状态。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - `git diff --check` 通过。
+  - 浏览器验证 DWD DAG 中 `input.ods_table` 的 `sourceFqn` 动态字段可编辑；点击校验后 `POST /api/v1/orchestration/operators/graph/validate` 返回 200，请求体包含 `config.sourceFqn=ods.codex_stage72_canvas_param`。
+  - 验证后将前端内存态参数改回 `ods.ods_codex_orders`，未保存临时值。
+
+### 阶段 73：流水线与算子市场阶段四剩余增强核对
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照 `docs/流水线与算子市场算子标准设计方案.md` §6.4、§7.1 和当前 `DagCanvas.tsx` 实现，核对剩余缺口。
+  - 确认已完成：真实市场算子面板、添加节点、动态属性面板、Manifest 图级校验、DAG 保存定义构造。
+  - 确认未完成：完整 X6 Graph 实例迁移、端口级连线编辑/删边、Spark/Python compileTarget 运行时、完整拖拽图编译器。
+  - 本轮选择低风险切片进入阶段 74：先补画布节点拖拽定位，并保持现有保存/校验链路稳定。
+
+### 阶段 74：流水线与算子市场阶段四画布节点拖拽定位最小闭环
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagCanvas` 为画布节点增加 pointer 拖拽能力，拖动时更新节点 `x/y`，并同步右侧属性面板坐标显示。
+  - SVG 连线按节点最新坐标实时重绘。
+  - `buildValidationGraph` 将节点 `x/y` 写入图级校验 payload，保存定义也复用同一份 graph。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过。
+  - `git diff --check` 通过。
+  - 浏览器打开 `/orchestration/pipelines/94f21184-752f-40ea-9c65-1a5ee00b3699` 控制台 0 error。
+  - 拖动 `input.ods_table` 节点，节点页面坐标从 `(542,244)` 移到 `(614,302)`，右侧显示内部坐标 `x 152 / y 158`。
+  - 点击校验后 `POST /api/v1/orchestration/operators/graph/validate` 返回 200，请求体中 `input_ods` 带 `x=152,y=158`；弹窗显示 6 节点通过，仅保留 `dbt_model` 系统节点 warning。
+  - 验证后刷新页面恢复真实 DAG 状态，未保存临时拖拽坐标。
+
+### 阶段 75：流水线与算子市场阶段四端口连线与 X6 深化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `DagCanvas` 的边模型补齐 `id/sourcePort/targetPort/validationMessage`，兼容旧 DAG 边结构并在加载时自动补默认端口。
+  - 画布节点按 Manifest 输入端口渲染左侧端口按钮，输出端口渲染右侧连接按钮，支持“先点输出、再点输入”创建端口级连线。
+  - 新增边选中态和右侧边属性面板，可编辑源节点、源端口、目标节点、目标端口，并支持删除边。
+  - 在前端本地补齐连线合法性标注：缺失节点、自环、目标无输入端口、目标端口不存在、`ONE` 输入被多条边占用、重复边和环路均展示为无效红色虚线。
+  - 图级校验 payload 继续复用当前画布状态，并把每条边的 `id/sourcePort/targetPort/valid` 传给后端。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check -- onelake-app/web-console/src/pages/orchestration/DagCanvas.tsx` 通过。
+  - 浏览器打开 `/orchestration/pipelines/94f21184-752f-40ea-9c65-1a5ee00b3699`，删除并重连合法边后边数从 5 -> 4 -> 5。
+  - 再创建一条指向同一 `ONE` 输入端口的非法边后，画布出现红色无效连线，属性面板显示无效状态，删除后恢复 5 条边。
+  - 点击“校验”后 `POST /api/v1/orchestration/operators/graph/validate` 返回 200，请求体包含 `sourcePort/targetPort`；响应 `ok=true`，仅保留 `dbt_model` 系统节点 warning。
+  - 验证后刷新页面恢复真实 DAG 状态，未保存临时连线变更。
+
+### 阶段 78：流水线与算子市场阶段四算子生命周期治理入口
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `OperatorMarket` 使用后端 `updateOperator` API 补齐自定义/租户私有算子的“废弃/恢复”入口，内置算子不展示该危险操作。
+  - 市场统计新增“已废弃”，列表卡片和详情弹窗按 `DEPRECATED` 展示“已废弃”状态。
+  - 废弃算子时阻断“安装/锁定版本”和“使用”动作，避免把不可用算子继续加入新 DAG。
+  - 恢复算子后重新显示为可用，并恢复安装/使用按钮。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `git diff --check -- onelake-app/web-console/src/pages/orchestration/DagCanvas.tsx onelake-app/web-console/src/pages/orchestration/OperatorMarket.tsx task_plan.md` 通过。
+  - 浏览器在 `/orchestration/operators` 打开 `Codex Stage69 UI 注册算子` 详情，点击“废弃”并确认，`PUT /api/v1/orchestration/operators/custom.codex_stage69_ui` 返回 200，请求体为 `{"status":"DEPRECATED"}`。
+  - 废弃后详情显示“已废弃”，且“安装/锁定版本”“使用”按钮 disabled。
+  - 点击“恢复”并确认，`PUT /api/v1/orchestration/operators/custom.codex_stage69_ui` 返回 200，请求体为 `{"status":"ACTIVE"}`；详情恢复“可用”，按钮重新可用。
+  - 验证后已恢复 `custom.codex_stage69_ui` 为 `ACTIVE`，未留下废弃状态污染测试数据。
+  - 浏览器控制台仍保留一次本地 Keycloak token endpoint 400 和两条 React Router v7 future warning；阶段 78 的两次状态更新 API 均为 200。
+
+### 阶段 76：业务术语表 M4/M5 影响分析与治理闭环
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `GlossaryController` 新增 `/terms/{id}/impact` 和 `/terms/{id}/version-diff`。
+  - `GlossaryService` 聚合术语绑定字段、Catalog 下游资产、Quality 规则、DaaS API、Orchestration DAG、Security PII 记录和治理审批单。
+  - 已审定术语编辑时自动转为 `REVIEWING`，并写入 `security.approval_request` 的 `GLOSSARY_CHANGE` 待审批记录。
+  - 术语版本快照补齐定义、口径、同义词、负责人、标签和密级，最近版本 diff 可解释字段级变化。
+  - `Glossary.tsx` 详情区新增影响分析、风险提示、质量/API/安全/审批汇总、版本历史和最近差异表。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl module-modeling,module-catalog,module-dataservice -am test -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - API 冒烟样本 `CODEX_FULL_NAME_GBTLU`：`GET /impact` 返回 bindings=2、qualityRules=4、apis=3、securityNotices=2、approvals=1；`/version-diff` 返回 `definition/caliberSql/synonyms/status` 变更。
+  - 浏览器打开 `/catalog/glossary` 搜索 `CODEX_FULL_NAME_GBTLU`，页面可见“影响分析”“DaaS API”“版本历史与最近差异”和术语编码，截图已保存到 `.run-logs/glossary-impact-browser.png`。
+
+### 阶段 77：业务术语跨模块最小联动闭环
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 新增 `modeling/V6__dwd_mapping_glossary.sql`，为 `data_model_column_mapping` 增加 `term_id/term_code/term_name`。
+  - `DwdModelDraftRequest`、`DataModelDTO`、`DataModelColumnMapping` 支持术语字段；`DwdModelService` 保存 DWD 草稿时校验已审定术语并反写 `business_term_binding(source=MODELING)`。
+  - 敏感术语绑定字段时写入 `security.pii_scan_record` 待确认记录；建模反写绑定也会触发 DWD 目标字段 PII 待确认。
+  - `QualityRules.tsx` 新建规则表单支持按已审定术语筛选资产/字段并带出口径表达式。
+  - `TableWizard.tsx` 字段映射行新增“业务术语”选择列，ODS 派生 DWD 时继承源字段已有术语。
+  - `DataServicePublisher#createDraft/publish` 会按 `sourceFqn + business_term_binding` 富化 `responseSchema`，`ApiWizard` 和 `ApiDetail` 展示字段术语、定义、口径、密级和动态脱敏提示。
+- 验证：
+  - 本地仅应用 `modeling/V6__dwd_mapping_glossary.sql` 并登记 `modeling.flyway_schema_history` version=6，未执行全量迁移以避免无关 orchestration 迁移干扰。
+  - 真实 API 冒烟样本 `CODEX_FULL_NAME_GBTLU`：手工绑定 `ods.ods_customers_100k.full_name`，建模草稿生成 `dwd.dwd_user_codex_glossary_gbtlu_df.full_name` 的 `MODELING` 绑定。
+  - DB 复核：`business_term_binding` 中该术语有 `MANUAL` 与 `MODELING` 两条 ACTIVE 绑定；`security.pii_scan_record` 中源字段和 DWD 字段均为 `PENDING/L3`。
+  - DaaS 草稿 `a6f77a56-eeb6-480c-976b-553024d15c0a` 的 `responseSchema` 包含 `termCode=CODEX_FULL_NAME_GBTLU`、`caliberSql=trim(full_name)`、`classification=L3`、`masked=true`。
+  - 浏览器打开 API 详情页可见“响应字段与术语”、`CODEX_FULL_NAME_GBTLU` 和“动态脱敏”，截图 `.run-logs/api-detail-glossary-browser.png`。
+  - 浏览器打开质量规则新建弹窗可见“业务术语/绑定资产/字段”入口，截图 `.run-logs/quality-term-selector-browser.png`。
+  - 浏览器打开 DWD 建模向导，手动修正源表数字导致的命名校验后进入字段步骤，可见“业务术语”列，截图 `.run-logs/table-wizard-term-browser.png`。
+  - 运行中发现旧孤儿后端进程仍占用 8080，导致新 jar 未加载；已 `kill -9` 旧 PID 后重启 `onelake-backend-glossary` screen，并重新完成 API 冒烟。
+
+### 阶段 79：流水线与算子市场阶段四 Spark/Python 扩展边界与编译器深化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案 §2.5，确认 `SPARK/PYTHON` 是扩展点，不属于当前 SQL_DBT 执行闭环，不能在画布图级校验中伪装为可运行。
+  - `OperatorService` 将 Manifest 校验拆成 compileTarget 多态契约：`SQL_DBT` 要求 `template.sql`；`SPARK` 要求 `template.kind=SPARK_SQL/PYSPARK` 与对应 `sql/entrypoint`；`PYTHON` 要求 `template.kind=PYTHON` 与 `entrypoint`。
+  - 非 SQL_DBT 扩展态必须声明 `resourceHint.defaultResourceGroup` 与 `resourceHint.engine`，且 engine 需与 compileTarget 一致。
+  - 图级校验继续阻断非 SQL_DBT 节点，并返回明确的“尚未接入当前 SQL_DBT 图级执行闭环”错误。
+  - `OperatorMarket` 注册/发布表单改为完整 `template JSON` 和 `resourceHint JSON`，选择 SPARK/PYTHON 时展示扩展态警示。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - 后端正确目录执行 `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 后重启，`/actuator/health` 为 `UP`。
+  - 真实 API：`POST /api/v1/orchestration/operators/validate` 校验合法 SPARK Manifest 返回 `ok=true`，warning 为 `compileTarget=SPARK 当前仅完成 Manifest 契约校验...`。
+  - 真实 API：缺少 `resourceHint` 的 SPARK Manifest 返回 `ok=false`，错误为 `compileTarget=SPARK 必须声明 resourceHint.defaultResourceGroup 与 resourceHint.engine`。
+  - 浏览器打开注册弹窗，确认存在 `template JSON` 与 `resourceHint JSON`，选择 SPARK 后显示“SPARK 为扩展态”和 Dagster op 落地提示。
+
+### 阶段 80：流水线与算子市场阶段四后端端口级图校验深化
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - `OperatorService.validateGraph` 记录每个节点的入边列表，保留旧的入边总数兼容逻辑。
+  - `validateInputPorts` 改为按 Manifest `inputPorts.name/cardinality` 校验端口，单输入端口兼容未声明 `targetPort` 的旧边格式。
+  - 多输入算子要求边声明 `targetPort`；未知端口、缺端口、`ONE` 端口多条入边都会返回明确错误。
+  - 补充 JOIN 内置算子测试，覆盖缺失 `targetPort`、重复 `left` 端口、正确 `left/right` 三类路径。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - 正确目录执行 `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 后重启，`/actuator/health` 为 `UP`。
+  - 真实 API：`join.inner` 两条边均缺 `targetPort` 时 `ok=false`，返回“多输入端口，边必须声明 targetPort”和左右端口缺边错误。
+  - 真实 API：两条边都指向 `targetPort=left` 时 `ok=false`，返回“输入端口 left 最多允许 1 条输入边”和 `right` 缺边。
+  - 真实 API：`left/right` 分别连入时 `ok=true`。
+  - 浏览器控制台在 `/orchestration/operators` 仍有本地 Keycloak token 400、通知 500、运行任务 500；本轮验证接口均为 200，错误不来自阶段 79/80 改动。
+
+### 阶段 81：流水线与算子市场阶段四字段 schema 闭合与治理校验
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 查询本地 `catalog.asset`、`modeling.data_model_source`、`modeling.data_model_column_mapping` 表结构，确认真实字段 schema 来源是 `catalog.asset.columns` 和 DWD 字段映射，不从页面或 mock 推断。
+  - `OperatorService.validateGraph` 新增字段 schema 自一致校验：支持 `sourceColumns/inputColumns/outputColumns`、输入/输出节点 `config.columns`、`transform.rename_columns` 的 mapping/mappings 输出推导。
+  - 字段引用校验覆盖 `column/columns/requiredColumns/keys/groupBy/partitionBy/orderBy/uniqueKey/incrementalColumn` 以及 mapping 源字段；无 source schema 时只做 mapping/output 自一致检查并返回 warning。
+  - 敏感字段治理校验读取 `sourceColumns.classification/piiType/suggestLevel` 和显式 `sensitiveColumns`，输出敏感字段未经过 `MASK/ENCRYPT` 算子时报错。
+  - 兼容 DWD 生成图中 `mask.partial` 使用 `columns` 批量承载敏感字段的现状，避免单字段 Manifest 参数误伤已有图。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过，重启后端为 `onelake-backend-stage81`，`/actuator/health` 为 `UP`。
+  - 真实 API：缺失字段 `missing_col` 返回 `ok=false`，错误为 `节点 quality_gate 引用了不存在的字段: missing_col`。
+  - 真实 API：`user_phone` 为 L3/PII 且未经过 MASK/ENCRYPT 时返回 `ok=false`，错误为 `敏感字段 user_phone 透传到输出但未经过 MASK/ENCRYPT 算子`。
+  - 真实 API：`user_phone` 经过 `mask.partial` 后返回 `ok=true`。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 与阶段相关文件尾随空白检查通过。
+  - 浏览器 `/orchestration/operators` 可加载真实算子列表，注册弹窗仍显示 `template JSON` 与 `resourceHint JSON`；控制台仅有 React Router v7 future warning。
+
+### 阶段 82：流水线与算子市场阶段四资源组与执行资源契约校验
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案 §2.4 资源校验与 ODS->DWD 资源契约，确认当前没有业务侧资源组注册表，真实运行数据统一为 `TRINO_DBT/default/trino-small`。
+  - `OperatorService.validateResourceHint` 在 Manifest 自校验阶段识别不支持的 `defaultResourceGroup/engine` 组合；SQL_DBT 未声明资源组时继续兼容默认值。
+  - `OperatorService.validateGraph` 新增 graph/node `engine/resourceGroup/computeProfile/resourceProfile` 校验，当前受控允许 `TRINO_DBT/default|rg-default/trino-small|trino-medium|trino-large`。
+  - 显式声明未接入 engine、未知 resourceGroup 或不属于该 group 的 computeProfile 时返回错误；未声明图级 resourceGroup 时返回默认兼容 warning。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过；清理旧 Java 残留进程后，后端 `onelake-backend-stage82` 监听 8080，PID 69939，健康检查 `UP`。
+  - 真实 API：`resourceGroup=warehouse-xl` 返回 `ok=false`，错误包含 `resourceGroup 不存在或不支持当前 engine: warehouse-xl/TRINO_DBT`。
+  - 真实 API：`computeProfile=spark-large` + `resourceGroup=default` 返回 `ok=false`，错误包含 `computeProfile 不存在或不属于当前 resourceGroup: spark-large/default`。
+  - 真实 API：`TRINO_DBT/default/trino-small` 返回 `ok=true`。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 与阶段相关文件尾随空白检查通过。
+  - 浏览器刷新 `/orchestration/operators` 后仍显示可见算子 67、内置 65、自定义 2、注册入口可见；控制台仅有 React Router v7 future warning。
+
+### 阶段 83：流水线与算子市场阶段四 DWD 编译产物与质量门禁算子对齐
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案 §5.1，确认当前 `schema.yml` 质量测试产物仍由 `DataModelColumnMapping.primaryKey` 硬编码生成，未消费 operator graph 中 `QUALITY_GATE` 节点配置。
+  - `DwdModelService.compileArtifacts` 先生成 `operatorGraph`，再把同一份图传给 `generateSchemaYaml`。
+  - `generateSchemaYaml` 新增质量门禁提取逻辑：读取 `QUALITY_GATE`/`gate.*` 节点的 `config.columns` 与 `config.tests`，当前落地支持 dbt 内置 `not_null/unique`。
+  - 保留无质量门禁配置时按主键生成 `not_null/unique` 的兼容兜底，避免历史草稿或异常图丢失基础测试。
+  - 单测补充断言：DWD compile 返回的 operatorGraph 包含 `gate.not_null` 和 `tests=["not_null","unique"]`，落盘 `schema.yml` 同时包含 `not_null/unique`。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage83`，PID 3963，`/actuator/health` 为 `UP`。
+  - 真实 API：`POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`，operatorGraph 中 `quality_gate.config={"columns":["id"],"tests":["not_null","unique"],"actionOnViolation":"FAIL"}`。
+  - 真实落盘产物：`onelake-app/dbt/models/intermediate/dwd_user_codex_glossary_gbtlu_df.yml` 只在 `id` 列下生成 `not_null/unique`，`full_name/age` 未被误加测试。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 84：流水线与算子市场阶段四质量门禁 dbt generic tests 覆盖增强
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案质量门禁清单，确认 `gate.enum` 和 `gate.referential` 可分别映射为 dbt generic tests `accepted_values` 与 `relationships`，无需新增执行引擎。
+  - 将 `DwdModelService` 内部 dbt test 表示从纯字符串升级为 `DbtTestSpec(name, arguments)`，保持 `not_null/unique` 的简写 YAML 输出。
+  - `gate.enum` 读取 `config.column/config.values` 并输出 `accepted_values.values`。
+  - `gate.referential` 读取 `config.column/config.refModel/config.refColumn` 并输出 `relationships.to/field`。
+  - 增加单测，使用伪造 operator graph 覆盖 `accepted_values` 与 `relationships` YAML 形态。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage84`，PID 30795，`/actuator/health` 为 `UP`。
+  - 真实 API 回归：`POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`，默认 `quality_gate` 仍为 `columns=["id"]`、`tests=["not_null","unique"]`，落盘 yml 仍包含 `not_null/unique` 且未出现 `accepted_values/relationships` 误写。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 85：流水线与算子市场阶段四范围/正则门禁 dbt macro 落地
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案质量门禁清单，确认 `gate.range/gate.regex` 不是 dbt 内置 generic tests，需要 OneLake 自定义 test macro 才能真实执行。
+  - 在 `onelake-app/dbt/macros/onelake_macros.sql` 新增 `onelake_range` 与 `onelake_regex` generic tests：返回违规记录，交由 dbt test 判定失败。
+  - `DwdModelService` 支持 `gate.range` → `onelake_range(arguments.min_value/max_value)`，`gate.regex` → `onelake_regex(arguments.pattern)`。
+  - 带参数 generic tests 使用 dbt 1.11 推荐的 `arguments:` 结构，避免继续引入 MissingArgumentsProperty deprecation。
+  - 扩展单测，覆盖 `accepted_values/relationships/onelake_range/onelake_regex` 四类带参数 tests 的 YAML 形态。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - 临时最小 dbt 项目复制当前 macro 后执行 `uvx --from dbt-trino dbt parse --profiles-dir <tmp> --project-dir <tmp> --no-partial-parse` 通过。
+  - 当前完整 dbt 项目的 `dbt parse` 仍被既有生成模型 `dwd_trade_operator_manifest_df` 依赖缺失 source `ods.ods_codex_orders` 阻断；该问题来自本地生成产物/source 漂移，不是新增 macro 语法错误。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage85`，PID 44320，`/actuator/health` 为 `UP`。
+  - 真实 API 回归：`POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`，默认 `quality_gate` 仍为 `columns=["id"]`、`tests=["not_null","unique"]`，未误写 `onelake_range/onelake_regex`。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 86：流水线与算子市场阶段四行数门禁模型级 dbt test 落地
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案质量门禁清单，确认 `gate.row_count` 是模型级质量门禁，应输出到 `models[].tests`，不应写到列级 `columns[].tests`。
+  - 在 `onelake-app/dbt/macros/onelake_macros.sql` 新增 `onelake_row_count` generic test，返回低于/高于阈值的违规计数行。
+  - `DwdModelService.generateSchemaYaml` 新增模型级 tests 渲染，列级 tests 与模型级 tests 分流，避免 row_count 被误挂到字段下。
+  - 扩展单测，覆盖 `onelake_row_count` 的模型级 YAML 输出，以及列级 `accepted_values/relationships/onelake_range/onelake_regex` 不退化。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - 临时最小 dbt 项目复制当前 macro 后执行 `uvx --from dbt-trino dbt parse --profiles-dir <tmp> --project-dir <tmp> --no-partial-parse` 通过，覆盖 `onelake_row_count/onelake_range/onelake_regex`。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage86`，screen `53400.onelake-backend-stage86`，PID 53475，`/actuator/health` 为 `UP`。
+  - 真实 API 回归：`POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`，默认 `quality_gate` 仍为 `columns=["id"]`、`tests=["not_null","unique"]`，未误写 `onelake_row_count`。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 87：流水线与算子市场阶段四 DWD sources.yml 聚合一致性修复
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案 §5.1 的 dbt 产物要求，复核完整 dbt project parse 失败原因：`models/generated/sources.yml` 是共享 source manifest，但 DWD compile 每次只写当前模型 source，导致历史已验证 DWD SQL 依赖缺失 source。
+  - `DwdModelService.compileArtifacts` 改为输出当前模型 source + 当前租户已 `VALIDATED` 且有 `artifactPath` 的 DWD 模型 sources，并按 schema/table 聚合到同一个 `sources.yml`。
+  - 增加单测 `compileArtifactsAggregatesSourcesForExistingCompiledDwdModels`，覆盖编译新模型时保留既有已编译模型的 ODS source。
+  - 验证前端构建时发现 `LineageGraph.tsx` 的可选 `dagre` 动态导入会被 Vite 生产构建解析并失败；保持“未安装则降级网格布局”的原意，改为运行时动态导入。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage87`，screen `74534.onelake-backend-stage87`，PID 74922，`/actuator/health` 为 `UP`。
+  - 真实 API 回归：`POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`，`engine=TRINO_DBT`、`resourceGroup=default`、`computeProfile=trino-small`，operatorGraph 仍包含 `QUALITY_GATE`。
+  - 真实落盘产物：`onelake-app/dbt/models/generated/sources.yml` 同时包含 `ods_codex_orders` 与 `ods_customers_100k`，历史 `dwd_trade_operator_manifest_df.sql` 的 `source('ods','ods_codex_orders')` 依赖已恢复。
+  - 完整 dbt project：`uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过；仅保留既有 `models/marts/schema.yml` 的 `dbt_utils.accepted_range` 参数 deprecation warning 和 unused staging 配置 warning。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 88：流水线与算子市场阶段四 freshness 质量门禁 dbt source 产物落地
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案质量门禁清单，确认 `gate.freshness` 的真实 dbt 产物应写入 `sources.yml` 的 source table：`loaded_at_field` + `freshness.warn_after/error_after`，而不是列级 generic test。
+  - `DwdModelService.generateSourceYaml` 新增 source freshness 解析：支持 `operatorRef=gate.freshness` 或 `tests/type/test=freshness`，读取 `sourceFqn/assetFqn`、`column/loadedAtField`、`maxDelay/warnAfter/errorAfter` 和 `actionOnViolation`。
+  - `maxDelay` 支持 `24h/30m/2d/1w` 以及 `{count, period}` 形式；`actionOnViolation=WARN` 输出 `warn_after`，默认/`FAIL` 输出 `error_after`，显式 `warnAfter/errorAfter` 优先。
+  - 聚合历史已验证 DWD sources 时容错解析历史 `operatorGraph`，将已有模型的 freshness 配置保留到共享 `sources.yml`。
+  - 增加单测 `compileArtifactsWritesSourceFreshnessForExistingCompiledDwdModels`，覆盖历史已验证模型的 freshness 配置输出。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage88`，screen `89055.onelake-backend-stage88`，PID 89431，`/actuator/health` 为 `UP`。
+  - 真实 API 验证：临时将模型 `49f1e2f0-7a8d-4911-a6cc-7a467bb1b772` 的 operatorGraph 写入 `gate.freshness(column=updated_at,maxDelay=24h,actionOnViolation=WARN)` 后，调用 `POST /api/v1/modeling/models/ccaf721f-d39d-4cea-9a73-89cea59313ce/compile` 返回 `code=0`。
+  - 真实 freshness 产物：临时生成的 `sources.yml` 中 `ods_codex_orders` 包含 `loaded_at_field: "updated_at"`、`freshness.warn_after.count=24`、`period=hour`；随后已恢复 DB 原始 operatorGraph 并重新 compile，当前仓库 `sources.yml` 未残留测试 freshness。
+  - freshness 形态下完整 dbt project `dbt parse` 通过；恢复后完整 dbt project `uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过，仅保留既有 `models/marts/schema.yml` deprecation warning 与 unused staging 配置 warning。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 89：流水线与算子市场阶段四 custom_sql 质量门禁只读断言落地
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案质量门禁清单，确认 `gate.custom_sql` 不能直接把任意模板字符串写入 dbt；本轮采用“只读、单语句、仅当前模型”的最小安全协议。
+  - 在 `onelake-app/dbt/macros/onelake_macros.sql` 新增 `onelake_custom_sql` generic test：`assertion_sql` 返回违规记录，dbt test 非空即失败；运行时将 `__ONELAKE_MODEL__` 替换为当前 dbt model relation。
+  - `DwdModelService` 将 `gate.custom_sql/custom_sql` 映射为模型级 dbt test，读取 `assertionSql/assertion_sql/sql`。
+  - 编译阶段复用 `ReadOnlySqlValidator`：将 `{{ model }}` 占位符替换为安全临时表名后校验单条只读语句，并拒绝未使用 `{{ model }}` 或引用其他表的断言 SQL。
+  - DWD compile 新增已保存扩展质量门禁合并逻辑：仅保留 `gate.freshness/gate.custom_sql` 节点，避免历史默认 graph 被重复合入，也避免自定义门禁被默认生成图覆盖。
+  - 增加单测，覆盖 `generateSchemaYaml` 中 `onelake_custom_sql` YAML 形态，以及 compile 阶段保存过的 `gate.custom_sql` 能进入返回的 operatorGraph 和落盘 schema。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - 重启后端为 `onelake-backend-stage89`，screen `4187.onelake-backend-stage89`，PID 4601，`/actuator/health` 为 `UP`。
+  - 真实 API 验证：临时将模型 `ccaf721f-d39d-4cea-9a73-89cea59313ce` 的 operatorGraph 写入 `gate.custom_sql(assertionSql="select * from {{ model }} where age < 0")` 后，调用 compile 返回 `code=0`，返回 operatorGraph 包含 `gate.custom_sql`。
+  - 真实 custom SQL 产物：临时生成的 `dwd_user_codex_glossary_gbtlu_df.yml` 包含 `onelake_custom_sql.arguments.assertion_sql: "select * from __ONELAKE_MODEL__ where age < 0"`；随后已恢复 DB 原始 operatorGraph 并重新 compile，当前仓库 schema 未残留测试 custom SQL。
+  - custom SQL 形态下完整 dbt project `dbt parse` 通过；恢复后完整 dbt project `uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过，仅保留既有 `models/marts/schema.yml` deprecation warning 与 unused staging 配置 warning。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 对本轮相关文件通过。
+
+### 阶段 90：流水线与算子市场阶段四 dbt 校验噪声清理
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 将 `onelake-app/dbt/models/marts/schema.yml` 中既有 `dbt_utils.accepted_range` 顶层参数改为 dbt 1.11 推荐的 `arguments.min_value`，与 DWD 质量门禁输出风格保持一致。
+  - 移除 `onelake-app/dbt/dbt_project.yml` 中当前没有资源命中的 `models.onelake.staging` 配置，避免 parse 阶段 unused configuration warning。
+- 验证：
+  - `uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过，已无 dbt deprecation warning 和 unused staging config warning。
+
+### 阶段 91：流水线与算子市场阶段四资源组与计算画像注册表闭环
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照 Stage82 留下的“静态资源契约不是完整资源组后台管理”缺口，新增 `orchestration.resource_group` 与 `orchestration.compute_profile` 迁移。
+  - 迁移种子化 4 个内置资源组：`default/rg-default/TRINO_DBT`、`spark-default/SPARK`、`python-default/PYTHON`，以及 11 个默认计算画像。
+  - 新增 `ResourceGroup`、`ComputeProfile` 实体，`ResourceGroupRepository`、`ComputeProfileRepository`，以及 `ResourceGroupService`。
+  - 新增 `/api/v1/orchestration/resource-groups` 查询、资源组 upsert、计算画像 upsert API，并补充 Swagger/OpenAPI 说明。
+  - `OperatorService` 的 `resourceHint` 与 operator graph `resourceGroup/computeProfile` 校验改为调用 `ResourceGroupService`，默认注册表为空时保留 Stage82 静态默认兜底；租户同名资源组会覆盖组状态，计算画像可继承全局默认 profile。
+  - 前端 `OperatorAPI` 与 `types` 新增 `ResourceGroup/ComputeProfile` 契约，后续画布或资源管理页可直接复用。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过，仅保留 uvx/dbt-trino 可执行提示和 Trino keyring info，无 dbt deprecation/unused config warning。
+  - 本地执行 `orchestration/V3__resource_group_registry.sql`，实际插入 4 个资源组和 11 个计算画像。
+  - 重启后端为 `onelake-backend-stage91`，screen `40592.onelake-backend-stage91`，PID `40953`，`/actuator/health` 为 `UP`；启动前确认并清理旧 Stage89 孤儿 Java 进程占用的 8080。
+  - 真实 API：`GET /api/v1/orchestration/resource-groups` 返回 4 个内置资源组及默认 profiles。
+  - 真实 API：临时创建 `warehouse-codex-stage91` 与 `trino-codex-stage91` 后，Manifest 校验返回 `ok=true`，graph 校验返回 `ok=true`。
+  - 真实 API：同一临时资源组下使用错误画像 `spark-large` 返回 `ok=false`，错误为 `computeProfile 不存在或不属于当前 resourceGroup: spark-large/warehouse-codex-stage91`。
+  - 临时资源组和画像已通过 SQL 清理，DB 中 `warehouse-codex-stage91` 剩余 0 条。
+
+### 阶段 92：流水线与算子市场阶段四 Spark/Python 运行契约就绪边界
+- **状态：** complete
+- **开始时间：** 2026-06-23 CST
+- 执行的操作：
+  - 对照方案 §2.5 与 Stage79/Stage82 结论，确认 Spark/Python 当前只完成 Manifest 契约，不能放开图级执行。
+  - 直接查询当前 Dagster GraphQL repository：`onelake/onelake-loc` 仅暴露 `onelake_dbt_model_run` 与 `onelake_sync_task_schedule_reconcile`，没有 Spark/Python job。
+  - `DagsterClient` 新增 repository jobs 查询能力，用于运行契约就绪检查。
+  - 新增 `RuntimeContractService`、`RuntimeContractDTO` 与 `/api/v1/orchestration/runtime-contracts`，返回 `SQL_DBT/SPARK/PYTHON` 的 Manifest 支持、图级执行支持、Dagster job 可用性与阻断原因。
+  - `OrchestrationService.triggerReadiness` 在触发前读取 DAG definition/engine/compileTarget 与 dagsterJob，若命中 Spark/Python contract-only 契约则返回不可触发，避免创建无意义运行实例。
+  - 前端 `OperatorAPI` 与 `types` 新增 `RuntimeContract` 契约，后续画布或资源管理页可据此禁用未接入运行态入口。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `uvx --from dbt-trino dbt parse --profiles-dir . --no-partial-parse` 通过，仅保留 uvx/dbt-trino 可执行提示和 Trino keyring info。
+  - 重启后端为 `onelake-backend-stage92`，screen `50062.onelake-backend-stage92`，PID `50424`，`/actuator/health` 为 `UP`。
+  - 真实 API：`GET /api/v1/orchestration/runtime-contracts` 返回 `SQL_DBT READY`，`SPARK/PYTHON MISSING_DAGSTER_JOB`，且 Spark/Python `graphExecutionSupported=false`。
+  - 真实 API：创建临时 `codex_stage92_spark_contract` DAG 后触发返回 `code=40012`，message 为 `SPARK 仍处于 Manifest 契约态，尚未接入 Dagster Spark op、依赖隔离和部署契约`。
+  - DB 实证：该临时 Spark DAG 触发后 `orchestration.job_run` 为 0 行，说明阻断发生在创建 run 之前；临时 DAG 已清理，剩余 0 条。
 
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 15 已完成 |
-| 我要去哪里？ | 下一步进入 Dagster 调度注册、Airbyte connector definition 自动发现/表单 schema、真实本地数据面联调 |
-| 目标是什么？ | 让数据集成从控制面创建进入可发布、可试跑、可触发、可回写、可诊断的完整闭环 |
+| 我在哪里？ | 流水线与算子市场阶段 79、80、81、82、83、84、85、86、87、88、89、90、91、92 已完成；业务术语阶段 76、77 的进度记录已存在但不属于本轮流水线方向 |
+| 我要去哪里？ | 当前流水线方向阶段四后端校验、DWD 编译产物对齐、可执行 dbt generic tests、source manifest 一致性、freshness source 产物、custom_sql 只读断言、dbt 校验噪声清理、资源组/计算画像注册表、Spark/Python 运行契约就绪边界已完成；后续若继续扩展，应进入真实 Spark/Python Dagster op、资源调度分配或资源管理 UI，而不是伪装已有运行态 |
+| 目标是什么？ | 继续把流水线与算子市场从可浏览/可注册/可添加推进到完整算子工程化 |
 | 我学到了什么？ | 见 `findings.md` |
 | 我做了什么？ | 见上方记录 |
 

@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-阶段 52
+流水线与算子市场阶段四行数门禁模型级 dbt test 落地（阶段 86 已完成）
 
 ## 各阶段
 
@@ -410,12 +410,12 @@
 - **状态：** complete
 
 ### 阶段 49：ODS 到 DWD 迭代 3 Dagster dbt 执行最小闭环
-- [ ] 检查 Dagster user-code 镜像、definitions.py、dagster-dbt 依赖和 dbt project 挂载路径
-- [ ] 新增 `onelake_dbt_model_run` job 或 asset job，接收 modelName/run config 并执行 `dbt build --select <model>`
-- [ ] 控制面新增 DWD model run 记录与触发 API，写入 Dagster run id、状态和日志入口
-- [ ] 解析 dbt artifacts 的最小 run result，形成后续质量/Catalog 回写输入
-- [ ] 运行 Dagster/dbt 本地验证、后端测试和浏览器/接口回归
-- **状态：** pending
+- [x] 检查 Dagster user-code 镜像、definitions.py 和 dbt project 挂载路径；当前采用 Dagster op 内 subprocess dbt，而非 dagster-dbt asset job
+- [x] 新增 `onelake_dbt_model_run` job，接收 modelName/run config 并执行 `dbt build --select <model>`
+- [x] 控制面新增 DWD model run 记录与触发链路，写入 Dagster run id、状态和日志入口
+- [x] 解析 dbt artifacts 的最小 run result，形成质量/Catalog 回写输入
+- [x] 运行 Dagster/dbt 本地验证、后端测试和接口回归
+- **状态：** complete
 
 ### 阶段 50：全局任务条 P0 真实任务投影与前端接入
 - [x] 新增 `common.running_task` 统一任务投影表和后端任务 API
@@ -441,12 +441,279 @@
 - [x] 保持通知中心视觉不变，补充通知按钮 aria label，并验证铃铛未读数、抽屉内容和已读接口
 - **状态：** complete
 
+### 阶段 53：流水线与算子市场阶段二后端市场底座
+- [x] 新增 `orchestration.operator/operator_version/operator_install` 迁移表
+- [x] 新增算子实体、枚举、Repository、DTO、Service 和 `/api/v1/orchestration/operators` API
+- [x] 将设计方案中的 65 个内置算子落成统一 Manifest catalog，并通过启动 seeder 幂等写入
+- [x] 支持列表/详情/Manifest 校验/自定义注册/版本发布/安装/弃用元信息更新
+- [x] 补充 `OperatorServiceTest`，验证 65 内置 seed、质量门禁策略校验、注册、安装版本校验和列表 manifest
+- [x] 运行 `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 与 `git diff --check`
+- **状态：** complete
+
+### 阶段 54：流水线与算子市场阶段二前端市场真实 API 接入
+- [x] 扩展前端 Operator/Manifest 类型与 `OperatorAPI`
+- [x] `OperatorMarket.tsx` 从 mock 切到真实算子市场 API，保留现有页面风格
+- [x] 支持分类、scope、关键词筛选、详情 manifest/版本展示和安装调用
+- [x] 补齐加载、错误、空态和真实 API 失败提示
+- [x] 运行前端 TypeScript/build，并在浏览器验证 `/orchestration/operators`
+- **状态：** complete
+
+### 阶段 55：流水线与算子市场阶段三 OperatorCompiler 接入前置核对
+- [x] 重新读取 DWD 编译服务、operator graph、dbt 产物和 Dagster `onelake_dbt_model_run` 现状
+- [x] 判断阶段三可立即实施的最小切片：Manifest registry lookup、算子链编译校验、DWD 默认链改用市场 manifest
+- [x] 明确与 ODS->DWD 迭代 3 Dagster dbt 执行的依赖先后
+- [x] 形成并执行下一轮实现切片，完成后继续测试与缺口核对
+- **状态：** complete
+
+### 阶段 56：流水线与算子市场阶段三图级校验服务
+- [x] 读取 orchestration DAG 服务、控制器、DTO 和算子市场 API 现状
+- [x] 新增可复用 OperatorCompiler/GraphValidator，校验节点、边、operatorRef/version、Manifest required params、compileTarget 和环路
+- [x] 暴露图级校验 API，供后续 DAG 画布和 DWD 向导复用
+- [x] 补充单测、后端编译和 API 验证
+- **状态：** complete
+
+### 阶段 57：流水线与算子市场阶段三前端图级校验接入
+- [x] 读取 DAG 画布页面、OrchestrationAPI、OperatorAPI 和 DagNode/DagEdge 类型现状
+- [x] 前端补齐 `validateGraph` API 封装和校验结果类型复用
+- [x] 在 DAG 画布的保存/校验路径接入真实图级校验，展示 errors/warnings 且保持现有布局风格
+- [x] 运行前端 TypeScript/build，浏览器验证画布真实校验请求
+- **状态：** complete
+
+### 阶段 58：流水线与算子市场阶段三 DAG 草稿真实保存
+- [x] 读取 Orchestration 后端 DAG 创建/查询契约、前端 PipelineList 和 DagCanvas 保存入口
+- [x] 后端补齐 DAG 更新接口或复用创建接口保存画布 graph definition
+- [x] 前端保存按钮在图级校验通过后持久化 DAG 草稿，并反馈真实保存结果
+- [x] 补充后端/前端测试，浏览器验证保存后可重新加载同一 DAG definition
+- **状态：** complete
+
+### 阶段 59：流水线与算子市场阶段三流水线列表真实化
+- [x] 读取 PipelineList 当前 mock 展示、OrchestrationAPI.listDags/triggerDag 和 Dag 类型
+- [x] 将流水线列表从 mock 切到真实 DAG API，保留当前表格样式和入口
+- [x] 真实展示草稿/启用状态、版本和最近运行占位，禁用不可触发草稿
+- [x] 运行前端 TypeScript/build，浏览器验证列表可见保存的 DAG 并可打开画布
+- **状态：** complete
+
+### 阶段 60：流水线与算子市场阶段三运行实例真实化
+- [x] 评估 RunInstances 页面与 `orchestration.job_run`、`common.running_task` 的真实边界
+- [x] 补齐按 DAG 或全局查询运行实例的 API 契约
+- [x] 将运行实例页面从 mock 切到真实运行数据
+- [x] 运行后端/前端测试和浏览器验证
+- **状态：** complete
+
+### 阶段 61：流水线与算子市场阶段三流水线最近运行真实聚合
+- [x] 读取 DAG DTO/list API 与 PipelineList 最近运行占位现状
+- [x] 后端在 DAG 列表返回最近一次 `job_run` 摘要
+- [x] 前端流水线列表展示真实最近运行状态、时间和 run id
+- [x] 运行后端/前端测试和浏览器验证
+- **状态：** complete
+
+### 阶段 62：流水线与算子市场阶段三触发运行失败可观测
+- [x] 读取 DAG trigger 当前落库顺序和 PipelineList 触发刷新逻辑
+- [x] 后端触发时先创建 `QUEUED` 运行实例，Dagster 成功后更新 `RUNNING`
+- [x] Dagster 触发失败时保留 `FAILED` 运行实例并返回清晰业务错误
+- [x] 前端触发失败后刷新流水线最近运行，确保失败可见
+- [x] 运行后端/前端测试和浏览器验证
+- **状态：** complete
+
+### 阶段 63：流水线与算子市场阶段三触发就绪真实表达
+- [x] 后端 `DagDTO` 返回 `triggerable/triggerBlockedReason`，区分草稿、缺作业和可触发
+- [x] `triggerDag` 在调用 Dagster 前拦截不可执行草稿，避免把本地前置条件伪装成运行失败
+- [x] 前端流水线列表用后端就绪字段展示 `可触发/待绑定/草稿` 并禁用不可触发按钮
+- [x] 运行后端/前端测试和浏览器验证
+- **状态：** complete
+
+### 阶段 64：流水线与算子市场阶段三下一轮执行闭环核对
+- [x] 复核 `onelake_dbt_model_run` Dagster job、dbt 产物、DWD DAG 与当前 trigger/reconcile 的差距
+- [x] 确定下一轮最小实现切片：编排触发 DWD DAG 时创建 `modeling.model_run` 并传递 Dagster runConfig/tags
+- [x] 实施后运行后端测试、全量 install、diff 检查和真实 Dagster/DB 验证
+- **状态：** complete
+
+### 阶段 65：流水线与算子市场阶段三 Dagster 运行状态刷新
+- [x] `DagsterClient` 增加 run 状态查询，映射 Dagster `STARTED/SUCCESS/FAILURE/CANCELED`
+- [x] 编排运行历史读取时刷新非终态 `orchestration.job_run`
+- [x] 对 DWD DAG 同步刷新 `modeling.model_run` 状态，保持三方状态一致
+- [x] 运行后端测试和真实运行实例页/API 验证
+- **状态：** complete
+
+### 阶段 66：流水线与算子市场阶段三编排触发 DWD 尾链一致性
+- [x] 抽取 common DWD model_run 同步接口，由 modeling 复用 artifact/event 尾链实现
+- [x] orchestration 刷新 Dagster 终态时优先调用 modeling 同步器，缺失时保留 JDBC 兜底
+- [x] 运行建模/编排模块测试、全工程 install、diff 检查和真实 Dagster/Catalog/Quality 验证
+- **状态：** complete
+
+### 阶段 67：流水线与算子市场阶段三 DWD 运行资源观测
+- [x] 复核 `DwdModelRun` 已有资源画像、扫描量、成本和重试字段
+- [x] 资产详情 DWD 模型区展示最近运行的 `resourceGroup/computeProfile/scan/cost/retry`
+- [x] 运行前端构建、diff 检查和真实资产详情浏览器验证
+- **状态：** complete
+
+### 阶段 68：流水线与算子市场阶段三画布算子面板真实化
+- [x] `DagCanvas` 左侧算子面板从 `OperatorAPI.listOperators` 读取真实可见算子
+- [x] 按市场 category 分组展示 65 个内置算子，并让画布节点按 `operatorRef` 对齐市场元数据
+- [x] 运行前端构建、diff 检查和真实 DWD DAG 画布浏览器验证
+- **状态：** complete
+
+### 阶段 69：流水线与算子市场阶段四自定义算子前端注册发布入口
+- [x] 对照后端已具备的 validate/register/publish/update/install API，补齐前端自定义算子注册与发布入口
+- [x] 复用 Manifest 校验结果展示，避免提交非法算子版本
+- [x] 运行前端构建、后端 API 冒烟和浏览器验证
+- **状态：** complete
+
 ### 阶段 70：资产发现与湖仓分层表管理边界升级
 - [x] 导航与页面定位命名：将目录入口表达为“资产发现”，湖仓入口表达为“分层表管理”
 - [x] 资产发现页差异化：突出找数、理解、申请、消费，弱化湖仓治理字段
 - [x] 分层表管理页差异化：突出 ODS/DWD/DWS/ADS、建模链路、表治理和维护状态
 - [x] 详情页互跳：资产画像与表治理详情互相可达，并保持主操作边界
 - [x] 同步前端验证文档并运行构建/diff 核对
+- **状态：** complete
+
+### 阶段 71：流水线与算子市场阶段四画布从市场添加算子节点
+- [x] 画布算子面板支持从真实市场算子添加节点到当前 DAG 草稿
+- [x] 新节点携带 `operatorRef/operatorVersion/config`，并进入现有图级校验与保存链路
+- [x] 运行前端构建、图级校验 API 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 72：流水线与算子市场阶段四画布节点属性动态化
+- [x] 右侧属性面板按选中算子 `paramsSchema` 动态生成参数输入
+- [x] 编辑后的节点 `config` 进入图级校验 payload，并复用现有保存定义构造链路
+- [x] 运行前端类型检查、构建、diff 检查和浏览器图级校验验证
+- **状态：** complete
+
+### 阶段 73：流水线与算子市场阶段四剩余增强核对
+- [x] 核对 X6 真实拖拽、连线编辑、Spark/Python 算子扩展和完整编译器剩余边界
+- [x] 继续按风险切分下一轮可实施项
+- [x] 每轮继续执行构建、API/浏览器和缺口核对
+- **状态：** complete
+
+### 阶段 74：流水线与算子市场阶段四画布节点拖拽定位最小闭环
+- [x] 画布节点支持拖拽移动，连线随节点位置实时更新
+- [x] 节点 `x/y` 坐标进入图级校验和保存定义 payload
+- [x] 运行前端类型检查、构建、diff 检查和浏览器图级校验验证
+- **状态：** complete
+
+### 阶段 75：流水线与算子市场阶段四端口连线与 X6 深化
+- [x] 设计并实施端口级连线编辑、删边和连线合法性可视化
+- [x] 评估是否从当前 SVG 最小闭环迁移到 X6 Graph 实例，避免一次性重写破坏保存/校验链路
+- [x] 运行构建、图级校验 API 和浏览器交互验证
+- **状态：** complete
+
+### 阶段 76：业务术语表 M4/M5 影响分析与治理闭环
+- [x] 新增术语影响分析接口，聚合绑定字段、下游资产、质量规则、DaaS API、DAG 和安全建议
+- [x] 补齐术语版本 diff/影响展示，已审定术语变更进入可解释治理状态
+- [x] 前端 Glossary 展示影响分析、版本历史和废弃风险提示
+- [x] 运行后端测试、前端构建、API 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 77：业务术语跨模块最小联动闭环
+- [x] 建模向导字段支持选择术语，并在提交/编译后写入字段绑定
+- [x] 质量规则按术语筛选字段并展示术语上下文
+- [x] 敏感术语字段绑定触发安全建议或 PII 待确认记录
+- [x] DaaS API 草稿/详情继承字段术语定义、口径和密级提示
+- [x] 运行后端/前端检查和真实端到端验证
+- **状态：** complete
+
+### 阶段 78：流水线与算子市场阶段四算子生命周期治理入口
+- [x] 对照市场 API，补齐前端算子废弃/恢复入口，限制内置算子误操作
+- [x] 列表与详情展示 `DEPRECATED` 状态，并在安装/使用前给出真实状态反馈
+- [x] 运行前端类型检查、构建、后端 API 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 79：流水线与算子市场阶段四 Spark/Python 扩展边界与编译器深化
+- [x] 对照 `compileTarget=SPARK/PYTHON` 扩展点，核对后端 Manifest 校验、图级校验和前端表达边界
+- [x] 设计首个非 SQL_DBT 扩展的运行时/部署契约，避免在无 Dagster op 前伪装可执行
+- [x] 评估字段 schema 闭合、敏感字段治理和资源组校验的图编译器深化切片
+- [x] 运行后端/前端检查，并形成下一轮可实施项
+- **状态：** complete
+
+### 阶段 80：流水线与算子市场阶段四后端端口级图校验深化
+- [x] 后端图级校验识别边 `targetPort`，兼容单输入端口旧边格式
+- [x] 多输入算子强制声明 `targetPort`，校验端口缺失、未知端口和 `ONE` 基数冲突
+- [x] 用 JOIN 内置算子运行单测和真实 API 验证
+- **状态：** complete
+
+### 阶段 81：流水线与算子市场阶段四字段 schema 闭合与治理校验
+- [x] 核对当前 operator graph 中字段 schema 的真实来源和缺口，避免无 schema 时伪造闭合校验
+- [x] 补齐可验证的字段引用/输出 schema 推导最小切片
+- [x] 评估敏感字段透传与 MASK/ENCRYPT 治理校验的可接入数据源
+- [x] 运行后端/前端测试、API 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 82：流水线与算子市场阶段四资源组与执行资源契约校验
+- [x] 核对资源组/计算画像当前真实来源，确认本地暂无业务侧资源组注册表
+- [x] 在 Manifest 和 operator graph 校验中补齐受控 `engine/resourceGroup/computeProfile` 组合校验
+- [x] 保持未声明资源时兼容默认值，不伪装资源组后台管理已完成
+- [x] 运行后端/前端测试、API 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 83：流水线与算子市场阶段四 DWD 编译产物与质量门禁算子对齐
+- [x] 对照方案 §5.1，确认 `schema.yml` 质量测试产物仍由字段映射主键硬编码生成，未消费 operator graph 中 `QUALITY_GATE` 节点配置
+- [x] 将 DWD compile 的 operator graph 生成提前，并让 `generateSchemaYaml` 从质量门禁节点 `config.columns/config.tests` 生成 dbt tests
+- [x] 保留无质量门禁配置时的主键兜底，兼容历史草稿
+- [x] 运行后端/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 84：流水线与算子市场阶段四质量门禁 dbt generic tests 覆盖增强
+- [x] 对照方案质量门禁清单，确认 `gate.enum` 与 `gate.referential` 可映射为 dbt generic tests，适合本轮落地
+- [x] 将 `accepted_values` 与 `relationships` 从 operator graph 配置渲染到 `schema.yml`
+- [x] 运行后端/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 85：流水线与算子市场阶段四范围/正则门禁 dbt macro 落地
+- [x] 对照方案质量门禁清单，确认 `gate.range/gate.regex` 需要 OneLake 自定义 dbt generic test macro 才能真实执行
+- [x] 新增 `onelake_range/onelake_regex` dbt generic tests
+- [x] 将 `gate.range/gate.regex` 从 operator graph 配置渲染到 `schema.yml`
+- [x] 运行后端/dbt/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 86：流水线与算子市场阶段四行数门禁模型级 dbt test 落地
+- [x] 对照方案质量门禁清单，确认 `gate.row_count` 应作为模型级 dbt generic test 输出
+- [x] 新增 `onelake_row_count` dbt generic test
+- [x] 支持从 operator graph 渲染 `models[].tests` 模型级 tests
+- [x] 运行后端/dbt/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 87：流水线与算子市场阶段四 DWD sources.yml 聚合一致性修复
+- [x] 复核完整 dbt project parse 失败原因，确认 `models/generated/sources.yml` 被单模型编译覆盖，导致历史 DWD 模型缺失 source
+- [x] DWD compile 聚合当前模型与已验证 DWD 模型的 ODS sources，避免共享 source manifest 漂移
+- [x] 补充单测覆盖历史已编译模型 source 保留
+- [x] 运行后端/dbt/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 88：流水线与算子市场阶段四 freshness 质量门禁 dbt source 产物落地
+- [x] 对照方案质量门禁清单，确认 `gate.freshness` 应输出 dbt source freshness，而不是列级 generic test
+- [x] 支持从 operator graph 读取 `column/maxDelay/actionOnViolation` 并渲染 `loaded_at_field/freshness.warn_after/error_after`
+- [x] 覆盖聚合 sources.yml 中历史已验证 DWD 模型 freshness 配置不丢失
+- [x] 运行后端/dbt/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 89：流水线与算子市场阶段四 custom_sql 质量门禁只读断言落地
+- [x] 对照方案质量门禁清单，确认 `gate.custom_sql` 需要 SQL 安全协议，不能裸写模板
+- [x] 新增 `onelake_custom_sql` dbt generic test macro，断言 SQL 返回违规记录即失败
+- [x] 编译阶段校验 custom SQL 为单条只读语句，且只能通过 `{{ model }}` 引用当前模型
+- [x] 保留模型已保存的 `gate.freshness/gate.custom_sql` 扩展质量门禁节点，避免默认 graph 覆盖
+- [x] 运行后端/dbt/前端测试、运行态 API 冒烟和缺口复核
+- **状态：** complete
+
+### 阶段 90：流水线与算子市场阶段四 dbt 校验噪声清理
+- [x] 修复既有 `dbt_utils.accepted_range` 顶层参数写法，改为 dbt 1.11 推荐的 `arguments:`
+- [x] 移除当前未命中的 `models.onelake.staging` 配置，避免 unused configuration warning
+- [x] 运行完整 dbt parse、前后端检查和缺口复核
+- **状态：** complete
+
+### 阶段 91：流水线与算子市场阶段四资源组与计算画像注册表闭环
+- [x] 新增 `orchestration.resource_group` 与 `orchestration.compute_profile` 注册表迁移，并种子化默认 Trino/Spark/Python 资源契约
+- [x] 新增资源组/计算画像实体、仓库、DTO、服务和 API，支持租户自定义注册、更新与查询
+- [x] 将 `OperatorService` 的 Manifest/graph 资源校验改为复用资源组注册表，不再依赖服务内静态 Map
+- [x] 前端 API/type 层补齐资源组与计算画像契约，供后续画布/资源管理页复用
+- [x] 运行后端/dbt/前端测试、真实 API 冒烟、临时资源清理和缺口复核
+- **状态：** complete
+
+### 阶段 92：流水线与算子市场阶段四 Spark/Python 运行契约就绪边界
+- [x] 查询当前 Dagster repository jobs，确认仅 `onelake_dbt_model_run` 与 schedule reconcile 已暴露
+- [x] 新增运行契约 API，返回 `SQL_DBT/SPARK/PYTHON` 的 Manifest 支持、图级执行支持和 Dagster job 可用性
+- [x] 编排触发前识别 Spark/Python contract-only DAG，明确阻断且不创建 `job_run`
+- [x] 前端 API/type 层补齐运行契约契约，供后续画布启用/禁用运行入口
+- [x] 运行后端/dbt/前端测试、真实 API 冒烟、临时 DAG 清理和缺口复核
 - **状态：** complete
 
 ## 关键问题

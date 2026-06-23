@@ -41,6 +41,11 @@ function fmtBytes(value?: number) {
   return `${value} B`;
 }
 
+function fmtCost(value?: number) {
+  if (value == null) return '-';
+  return value.toFixed(2);
+}
+
 function maintenanceColor(status?: string) {
   if (status === 'OK') return 'success';
   if (status === 'CRITICAL') return 'error';
@@ -347,8 +352,15 @@ export default function TableDetail() {
                           <Tag color={runStatusColor(latestRun.status)}>{latestRun.status}</Tag>
                           <Tag>{latestRun.triggerType}</Tag>
                           {latestRun.rowsWritten != null && <Tag>写入 {latestRun.rowsWritten}</Tag>}
+                          {latestRun.resourceGroup && <Tag>{latestRun.resourceGroup}</Tag>}
+                          {latestRun.computeProfile && <Tag>{latestRun.computeProfile}</Tag>}
                         </Space>
                         <Text style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{fmtTime(latestRun.finishedAt || latestRun.updatedAt || latestRun.createdAt)}</Text>
+                        <Text style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                          扫描 {fmtBytes(latestRun.actualScanBytes ?? latestRun.estimatedScanBytes)}
+                          {' / '}成本 {fmtCost(latestRun.costEstimate)}
+                          {' / '}重试 {latestRun.retryCount ?? 0}
+                        </Text>
                         {latestRun.errorMsg && <Text type="danger" style={{ fontSize: 12 }}>{latestRun.errorMsg}</Text>}
                       </Space>
                     );
@@ -511,7 +523,7 @@ export default function TableDetail() {
             state="empty"
             title="暂无血缘"
             description="当前 Catalog 聚合接口没有返回该资产的上下游血缘"
-            cta={<Button icon={<BranchesOutlined />} onClick={() => navigate('/catalog/lineage')}>展开整页血缘</Button>}
+            cta={<Button icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(asset.fqn)}`)}>展开整页血缘</Button>}
           />
         ) : (
           <Space direction="vertical" style={{ width: '100%' }}>
@@ -537,7 +549,7 @@ export default function TableDetail() {
                 ]}
               />
             )}
-            <Button icon={<BranchesOutlined />} onClick={() => navigate('/catalog/lineage')}>展开整页血缘</Button>
+            <Button icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(asset.fqn)}`)}>展开整页血缘</Button>
           </Space>
         )}
       </SectionCard>

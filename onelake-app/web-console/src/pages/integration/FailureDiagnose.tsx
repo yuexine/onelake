@@ -429,7 +429,7 @@ export default function FailureDiagnose() {
               <Button icon={<StepForwardOutlined />} onClick={() => message.warning({ content: '从 checkpoint 恢复待接入：需 Flink CDC savepoint 集成', duration: 4 })}>从 checkpoint 恢复</Button>
               <Button onClick={() => message.warning({ content: '跳过坏记录待接入：需 Airbyte error-handling 配置', duration: 4 })}>跳过坏记录</Button>
               <Button danger icon={<PauseCircleOutlined />} onClick={() => message.warning({ content: '管道暂停待接入：需 Airbyte connection cancel API', duration: 4 })}>暂停管道</Button>
-              <Button icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?focus=${encodeURIComponent(task.targetTable)}&from=diagnose&runId=${run.id}`)}>查看血缘影响</Button>
+              <Button icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(task.targetTable)}&from=diagnose&runId=${run.id}`)}>查看血缘影响</Button>
             </Space>
           </div>
         </>

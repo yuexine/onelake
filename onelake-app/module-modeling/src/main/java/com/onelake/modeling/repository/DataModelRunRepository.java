@@ -11,6 +11,8 @@ import java.util.UUID;
 public interface DataModelRunRepository extends JpaRepository<DataModelRun, UUID> {
     Optional<DataModelRun> findByIdAndTenantId(UUID id, UUID tenantId);
 
+    List<DataModelRun> findByDagsterRunIdAndTenantId(String dagsterRunId, UUID tenantId);
+
     List<DataModelRun> findByModelIdAndTenantIdOrderByQueuedAtDesc(UUID modelId, UUID tenantId);
 
     boolean existsByModelIdAndSourceIntegrationRunId(UUID modelId, UUID sourceIntegrationRunId);

@@ -2,7 +2,7 @@
  * 资产详情（对应原型 §8.6.2 / §8.6.7）。
  * Tab: 概览 / Schema / 血缘 / 质量 / 访问·订阅 / 变更历史
  */
-import { useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
 import { DatabaseOutlined, BranchesOutlined, SafetyOutlined, AppstoreOutlined, TableOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
@@ -59,6 +59,17 @@ export default function AssetDetail() {
             { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
             { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
             { title: '描述', dataIndex: 'description' },
+            { title: '业务术语', dataIndex: 'terms', width: 180, render: (_: unknown, record: any) => (
+              record.terms?.length ? (
+                <Space size={4} wrap>
+                  {record.terms.map((term: any) => (
+                    <Link key={term.id} to="/catalog/glossary">
+                      <Tag color={term.status === 'APPROVED' ? 'success' : 'blue'} style={{ margin: 0 }}>{term.code}</Tag>
+                    </Link>
+                  ))}
+                </Space>
+              ) : '-'
+            ) },
             { title: 'PII类型', dataIndex: 'piiType', render: (v: string) => v || '-' },
             { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
             { title: '建议密级', dataIndex: 'suggestLevel', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
@@ -71,7 +82,7 @@ export default function AssetDetail() {
         <Space direction="vertical" size={8}>
           <Text>上游：<Text code>mysql.orders</Text> → <Text code>{asset.fqn}</Text></Text>
           <Text>下游：<Text code>{asset.fqn}</Text> → <Text code>ads.ads_sales_df</Text> → API <Text code>/api/order</Text></Text>
-          <Button type="link" onClick={() => navigate('/catalog/lineage')}>展开整页血缘 →</Button>
+          <Button type="link" onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(asset.fqn)}`)}>展开整页血缘 →</Button>
         </Space>
       </SectionCard>
     ) },

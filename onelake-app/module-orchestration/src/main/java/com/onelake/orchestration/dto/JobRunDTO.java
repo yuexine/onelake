@@ -6,6 +6,8 @@ import java.util.UUID;
 public record JobRunDTO(
     UUID id,
     UUID dagId,
+    String dagName,
+    String dagsterJob,
     String dagsterRunId,
     String triggerType,
     String status,

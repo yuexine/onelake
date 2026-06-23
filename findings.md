@@ -380,13 +380,243 @@
 - 浏览器验证中，任务条刷新后生成 `任务失败：采集任务 orders_sync -> ods.orders` 未读通知，顶部铃铛显示 1，抽屉展示 `CRITICAL`、失败标题和 `账号密码过期`，控制台无 error。
 - 这仍不是完整通知体系：审批、系统消息、质量告警单独入通知、静默规则、通知渠道和 SSE/WebSocket 推送仍是后续 P3/P4；本轮只完成任务条失败结果到通知中心的最小真实闭环。
 
+## 2026-06-22 流水线与算子市场阶段二后端市场底座实施发现
+- 算子市场后端已从“无表、无 API、前端 mock”推进到 orchestration schema 内的一等公民：`operator` 保存算子注册信息，`operator_version` 保存 Manifest 快照，`operator_install` 保存租户安装/版本锁定。
+- 内置算子没有写成散落 SQL，而是集中在 `BuiltInOperatorCatalog`，启动 seeder 幂等写入 65 个 `BUILTIN + SQL_DBT` manifest；迁移只负责建表，Flyway 关闭或表未准备好时 seeder 会跳过，不阻断后端启动。
+- Manifest 校验覆盖 `operatorRef` 小写命名、semver、category/scope/compileTarget、paramsSchema、outputSchema、template，以及 `QUALITY_GATE` 必须有 `policy.actionOnViolation`，对应设计方案的注册前自校验。
+- 市场 API 已提供列表、详情、validate、注册、发布版本、更新元信息、安装/锁版；列表会合并 BUILTIN、当前租户 CUSTOM/TENANT_PRIVATE 和已安装算子，按分类、scope、关键词过滤。
+- 当前阶段二后端仍不做图级编译、端口连线校验、字段闭合推导和资源组存在性校验；这些属于阶段三 `OperatorCompiler` 和画布运行态增强，不能把市场 API 误说成“可执行流水线编译器”。
+- 验证通过：`mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 覆盖 65 内置 seed、质量门禁策略校验、注册、安装版本校验和列表 manifest；`git diff --check` 通过。
+
+## 2026-06-22 流水线与算子市场阶段二前端真实 API 接入发现
+- `OperatorMarket.tsx` 已从 5 条 mock 卡片切到 `OperatorAPI.listOperators`，真实返回 65 个内置算子；页面仍保留原来的企业控制台卡片网格和详情弹窗结构。
+- 前端类型新增 `OperatorManifest/Operator/OperatorVersion/OperatorValidationResult`，`DagNode` 同步补可选 `operatorRef/operatorVersion/config`，与后端和 ODS->DWD 2.5 节点契约对齐。
+- 页面支持 scope 分段筛选、category 下拉筛选、关键词搜索、刷新、详情加载、版本展示、参数 schema 展示和安装/锁定版本调用；加载、错误、空态复用 `StateView`。
+- 初次浏览器验证时点击安装触发 AntD 静态 `message` warning，已改为 `AntApp.useApp()`，复测 `/orchestration/operators` 控制台 0 error。
+- 真实网络验证：登录态下 `GET /api/v1/orchestration/operators`、`GET /operators/input.dwd_table`、`POST /operators/input.dwd_table/install` 和安装后的列表刷新均返回 200。
+- 阶段二至此满足设计方案中的“可浏览/搜索/安装的算子市场”；仍未完成阶段三的图级编译、DWD 默认算子链调用市场 manifest、Dagster dbt 运行和质量/血缘回写。
+
+## 2026-06-22 流水线与算子市场阶段三前置核对发现
+- 当前代码已经存在 Dagster `onelake_dbt_model_run` job，`DwdModelDagsterClient` 也已能发起 job、查询 run status，`DwdRunArtifactReader` 已读取 dbt `run_results.json` 并触发 loaded/failed 事件；阶段三不应重复新增 Dagster job。
+- `module-modeling` 当前不依赖 `module-orchestration`，DWD 服务读取 Catalog 也采用 `JdbcTemplate` 跨 schema 查询；阶段三最小切片应继续通过稳定表契约读取 `orchestration.operator/operator_version`，避免 Java 模块依赖倒挂。
+- `DwdModelService.operatorGraphDefinition` 仍是硬编码节点类型和名称，节点缺少 `operatorRef/operatorVersion/manifest`，因此 DWD 2.5 的 operator graph 还没有真正消费算子市场 Manifest。
+- 下一轮可落地切片：DWD compile 阶段解析默认内置算子 manifest，校验 `compileTarget=SQL_DBT`、category 匹配，并把 manifest 快照嵌入生成的 operator graph；市场表缺失或 manifest 不合法时阻断 compile。
+- 实施后发现：`bootstrap` 运行时依赖本地 Maven 仓库里的模块 SNAPSHOT jar，源码修改后仅重启后端不会生效；需要先 `mvn -q -pl module-modeling -am install -DskipTests -Djacoco.skip=true` 再重启。
+- 真实 API 复测确认 `POST /api/v1/modeling/models/{id}/compile` 返回的 operator graph 中，除内部 `DBT_MODEL` 节点外，DWD 默认链已写入 `input.ods_table`、`transform.rename_columns`、`govern.drop_required_missing`、`gate.not_null`、`output.iceberg_table`，且所有 manifest `compileTarget=SQL_DBT`。
+- 数据库反查 `orchestration.dag.definition.nodes[*].operatorRef` 与 API 返回一致，说明 manifest 接入已落库，不只是响应 DTO 临时拼装。
+
+## 2026-06-23 流水线与算子市场阶段三图级校验实施发现
+- `POST /api/v1/orchestration/operators/graph/validate` 已成为 DAG 画布和 DWD 向导可复用的后端校验入口，支持直接 graph、`operatorGraph` 和 `definition.operatorGraph` 多种请求形态。
+- 图级校验会按租户可见范围解析 `operatorRef`，用指定 `operatorVersion` 或 latest version 读取 Manifest 快照，并校验 Manifest 自身、category/nodeType、`compileTarget=SQL_DBT`、required params、输入端口基数和 DAG 环路。
+- DWD operator graph 中的 `DBT_MODEL` 是系统运行节点，不属于市场算子；校验器允许它没有 `operatorRef`，但会返回 warning，避免前端或后续编译把它误当成缺配置错误。
+- 真实正向验证结果：阶段 55 生成的 DAG `94f21184-752f-40ea-9c65-1a5ee00b3699` 校验 `ok=true`，市场算子 refs 为 `input.ods_table`、`transform.rename_columns`、`govern.drop_required_missing`、`gate.not_null`、`output.iceberg_table`。
+- 真实反向验证结果：修改 `definition.operatorGraph` 删除 `transform_mapping.config.mapping` 并添加 `output_dwd -> input_ods` 环路后，接口返回 `ok=false`，错误包含环路、输入边异常和缺少必填参数。
+- 重要运行态经验：DAG definition 同时保留顶层 `nodes/edges` 和 `operatorGraph` 快照；图级校验优先校验 `operatorGraph`。测试反例必须修改这个层级，否则会误以为校验漏报。
+- 与前几轮一致，bootstrap 运行态依赖本地 Maven 仓库中的模块 SNAPSHOT；新增 controller/service 后需要先 `mvn install` 并进程级重启，单纯 DevTools 热重载可能看不到新 OpenAPI 路由。
+
+## 2026-06-23 流水线与算子市场阶段三前端图级校验发现
+- `DagCanvas` 原先的“DAG 校验结果”是静态 mock 弹窗，保存按钮没有动作；阶段 57 已将校验按钮和保存前置检查都接到真实 `OperatorAPI.validateGraph`。
+- 画布从后端 DAG 加载时应优先使用 `definition.operatorGraph`，否则 DWD 编译写入的 Manifest graph 会被顶层兼容字段覆盖，导致前端校验结果和后端编译链路不一致。
+- 新建画布仍是原型节点，但现在会映射到内置算子 refs：`input.ods_table`、`govern.drop_required_missing`、`mask.partial`、`output.iceberg_table`，因此也能验证市场 Manifest、required params 和端口基数。
+- 浏览器验证中，“校验”和“保存”各发起一次 `POST /api/v1/orchestration/operators/graph/validate`，均返回 200；弹窗显示后端成功结果，控制台只有既有 React Router v7 future warning，没有新错误。
+- 当前保存仍只做“校验通过，可保存草稿”的前置检查，不会持久化 DAG；下一步应补后端 update/save 契约和前端保存后重新加载验证。
+
+## 2026-06-23 流水线与算子市场阶段三 DAG 草稿保存发现
+- 后端原先只有 `POST /api/v1/orchestration/dags` 创建，没有 `PUT` 更新；画布保存无法持久化已有草稿。本轮新增 `PUT /api/v1/orchestration/dags/{id}`，并在 service 内递增 DAG version。
+- `getDag`、`triggerDag`、`runs` 原先只按 id 查询；本轮统一改为 `id + tenantId` 查询，避免跨租户读取、触发和查询运行历史。
+- 前端保存路径现在是“图级校验通过 -> create/update DAG -> 新建时替换 URL 为真实 DAG id”；保存 payload 同时保留顶层 `nodes/edges` 与 `operatorGraph`，兼容画布读取和 DWD 编译读取。
+- 浏览器实证：新建画布保存后，真实创建 DAG `a3504d0f-3a4f-4462-bba3-5d55f6857e40`；重新导航同一 URL 后通过 GET 重新加载；再次保存会走 PUT，并把 DB version 从 1 增到 2。
+- DB 反查确认该 DAG `definition.kind=operator_graph`，`definition.operatorGraph.nodes` 为 4 个节点；这说明保存结果已落库，不只是前端路由 state。
+- 浏览器验证中出现一次 Keycloak token endpoint 400 资源错误，但所有 DAG 接口均为 200，当前判断为既有认证刷新噪声；后续如频繁出现，应单独排查 auth refresh 流。
+
+## 2026-06-23 流水线与算子市场阶段三列表真实化发现
+- `/orchestration/pipelines` 原先展示 3 条前端硬编码流水线，无法看到第 58 轮保存到 `orchestration.dag` 的真实草稿；阶段 59 已切换为 `OrchestrationAPI.listDags()`。
+- 列表页现在真实展示 DAG name、dagster job、version 和 enabled/DRAFT 状态；因为后端当前没有 env/lastRun 聚合字段，页面不再伪造生产环境或最近运行时间，最近运行暂以 `-` 表示。
+- 草稿 DAG 的触发按钮被禁用，避免 disabled DAG 点击后才由后端报错；这比展示可点击按钮更贴近当前执行边界。
+- 浏览器实证：`GET /api/v1/orchestration/dags` 返回 200，列表显示 4 条本地 DAG，包括 `order_pipeline` v2；点击该行“打开画布”进入真实 UUID 画布，控制台 0 error。
+- 下一步运行实例页仍需真实化；当前后端只有按 DAG 查询 runs 的接口，没有全局 runs 分页，需先决定是补全局 API，还是复用 `common.running_task` 投影作为运行实例入口。
+
+## 2026-06-23 流水线与算子市场阶段三运行实例真实化发现
+- `RunInstances` 已从 3 条静态 mock 改为读取 `orchestration.job_run` 的真实分页接口，适合作为运行历史页；`common.running_task` 继续用于全局任务条近期/活跃状态，不替代完整历史。
+- 新增 `/api/v1/orchestration/runs` 采用“当前租户 DAG ids -> job_run in ids”的过滤方式，避免 `job_run` 表缺少 tenant_id 时产生跨租户泄露。
+- `JobRunDTO` 带 `dagName/dagsterJob`，前端无需再维护流水线名称 mock，也避免运行实例列表额外调用 DAG 详情。
+- 原页面的“日志”按钮跳到了固定采集任务 `/integration/sync-tasks/st-001`，这是跨模块假入口；阶段 60 已移除，保留“打开流水线”作为当前真实可用动作。
+- 浏览器实证：`GET /api/v1/orchestration/runs?page=0&size=20` 返回 200，响应体包含本地验证 run `codex-stage60-run-001`、DAG `order_pipeline`、`status=SUCCESS`，页面表格同步展示，控制台 0 error。
+- 运行态再次确认：`spring-boot:run -pl bootstrap` 会使用本地 Maven 仓库的模块 jar；新增 controller 后必须先 `mvn install` 再重启，否则会出现源码已改但 HTTP 仍 404 的旧 jar 假象。
+- 阶段 61 应回补流水线列表的“最近运行”字段。现在 run 历史已真实化，继续让列表显示 `-` 会造成同一模块内信息不一致。
+
+## 2026-06-23 流水线与算子市场阶段三最近运行聚合发现
+- `DagDTO.lastRun` 已复用 `JobRunDTO`，避免流水线列表另造一套最近运行摘要字段；同一个 run 在运行实例页和流水线列表中字段一致。
+- `listDags` 现在按当前租户 DAG 列表逐条补最近运行，适合当前控制台小规模列表；如果后续 DAG 数量增长，应改为 repository 层批量查询每个 DAG 的 latest run，避免 N+1 查询。
+- 前端流水线列表不再显示全量 `-`；有真实运行历史的 `order_pipeline` 展示 `SUCCESS`、`codex-stage60-run-001` 和开始时间，其余无运行历史的 DAG 仍显示 `-`。
+- 浏览器响应体确认 `lastRun` 来自后端：`order_pipeline.lastRun.status=SUCCESS`、`dagsterRunId=codex-stage60-run-001`，页面快照与响应一致。
+- 下一步触发链路仍有缺口：`triggerDag` 目前是 Dagster 成功后才保存 `job_run`，因此 Dagster 不可用时会丢失失败运行实例；阶段 62 应改为先落 `QUEUED` 再更新终态。
+
+## 2026-06-23 流水线与算子市场阶段三触发失败可观测发现
+- `triggerDag` 必须先落 `QUEUED` run 再调用 Dagster，否则 Dagster 不通、GraphQL 返回非成功 union 或本地解析不到 runId 时，运行实例页没有任何失败证据。
+- 业务异常也会触发事务回滚；本轮通过 `@Transactional(noRollbackFor = BizException.class)` 保留 `Dagster 未返回 runId` 场景下的 `FAILED` run。
+- 前端触发失败后仍需要刷新 DAG 列表，否则后端 `lastRun` 已更新但用户短时间内看不到失败最近运行。
+- 运行时实证：临时启用 `order_pipeline` 后触发返回 400，DB 最新 run `b99b8175-bdc8-452d-b58d-0bab92081547` 为 `FAILED`，流水线列表和运行实例页均能看到该失败记录。
+- 验证后已将 `order_pipeline` 恢复为 `enabled=false`，避免本地草稿 DAG 继续显示为可触发。
+- 下一步真实表达缺口：`enabled` 不等于“可执行”。`sql_workbench_draft` 是草稿占位作业，应由后端返回触发就绪状态和阻断原因，前端据此禁用触发按钮。
+
+## 2026-06-23 流水线与算子市场阶段三触发就绪真实表达发现
+- `enabled` 只能表达 DAG 是否被启用，不能表达执行前置条件是否满足；后端需要单独返回 `triggerable/triggerBlockedReason`，否则前端会把草稿占位作业误展示为可触发。
+- `sql_workbench_draft` 是画布/SQL 工作台草稿占位 job，未绑定真实 Dagster 作业时应在调用 Dagster 前拦截，不应创建 `job_run`。
+- 阶段 62 的失败可观测用于外部 Dagster launch 失败；阶段 63 的触发就绪用于本地前置条件阻断，两者语义不同，不能混在同一类失败运行里。
+- 浏览器实证：`order_pipeline enabled=true + dagsterJob=sql_workbench_draft` 时，API 返回 `triggerable=false` 和 `当前为画布草稿，尚未绑定可执行 Dagster 作业`，页面展示 `待绑定` 且触发按钮禁用。
+- 恢复 `order_pipeline enabled=false` 后，页面展示 `草稿`，最近运行仍保留阶段 62 的 `FAILED` 历史，说明触发就绪状态不会抹掉运行历史。
+- 下一轮应进入真实执行闭环核对：`onelake_dbt_model_run` Dagster job、dbt 产物、run 状态回写和质量/血缘回写仍需与方案阶段三逐项对齐。
+
+## 2026-06-23 流水线与算子市场阶段三 DWD DAG 真实触发发现
+- 当前 Dagster code location 已有 `onelake_dbt_model_run`，不再是早期只有 reconciliation job 的状态；阶段三执行闭环的当前缺口不是 job 不存在，而是编排触发没有携带 DWD `runConfigData`。
+- `DwdModelService.run` 已有专用 DWD 运行链路，会创建 `modeling.model_run` 并传 `run_dwd_model` 配置；编排 `triggerDag` 原先只传 job name，不能直接运行 DWD dbt job。
+- 本轮在 orchestration 模块内用 JDBC 写 `modeling.model_run`，避免 Java 模块依赖倒挂，同时让 pipeline run 和 model run 共享同一个 Dagster run id。
+- 真实触发结果：DAG `94f21184-752f-40ea-9c65-1a5ee00b3699` 触发返回编排 run `3f2ff034-0e63-4cf4-aac1-075399906580`；`orchestration.job_run` 与 `modeling.model_run` 均写入 Dagster run `aa4375e6-1b6c-4dd9-90cc-bb0fbccda024`。
+- Dagster GraphQL 确认 run 状态为 `STARTED`，tags 包含 `onelake.model_run_id=0b962b9b-b7f7-446c-8b4f-47e8d29abc2d` 和 `onelake.orchestration_run_id=3f2ff034-0e63-4cf4-aac1-075399906580`。
+- 下一轮缺口：状态刷新/终态回写尚未接入 orchestration run 历史；当前 run 会停留在 `RUNNING`，需要查询 Dagster run 状态并同步到 `job_run` 与 `model_run`。
+
+## 2026-06-23 流水线与算子市场阶段三 Dagster 运行状态刷新发现
+- `DagsterClient.getRunStatus` 接入后，运行列表读取可将 Dagster `SUCCESS/FAILURE/CANCELED` 同步回 `orchestration.job_run`，流水线列表的 `lastRun` 与运行实例页共用同一条终态数据。
+- DWD DAG 不能只同步 `orchestration.job_run`；否则编排页显示成功而建模 run 仍停在 `RUNNING`。Stage 65 已先用 JDBC 兜底同步 `modeling.model_run` 基础状态。
+- PostgreSQL 对 `java.time.Instant` 的 JDBC 参数类型推断不稳定，写入 `started_at/finished_at` 时应显式转为 `Timestamp`。
+- 真实验证：编排 run `3f2ff034-0e63-4cf4-aac1-075399906580` 和对应 DWD model run 最终都同步为成功，Dagster run 为 `aa4375e6-1b6c-4dd9-90cc-bb0fbccda024`。
+
+## 2026-06-23 流水线与算子市场阶段三 DWD 尾链一致性发现
+- 仅在 orchestration 模块用 JDBC 改 `modeling.model_run.status` 会绕过 `DwdModelService.refreshRunStatus` 的 artifact 解析和 `modeling.model.loaded` 事件发布，导致 Catalog/Quality/血缘尾链缺失。
+- 抽取 common `DwdModelRunSynchronizer` 后，orchestration 可以在不反向依赖 modeling Java 模块的前提下复用建模侧完整终态逻辑；缺失同步器时仍保留 JDBC 基础状态兜底。
+- 真实验证：编排触发 run `34b4f37a-53ab-4d18-ae8c-8acbe1ecd724` 后，DWD model run `f29186c4-5448-4e24-8add-42a8a0a0bbae` 写入 `rows_written=10` 和 `artifacts_path=target/run_results.json`。
+- `modeling.model.loaded` 已被 Catalog 和 Quality 消费，Catalog 资产 `dwd.dwd_trade_operator_manifest_df` 行数为 10、质量分为 100，血缘边从 `ods.ods_codex_orders` 指向 DWD 表。
+- Quality 侧生成 `DBT_BUILD/NOT_NULL/UNIQUE` 三条通过结果，说明编排触发 DWD 不再绕开质量门禁尾链。
+
+## 2026-06-23 流水线与算子市场阶段三 DWD 资源观测发现
+- 后端 `DwdModelRunDTO` 和前端 `DwdModelRun` 已有资源画像、扫描量、成本和重试字段；缺口在资产详情页没有展示，用户无法从 DWD 运行历史看到资源画像。
+- Stage 67 已在 DWD 模型 tab 的最近运行摘要展示 `resourceGroup/computeProfile/scan/cost/retry`，不新增后端契约。
+- 浏览器实证：资产 `dwd.dwd_trade_operator_manifest_df` 的 DWD 模型区显示 `SUCCEEDED`、`MANUAL`、`写入 10`、`default`、`trino-small`、`扫描 - / 成本 - / 重试 0`，并显示 Dagster run 与 dbt artifact。
+
+## 2026-06-23 流水线与算子市场阶段三画布算子面板真实化发现
+- `DagCanvas` 左侧算子面板原先仍是 7 个硬编码原型项，与算子市场 65 个内置 Manifest 已落库的事实不一致。
+- Stage 68 已改为调用 `OperatorAPI.listOperators()`，按市场 category 分组展示可见算子；这满足标准设计中“画布算子面板从 OperatorAPI 取分类列表”的当前最小切片。
+- 浏览器实证：DWD DAG 画布网络请求 `/api/v1/orchestration/operators` 返回 200，页面左侧展示标准化、关联、加密、聚合、输出、输入、脱敏、治理、质量门禁、转换等完整市场分类和内置算子名称。
+- 下一轮阶段四缺口：后端 validate/register/publish/install API 已有，但前端还没有自定义算子注册/发布入口，也没有把 Manifest 校验结果作为提交前置。
+
+## 2026-06-23 流水线与算子市场阶段四自定义算子注册发布发现
+- 后端阶段二已经具备 `validate/register/publish/install` API，阶段四第一缺口在前端没有创建自定义 Manifest 的入口，导致 CUSTOM/TENANT_PRIVATE 范围只能通过 API 手工构造。
+- `OperatorMarket` 注册/发布版本入口必须把 Manifest 校验作为提交前置，否则用户能看到“注册成功”但后续图级校验或编译失败，问题会延迟到画布侧暴露。
+- 浏览器实证创建了本地验证算子 `custom.codex_stage69_ui`，发布到 `1.0.1` 后市场列表展示 latestVersion `1.0.1`；API 冒烟另验证了 `custom.codex_stage69_phone` 的 validate/register/publish/list。
+- 注册弹窗默认值需要等 Form 挂载后写入；否则初次点击“仅校验”会读到 undefined。发布版本 Modal 也需要在关闭详情 Modal 后打开，避免 AntD Modal 层级拦截点击。
+- 这轮让算子市场达到“自定义算子可注册、可校验、可版本化发布”的最小工程化入口；仍未覆盖 Spark/Python 运行时、多租户私有分享治理和废弃/下架工作流。
+
+## 2026-06-23 流水线与算子市场阶段四画布添加与属性动态化发现
+- Stage 71 已把左侧真实市场算子从“展示列表”推进到“可添加节点”：点击市场项会创建画布节点，携带 `operatorRef/operatorVersion/config`，并在目标算子需要输入时从当前选中节点自动连一条边。
+- 新节点默认 `config` 来自 Manifest required params，这样添加后能立即进入后端图级校验，而不是先产生必填参数全缺失的无效节点。
+- Stage 72 将右侧属性面板改为读取选中算子的 Manifest：展示 `operatorRef/version/category/compileTarget/inputPorts`，并按 `paramsSchema.properties` 动态生成字符串、数字、布尔、数组和对象输入。
+- 浏览器实证：DWD DAG 中 `input.ods_table` 的 `sourceFqn` 字段由 `paramsSchema` 动态生成；把值改成 `ods.codex_stage72_canvas_param` 后点击校验，`POST /api/v1/orchestration/operators/graph/validate` 请求体包含更新后的 `config.sourceFqn`，后端返回 200。
+- 验证时未保存临时参数和新增节点，避免污染真实 `94f21184-752f-40ea-9c65-1a5ee00b3699` DWD DAG；当前保存链路代码共用同一份节点状态和 `buildDagDefinition`。
+- 剩余阶段四缺口仍在 X6 真实拖拽/连线编辑、连接端口可视化、Spark/Python compileTarget 的运行时编译与部署契约，以及更完整的算子生命周期治理。
+
+## 2026-06-23 流水线与算子市场阶段四拖拽定位发现
+- Stage 73 对照标准方案后确认：当前最适合继续迭代的是画布交互能力，而不是直接上 Spark/Python 运行时；后者会牵动编译器、Dagster op 和部署契约，风险更高。
+- Stage 74 已补齐节点拖拽定位最小闭环：节点可在现有 SVG 画布内拖动，连线按最新 `x/y` 实时重绘，右侧属性面板显示当前坐标。
+- `buildValidationGraph` 已把 `x/y` 写入每个节点；这让拖拽位置进入图级校验和后续保存 payload，不再只是 DOM 视觉状态。
+- 浏览器实证：`input.ods_table` 节点拖动后，右侧坐标显示 `x 152 / y 158`；图级校验请求体中的 `input_ods` 同步带 `x=152,y=158`，后端返回 200。
+- 本轮仍没有宣称完整 X6 完成：当前是低风险原生 pointer 拖拽，保留现有保存/校验链路。完整 X6 Graph 实例、端口连线编辑、删边、连线合法性可视化仍应作为阶段 75 单独推进。
+
+## 2026-06-23 流水线与算子市场阶段四端口连线发现
+- Stage 75 继续保留现有 SVG 画布，而不是一次性迁移 X6 Graph；这样可以先补齐端口、删边和合法性可视化，同时不破坏已稳定的保存/图级校验链路。
+- 边模型需要显式持有 `id/sourcePort/targetPort`，否则前端无法选中单条边，也无法区分 JOIN/MANY 类算子的不同输入端口。
+- 前端本地校验不能替代后端图级校验，但应提前反馈基础结构错误：缺失节点、自环、目标端口不存在、`ONE` 端口多入边、重复边和环路都可以在画布上即时标红。
+- 浏览器实证：合法边删除/重连后边数恢复为 5；新增指向同一 `ONE` 输入端口的非法边后出现红色无效连线，删除后恢复真实状态。
+- 后端图级校验已能接收含 `sourcePort/targetPort` 的边 payload；DWD DAG 校验返回 200 且 `ok=true`，仅保留 `dbt_model` 系统节点 warning。
+
+## 2026-06-23 流水线与算子市场阶段四算子生命周期发现
+- 后端 `OperatorAPI.updateOperator` 已支持状态更新，前端缺口在市场详情没有废弃/恢复入口，也没有在废弃状态下阻断安装和使用。
+- 生命周期治理应限制在 `CUSTOM/TENANT_PRIVATE` 范围；`BUILTIN` 算子不展示废弃按钮，避免内置标准算子被误操作。
+- `DEPRECATED` 不是删除：列表和详情都应继续显示历史版本与 Manifest，但安装/锁定和使用入口必须 disabled，并给出真实状态反馈。
+- 浏览器实证：`custom.codex_stage69_ui` 废弃时 `PUT /api/v1/orchestration/operators/custom.codex_stage69_ui` 请求体为 `{"status":"DEPRECATED"}` 且返回 200；详情显示“已废弃”，安装/使用 disabled。
+- 恢复时同一路径请求体为 `{"status":"ACTIVE"}` 且返回 200；详情恢复“可用”，安装/使用重新启用。验证结束已恢复测试算子为 `ACTIVE`。
+- 下一轮流水线方向应进入 Spark/Python compileTarget 的真实边界核对；不能只在 Manifest 表单中允许选择 SPARK/PYTHON，却没有 Dagster op、编译器和部署契约支撑。
+- Stage 79 复核时发现 Stage 78 仍有缺口：后端 `listOperators` 过滤了非 ACTIVE，导致废弃算子不能在列表/统计中长期展示；`installOperator` 也没有后端拒绝废弃算子。已补齐列表可见、安装拒绝和图级校验拒绝废弃节点。
+
+## 2026-06-23 流水线与算子市场阶段四 Spark/Python 扩展边界发现
+- 方案 §2.5 明确 `SPARK/PYTHON` 是后续扩展点，当前第一批执行链路仍是 SQL_DBT + `onelake_dbt_model_run`，所以不能因为枚举已存在就让图级校验通过。
+- Manifest 自校验可以支持扩展态，但要按 compileTarget 校验真实契约：SPARK 需要 `SPARK_SQL/PYSPARK` 模板与 `resourceHint.engine=SPARK`；PYTHON 需要 `template.kind=PYTHON`、`entrypoint` 和可选 requirements 数组。
+- 前端注册表单原来只有“模板类型 + SQL/dbt 模板”，无法表达 PYTHON entrypoint 或 SPARK resourceHint；Stage 79 已改为完整 `template JSON` 与 `resourceHint JSON`。
+- 真实 API 实证：合法 SPARK Manifest `ok=true`，但返回“仅完成 Manifest 契约校验，图级执行仍需先接入 Dagster op 与部署契约”的 warning；缺少 resourceHint 的 SPARK Manifest `ok=false`。
+- 下一步不能直接做“Spark/Python 已可运行”，应先设计 Dagster Spark/Python op、依赖隔离、镜像/requirements 管理和资源组注册，再放开图级执行。
+
+## 2026-06-23 流水线与算子市场阶段四后端端口级校验发现
+- Stage 75 已在前端做端口连线和本地合法性可视化，但后端图级校验仍只看节点总入边数，JOIN 这类多输入算子无法识别 `left/right` 是否接错。
+- Stage 80 已将后端入边校验深化到 `targetPort`：单输入端口兼容旧边格式，多输入端口必须声明 `targetPort`。
+- JOIN API 实证：`join.inner` 缺 targetPort 时 `ok=false`；两条边都指向 `left` 时 `ok=false`；分别指向 `left/right` 时 `ok=true`。
+- 这轮仍只覆盖端口基数与端口名称，不覆盖字段 schema 闭合；阶段 81 应先确认字段 schema 的真实来源，再实现字段引用/输出推导校验。
+
+## 2026-06-23 流水线与算子市场阶段四字段 schema 与治理校验发现
+- 字段 schema 的真实来源是 `catalog.asset.columns`、`modeling.data_model_column_mapping` 与 DWD DAG definition 中的 `outputColumns/operatorGraph`；不能在 graph 无 `sourceColumns/inputColumns/outputColumns` 时伪造完整闭合。
+- 本轮后端图级校验只在有字段事实时做强校验：`sourceColumns/inputColumns` 可作为上游字段；`transform.rename_columns` 的 `mapping/mappings` 可推导目标字段；`output_dwd.config.columns` 和 graph `outputColumns` 可作为输出自一致检查。
+- 字段引用校验覆盖常见配置键：`column/columns/requiredColumns/keys/groupBy/partitionBy/orderBy/uniqueKey/incrementalColumn` 和 mapping 源字段。真实 API 已能挡住 `quality_gate` 引用 `missing_col`。
+- 敏感字段治理只基于 `classification/piiType/suggestLevel` 或显式 `sensitiveColumns`，不会凭字段名猜测；L3/PII 字段透传到输出且未经过 `MASK/ENCRYPT` 会报错，经过 `mask.partial` 后通过。
+- DWD 生成图当前会用 `mask.partial` + `columns` 表达批量敏感字段治理，这与内置 Manifest 的单字段 `column` 参数不完全一致；Stage 81 在校验层兼容该批量写法，后续真正逐字段模板渲染时仍应进一步收敛。
+
+## 2026-06-23 流水线与算子市场阶段四资源契约校验发现
+- 当前没有 OneLake 业务侧资源组注册表；数据库实证 DWD DAG 使用 `engine=TRINO_DBT`、`resourceGroup=default`、`computeProfile=trino-small`。
+- Stage 82 采用静态受控资源契约做第一层后端保护：`TRINO_DBT` 支持 `default/rg-default`，对应 `trino-small/trino-medium/trino-large`；`SPARK/PYTHON` 仍只作为 Manifest 扩展态资源 hint，不放开图级运行。
+- Manifest 校验会拒绝未知 `defaultResourceGroup`；graph 校验会拒绝未知 `resourceGroup` 或不属于当前 resourceGroup 的 `computeProfile`。
+- 真实 API 实证：`warehouse-xl/TRINO_DBT` 与 `spark-large/default` 均返回 `ok=false`；`TRINO_DBT/default/trino-small` 返回 `ok=true`。
+- 这不是完整资源组后台管理：尚未提供资源组 CRUD、租户配额、并发槽位、成本策略注册和运行时调度分配。后续若继续做，应新建资源组管理能力，而不是把静态校验包装成算力市场。
+
+## 2026-06-23 流水线与算子市场阶段四 DWD 质量门禁编译产物发现
+- 方案 §5.1 要求质量门禁算子额外产出 dbt `tests/schema.yml`；此前实现虽然会生成 `quality_gate` 节点，但 `schema.yml` 仍按字段映射主键硬编码生成，存在图定义与执行产物规则漂移风险。
+- Stage 83 已把 DWD compile 调整为先生成 operator graph，再从 `QUALITY_GATE`/`gate.*` 节点的 `config.columns/config.tests` 生成 dbt tests；当前已支持 dbt 内置 `not_null/unique`。
+- 真实 API 实证：`quality_gate.config.columns=["id"]`、`tests=["not_null","unique"]` 时，落盘 `dwd_user_codex_glossary_gbtlu_df.yml` 只在 `id` 列生成 `not_null/unique`，普通字段和敏感字段没有被误加测试。
+- 兼容边界：如果 graph 缺失质量门禁配置，仍按主键兜底生成 `not_null/unique`，避免历史草稿丢失基础校验。
+- Stage 84 已继续补齐可执行 dbt generic tests：`gate.enum` → `accepted_values.values`，`gate.referential` → `relationships.to/field`；当前产品没有自定义 DWD graph 注入入口，所以这部分用单测覆盖 YAML 形态，真实 API 回归覆盖默认 `not_null/unique` 不退化。
+- Stage 85 已为 `gate.range/gate.regex` 补齐 OneLake 自定义 dbt generic tests：`onelake_range` 返回超出范围记录，`onelake_regex` 返回不匹配正则记录；后端生成 `arguments:` 结构，临时最小 dbt 项目 `dbt parse` 通过。
+- Stage 86 已为 `gate.row_count` 补齐模型级 OneLake 自定义 dbt generic test：`onelake_row_count` 写入 `models[].tests`，不挂在列级 `columns[].tests`；临时最小 dbt 项目 parse 通过。
+- Stage 87 已修复完整 dbt project parse 阻断：DWD compile 不再用单模型 source 覆盖共享 `models/generated/sources.yml`，而是聚合当前模型与当前租户已验证 DWD 模型依赖的 ODS sources；真实产物同时包含 `ods_codex_orders` 与 `ods_customers_100k`。
+- 完整 dbt project `dbt parse` 现已通过；剩余 warning 来自既有 `models/marts/schema.yml` 中 `dbt_utils.accepted_range` 仍使用顶层参数，以及 `dbt_project.yml` 的 unused staging 配置。
+- `LineageGraph.tsx` 的可选 `dagre` 动态导入不能写成字面量 `import('dagre')`，否则 Vite build 会在依赖未安装时解析失败；应保留运行时动态导入以实现未安装时降级网格布局。
+- Stage 88 已支持 `gate.freshness` 输出 dbt source freshness：`column/loadedAtField` 写为 `loaded_at_field`，`maxDelay=24h` 等短格式写为 `warn_after/error_after`；真实 API 临时写入 freshness graph 后，`sources.yml` 形态和完整 dbt parse 均通过，并已恢复测试 DB 变更。
+- Stage 89 已支持 `gate.custom_sql` 的最小安全协议：断言 SQL 必须是单条只读语句，必须通过 `{{ model }}` 引用当前模型，且不能引用其他表；编译后写为模型级 `onelake_custom_sql` generic test，dbt macro 运行时替换 `__ONELAKE_MODEL__`。
+- DWD compile 现在会保留模型已保存的 `gate.freshness/gate.custom_sql` 扩展质量门禁节点，避免自定义门禁被默认生成图覆盖；但仍不会放开任意历史节点合入，防止默认 graph 重复或不受控算子混入。
+- Stage 90 已清理当前 dbt project 的校验噪声：既有 `dbt_utils.accepted_range` 改用 `arguments:`，未命中的 `models.onelake.staging` 配置已移除；完整 `dbt parse` 不再出现 dbt deprecation/unused config warning。
+- Stage 91 已把 Stage82 的静态资源契约推进为业务侧注册表：`orchestration.resource_group` 与 `orchestration.compute_profile` 现在是资源组/计算画像的后端事实源，默认保留 `TRINO_DBT/default|rg-default`、`SPARK/spark-default`、`PYTHON/python-default` 种子。
+- `OperatorService` 的 Manifest 与 graph 资源校验已经复用注册表；真实 API 临时注册 `warehouse-codex-stage91/trino-codex-stage91` 后可通过校验，错误画像 `spark-large` 仍会被拒绝。
+- 资源组后台管理本轮仍是注册表闭环，不是运行时调度器：并发槽位、quota、成本策略已落字段和 API，但尚未接入 Dagster/Trino 队列分配，也未做资源管理 UI。
+- Stage 92 已把 Spark/Python 扩展边界显式化为运行契约 API：当前 Dagster repository 只暴露 `onelake_dbt_model_run`，所以 `SQL_DBT` 为 `READY`，`SPARK/PYTHON` 为 `MISSING_DAGSTER_JOB` 且 `graphExecutionSupported=false`。
+- 编排触发现在会在创建 `job_run` 前阻断 Spark/Python contract-only DAG；真实临时 Spark DAG 返回 `40012` 且 `job_run` 为 0 行，避免把不可执行运行误记录成失败实例。
+- 未完成边界：custom SQL 的结果落库、WARN/QUARANTINE 动作分流和跨模型/维表白名单尚未生产化；当前只完成“可安全编译为 dbt test”的最小闭环。
+
 ## 2026-06-23 资产发现与分层表管理边界升级发现
 - 当前 `/catalog/search` 与 `/lakehouse/tables` 共享 `CatalogAPI.listAssets()` 和 `Asset` DTO，这是正确的数据事实源复用，不应复制资产模型。
 - 两页混淆点主要来自入口命名和列表呈现：目录页叫“搜索浏览”，湖仓页叫“分层表浏览”，且都展示表名、层、密级、质量分、负责人。
 - P0 可在不改后端的前提下拉开边界：目录页强化找数、业务标签、热度、申请访问和消费动作；湖仓页强化分层树、表格式、分区、同步、质量门禁和维护状态。
 - 后端当前列表查询只支持可选 `layer`，授权状态、推荐理由和维护摘要不是资产列表 DTO 的稳定事实；P0 不应把这些能力伪装成已真实闭环。
+
+## 2026-06-23 业务术语表生产化迭代发现
+- 推荐方案落地应以 `module-modeling` 为业务术语主数据所有者，Catalog 只做只读聚合和检索投影，避免 Java 模块依赖倒挂。
+- 当前已新增 `modeling.business_term`、`business_term_binding`、`business_term_version`，以及 `/api/v1/modeling/glossary` 术语 CRUD、审定、绑定和版本接口。
+- `DomainEvents` 已补充 `modeling.term.*` 事件常量，Glossary 写操作会发布创建、更新、审定、废弃和绑定变更事件。
+- Catalog 资产列表接口已扩展 `keyword/term` 参数，并在资产字段 DTO 中返回绑定术语 `terms`，通过 `JdbcTemplate` 只读查询 modeling schema。
+- 检查结果：`mvn -q -pl module-modeling -am test -Djacoco.skip=true` 和 `mvn -q -pl module-catalog -am test -Djacoco.skip=true` 均通过。
+- 本地运行态验证不能直接跑全量 `make migrate`，因为工作区存在非本轮 orchestration 迁移；本轮只对 `modeling` schema 执行 Flyway，V5 已入 `modeling.flyway_schema_history`。
+- `spring-boot:run` 只跑 `bootstrap` 时会加载本地仓库旧 SNAPSHOT；新增跨模块类后需要先执行 `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true`，否则 OpenAPI 看不到新 Controller。
+- API 冒烟链路已打通：`CODEX_GMV_102340` 创建、提交、审定、字段绑定、Catalog term 搜索、资产详情字段术语回读均成功。
+- 浏览器实证：业务术语表展示术语和关联字段，资产详情 Schema 可见字段术语，资产发现页搜索术语 code 只命中绑定资产。
+- 浏览器发现并修复：术语页顶部绑定统计需要服务端 `bindingCount`，不能依赖列表中为空的 `bindings`；资产发现页重复 tag 值会触发 React duplicate key warning，需按来源/索引生成渲染 key。
+- 后续增强点：资产详情当前不会自动根据 `?tab=schema&column=amount` 切换和定位字段，浏览器验证时需要手动切到 Schema；这应归入计划中的“字段定位”增强。
 - 实施后边界：`/catalog/search` 命名为“资产发现”，主区是“可用资产”，主操作是“申请访问/资产画像”；`/lakehouse/tables` 命名为“分层表管理”，主区是“表治理清单”，主操作是“新建表/派生 DWD/治理详情/优化/SQL”。
 - `Tables.tsx` 可复用已有 `CatalogAPI.listMaintenance()` 做维护状态增强；维护加载失败时只降级为 `UNKNOWN`，不能阻断分层表列表。
+
+## 2026-06-23 业务术语影响分析与跨模块闭环发现
+- 术语影响分析不能只看 `business_term_binding`，至少要合并 Catalog lineage、Quality rule、DaaS API responseSchema/sourceFqn、Orchestration DAG definition、Security PII 和 Approval request，才能回答“改这个术语会影响哪里”。
+- 已审定术语被编辑时，状态进入 `REVIEWING` 还不够；需要同步生成 `GLOSSARY_CHANGE` 审批记录，并在影响分析中展示待处理审批，否则治理链路不可见。
+- 敏感术语字段绑定天然是安全信号：手工绑定和 DWD 建模反写都应 upsert `security.pii_scan_record`，本轮实证 `ods.ods_customers_100k.full_name` 与 `dwd.dwd_user_codex_glossary_gbtlu_df.full_name` 均生成 `PENDING/L3`。
+- DWD 建模写术语时不要让 Catalog 反向依赖 Modeling 服务；由 `DwdModelService` 保存 `data_model_column_mapping.term_*` 并反写 `business_term_binding(source=MODELING)`，Catalog 继续按绑定表只读聚合。
+- DaaS 草稿应在后端保存时富化 `responseSchema`，前端展示只是消费结果；本轮 `a6f77a56-eeb6-480c-976b-553024d15c0a` 已保存 `termCode/caliberSql/termDefinition/classification/masked`。
+- `DwdModelDraftRequest.ColumnMappingRequest` 不能保留旧 9 参数重载构造器；Jackson 会丢弃新增 `termId/termCode/termName`，导致请求体看似有术语但落库为空。单测应改为显式补齐新字段。
+- `spring-boot:run` 的 devtools 热重启不会可靠替换本地 Maven 仓库模块 jar；本轮旧孤儿 Java 进程继续占用 8080，导致 API 一直跑旧实现。必须确认 `lsof -iTCP:8080` 的 PID，再进程级重启。
+- DWD 建模向导从 `ods.ods_customers_100k` 自动推导表名时带数字，现有命名正则不允许 business 段含数字；浏览器验证需手动修正为合法表名，后续可把推导逻辑统一去除数字或调整命名规范。
 
 ## 技术决策
 | 决策 | 理由 |

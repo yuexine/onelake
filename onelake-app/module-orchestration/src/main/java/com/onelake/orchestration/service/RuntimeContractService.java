@@ -1,0 +1,131 @@
+package com.onelake.orchestration.service;
+
+import com.onelake.orchestration.client.DagsterClient;
+import com.onelake.orchestration.dto.RuntimeContractDTO;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RuntimeContractService {
+
+    private static final String REPOSITORY = "onelake";
+    private static final String LOCATION = "onelake-loc";
+
+    private static final List<RuntimeSpec> SPECS = List.of(
+        new RuntimeSpec("SQL_DBT", "TRINO_DBT", "onelake_dbt_model_run", true, true,
+            "SQL_DBT 已接入 Dagster dbt job"),
+        new RuntimeSpec("SPARK", "SPARK", "onelake_spark_operator_run", true, false,
+            "SPARK 仍处于 Manifest 契约态，尚未接入 Dagster Spark op、依赖隔离和部署契约"),
+        new RuntimeSpec("PYTHON", "PYTHON", "onelake_python_operator_run", true, false,
+            "PYTHON 仍处于 Manifest 契约态，尚未接入 Dagster Python op、requirements 隔离和部署契约")
+    );
+
+    private final DagsterClient dagster;
+
+    public List<RuntimeContractDTO> listRuntimeContracts() {
+        Set<String> availableJobs = availableDagsterJobs();
+        return SPECS.stream()
+            .map(spec -> toDTO(spec, availableJobs.contains(spec.dagsterJob())))
+            .toList();
+    }
+
+    public Optional<String> triggerBlockedReason(String dagsterJob, Map<String, Object> definition) {
+        RuntimeSpec spec = specFor(dagsterJob, definition).orElse(null);
+        if (spec == null || spec.graphExecutionSupported()) {
+            return Optional.empty();
+        }
+        return Optional.of(spec.blockedReason());
+    }
+
+    private Set<String> availableDagsterJobs() {
+        try {
+            return Set.copyOf(dagster.listJobs(REPOSITORY, LOCATION));
+        } catch (RuntimeException e) {
+            log.warn("Dagster runtime contract check failed: {}", e.getMessage());
+            return Set.of();
+        }
+    }
+
+    private RuntimeContractDTO toDTO(RuntimeSpec spec, boolean dagsterJobAvailable) {
+        boolean ready = spec.graphExecutionSupported() && dagsterJobAvailable;
+        String status;
+        String blockedReason = null;
+        if (ready) {
+            status = "READY";
+        } else if (!dagsterJobAvailable) {
+            status = "MISSING_DAGSTER_JOB";
+            blockedReason = "Dagster repository 未暴露作业: " + spec.dagsterJob();
+        } else {
+            status = "CONTRACT_ONLY";
+            blockedReason = spec.blockedReason();
+        }
+        return new RuntimeContractDTO(
+            spec.compileTarget(),
+            spec.engine(),
+            spec.dagsterJob(),
+            spec.manifestSupported(),
+            spec.graphExecutionSupported(),
+            dagsterJobAvailable,
+            status,
+            blockedReason
+        );
+    }
+
+    private Optional<RuntimeSpec> specFor(String dagsterJob, Map<String, Object> definition) {
+        String compileTarget = firstText(text(definition.get("compileTarget")), text(definition.get("engine")));
+        if (!StringUtils.hasText(compileTarget) && definition.get("operatorGraph") instanceof Map<?, ?> rawGraph) {
+            compileTarget = firstText(text(rawGraph.get("compileTarget")), text(rawGraph.get("engine")));
+        }
+        String normalizedTarget = normalizeTarget(compileTarget);
+        if (StringUtils.hasText(normalizedTarget)) {
+            Optional<RuntimeSpec> byTarget = SPECS.stream()
+                .filter(spec -> spec.compileTarget().equals(normalizedTarget) || spec.engine().equals(normalizedTarget))
+                .findFirst();
+            if (byTarget.isPresent()) {
+                return byTarget;
+            }
+        }
+        if (!StringUtils.hasText(dagsterJob)) {
+            return Optional.empty();
+        }
+        return SPECS.stream()
+            .filter(spec -> spec.dagsterJob().equals(dagsterJob))
+            .findFirst();
+    }
+
+    private String normalizeTarget(String value) {
+        if (!StringUtils.hasText(value)) {
+            return "";
+        }
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        return "TRINO_DBT".equals(normalized) ? "SQL_DBT" : normalized;
+    }
+
+    private String firstText(String first, String second) {
+        return StringUtils.hasText(first) ? first : second;
+    }
+
+    private String text(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private record RuntimeSpec(
+        String compileTarget,
+        String engine,
+        String dagsterJob,
+        boolean manifestSupported,
+        boolean graphExecutionSupported,
+        String blockedReason
+    ) {
+    }
+}

@@ -5,18 +5,24 @@ import com.onelake.catalog.dto.AssetDetailDTO;
 import com.onelake.catalog.dto.AssetMaintenanceAssessmentDTO;
 import com.onelake.catalog.dto.AssetMaintenanceRequest;
 import com.onelake.catalog.dto.AssetMaintenanceResultDTO;
+import com.onelake.catalog.dto.ImpactReportDTO;
+import com.onelake.catalog.dto.LineageGraphDTO;
 import com.onelake.catalog.dto.TableCreateRequest;
 import com.onelake.catalog.service.CatalogAssetDetailService;
 import com.onelake.catalog.service.CatalogColumnRefreshService;
+import com.onelake.catalog.service.CatalogLineageService;
 import com.onelake.catalog.service.CatalogMaintenanceService;
 import com.onelake.catalog.service.CatalogService;
 import com.onelake.catalog.service.CatalogSyncService;
 import com.onelake.catalog.service.CatalogTableService;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.common.context.TenantContext;
+import com.onelake.common.notification.NotificationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
@@ -32,10 +38,12 @@ public class CatalogController {
 
     private final CatalogService catalogService;
     private final CatalogAssetDetailService detailService;
+    private final CatalogLineageService lineageService;
     private final CatalogTableService tableService;
     private final CatalogSyncService syncService;
     private final CatalogColumnRefreshService columnRefreshService;
     private final CatalogMaintenanceService maintenanceService;
+    private final NotificationService notificationService;
 
     @Operation(
         summary = "获取资产摘要",
@@ -57,11 +65,13 @@ public class CatalogController {
 
     @Operation(
         summary = "查询资产列表",
-        description = "用途：按可选湖仓层级查询目录资产。前端对接：CatalogAPI.listAssets，由 CatalogSearch、Tables、SqlWorkbench、QualityRules 等页面使用。"
+        description = "用途：按可选湖仓层级、关键字或业务术语查询目录资产。前端对接：CatalogAPI.listAssets，由 CatalogSearch、Tables、SqlWorkbench、QualityRules 等页面使用。"
     )
     @GetMapping("/assets")
-    public ApiResponse<List<AssetDTO>> list(@RequestParam(required = false) String layer) {
-        return ApiResponse.ok(catalogService.listByLayer(layer));
+    public ApiResponse<List<AssetDTO>> list(@RequestParam(required = false) String layer,
+                                            @RequestParam(required = false) String keyword,
+                                            @RequestParam(required = false) String term) {
+        return ApiResponse.ok(catalogService.list(layer, keyword, term));
     }
 
     @Operation(
@@ -81,6 +91,68 @@ public class CatalogController {
     @GetMapping("/lineage/downstream")
     public ApiResponse<List<String>> downstream(@RequestParam String fqn) {
         return ApiResponse.ok(catalogService.downstream(TenantContext.getTenantId(), fqn));
+    }
+
+    @Operation(
+        summary = "查询血缘图",
+        description = "用途：按根资产 FQN + 方向 + 深度返回 X6 节点 / 边结构。前端对接：CatalogAPI.lineageGraph，LineageGraph 页面使用 X6 渲染。"
+    )
+    @GetMapping("/lineage/graph")
+    public ApiResponse<LineageGraphDTO> lineageGraph(
+        @RequestParam String fqn,
+        @RequestParam(defaultValue = "BOTH") String direction,
+        @RequestParam(defaultValue = "3") Integer depth
+    ) {
+        return ApiResponse.ok(lineageService.graph(TenantContext.getTenantId(), fqn, direction, depth));
+    }
+
+    @Operation(
+        summary = "影响分析",
+        description = "用途：按根资产 FQN 统计下游影响（直接/间接 + 受影响任务/API/订阅方 + severity）。前端对接：CatalogAPI.lineageImpact，LineageGraph 影响分析 Drawer 使用。"
+    )
+    @GetMapping("/lineage/impact")
+    public ApiResponse<ImpactReportDTO> lineageImpact(@RequestParam String fqn) {
+        return ApiResponse.ok(lineageService.impact(TenantContext.getTenantId(), fqn));
+    }
+
+    @Operation(
+        summary = "导出影响报告 CSV",
+        description = "用途：按根资产 FQN 导出影响清单 CSV。前端对接：CatalogAPI.exportImpact，LineageGraph 「导出影响报告」按钮调用。"
+    )
+    @GetMapping(value = "/lineage/impact/export", produces = "text/csv;charset=UTF-8")
+    @PreAuthorize("hasAnyRole('ADMIN','DE')")
+    public void exportImpact(@RequestParam String fqn, HttpServletResponse response) throws java.io.IOException {
+        String csv = lineageService.exportImpactCsv(TenantContext.getTenantId(), fqn);
+        String filename = "impact-" + (fqn == null ? "unknown" : fqn.replaceAll("[^A-Za-z0-9._-]", "_")) + ".csv";
+        response.setContentType("text/csv;charset=UTF-8");
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+        // 加 UTF-8 BOM 让 Excel 正确识别中文
+        response.getOutputStream().write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        response.getOutputStream().write(csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        response.getOutputStream().flush();
+    }
+
+    @Operation(
+        summary = "通知影响分析结果",
+        description = "用途：把当前影响分析结果作为站内消息通知给发起者（去重：同 fqn 只通知一次）。前端对接：CatalogAPI.notifyImpact，LineageGraph Drawer 内按钮调用。"
+    )
+    @PostMapping("/lineage/impact/notify")
+    @PreAuthorize("hasAnyRole('ADMIN','DE')")
+    public ApiResponse<Map<String, Object>> notifyImpact(@RequestParam String fqn) {
+        ImpactReportDTO report = lineageService.impact(TenantContext.getTenantId(), fqn);
+        String summary = lineageService.buildImpactSummary(report);
+        boolean created = notificationService.notifyImpactAnalysis(
+            TenantContext.getUserId(),
+            fqn,
+            report.severity(),
+            summary
+        );
+        return ApiResponse.ok(Map.of(
+            "notified", created,
+            "severity", report.severity(),
+            "rootFqn", fqn,
+            "message", created ? "已发送站内通知" : "同资产的影响通知已存在，未重复发送"
+        ));
     }
 
     @Operation(

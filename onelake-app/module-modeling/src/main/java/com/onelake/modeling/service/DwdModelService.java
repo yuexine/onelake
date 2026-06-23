@@ -3,6 +3,8 @@ package com.onelake.modeling.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.modeling.DwdModelRunSynchronizer;
+import com.onelake.common.sql.ReadOnlySqlValidator;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
@@ -21,6 +23,8 @@ import com.onelake.modeling.repository.DataModelRepository;
 import com.onelake.modeling.repository.DataModelRunRepository;
 import com.onelake.modeling.repository.DataModelSourceRepository;
 import lombok.RequiredArgsConstructor;
+import net.sf.jsqlparser.statement.Statement;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -33,19 +37,31 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
-public class DwdModelService {
+public class DwdModelService implements DwdModelRunSynchronizer {
 
     private static final Pattern TABLE_NAME =
         Pattern.compile("^(ods|dwd|dws|ads)_([a-z]+)_([a-z_]+)_(df|di|dms|d|w|m|y|app)$");
+    private static final String OP_INPUT_ODS_TABLE = "input.ods_table";
+    private static final String OP_TRANSFORM_RENAME_COLUMNS = "transform.rename_columns";
+    private static final String OP_GOVERN_DROP_REQUIRED_MISSING = "govern.drop_required_missing";
+    private static final String OP_MASK_PARTIAL = "mask.partial";
+    private static final String OP_GATE_NOT_NULL = "gate.not_null";
+    private static final String OP_OUTPUT_ICEBERG_TABLE = "output.iceberg_table";
+    private static final String OP_OUTPUT_VIEW = "output.view";
+    private static final String OP_OUTPUT_INCREMENTAL_MERGE = "output.incremental_merge";
+    private static final Pattern FRESHNESS_DELAY = Pattern.compile("^([0-9]+)\\s*([a-zA-Z]+)$");
+    private static final String CUSTOM_SQL_MODEL_PLACEHOLDER = "__ONELAKE_MODEL__";
 
     private final DataModelRepository modelRepo;
     private final DataModelSourceRepository sourceRepo;
@@ -69,7 +85,7 @@ public class DwdModelService {
             throw new BizException(40930, "DWD 模型目标表已存在: " + targetFqn);
         });
 
-        List<ColumnDraft> mappings = normalizeMappings(request.columnMappings(), source.columns());
+        List<ColumnDraft> mappings = normalizeMappings(tenantId, request.columnMappings(), source.columns());
         if (mappings.isEmpty()) {
             throw new BizException(40041, "DWD 模型字段映射不能为空");
         }
@@ -109,7 +125,7 @@ public class DwdModelService {
         modelSource.setSortNo(0);
         sourceRepo.save(modelSource);
 
-        saveMappings(model.getId(), mappings);
+        saveMappings(model, mappings);
         return toDTO(model);
     }
 
@@ -150,7 +166,7 @@ public class DwdModelService {
                 throw new BizException(40930, "DWD 模型目标表已存在: " + targetFqn);
             });
 
-        List<ColumnDraft> mappings = normalizeMappings(request.columnMappings(), source.columns());
+        List<ColumnDraft> mappings = normalizeMappings(tenantId, request.columnMappings(), source.columns());
         if (mappings.isEmpty()) {
             throw new BizException(40041, "DWD 模型字段映射不能为空");
         }
@@ -179,7 +195,7 @@ public class DwdModelService {
         modelSource.setSourceType("ODS_TABLE");
         modelSource.setSortNo(0);
         sourceRepo.save(modelSource);
-        saveMappings(id, mappings);
+        saveMappings(model, mappings);
         return toDTO(model);
     }
 
@@ -240,6 +256,9 @@ public class DwdModelService {
             throw new BizException(40041, "DWD 模型字段映射不能为空");
         }
 
+        applyExecutionDefaults(model);
+        Map<String, ResolvedOperator> operators = resolveDefaultOperators(model, mappings);
+
         String dbtModelName = normalizeName(model.getDbtModelName(), model.getTargetFqn());
         String sourceSchema = sourceSchemaName(source.fqn());
         String sourceTable = sourceTableName(source.fqn());
@@ -247,13 +266,13 @@ public class DwdModelService {
         String sourcePath = "models/generated/sources.yml";
         String sqlPath = "models/intermediate/" + dbtModelName + ".sql";
         String schemaPath = "models/intermediate/" + dbtModelName + ".yml";
+        Map<String, Object> operatorGraph = operatorGraphDefinition(model, mappings, validation.outputColumns(), operators);
+        operatorGraph = mergeStoredQualityGateNodes(operatorGraph, operatorGraphMap(model.getOperatorGraph()));
 
-        writeFile(dbtRoot.resolve(sourcePath), generateSourceYaml(source, sourceSchema, sourceTable));
+        writeFile(dbtRoot.resolve(sourcePath), generateSourceYaml(model, source, operatorGraph));
         writeFile(dbtRoot.resolve(sqlPath), generateModelSql(model, mappings, sourceSchema, sourceTable));
-        writeFile(dbtRoot.resolve(schemaPath), generateSchemaYaml(model, mappings, dbtModelName));
+        writeFile(dbtRoot.resolve(schemaPath), generateSchemaYaml(model, mappings, dbtModelName, operatorGraph));
 
-        applyExecutionDefaults(model);
-        Map<String, Object> operatorGraph = operatorGraphDefinition(model, mappings, validation.outputColumns());
         model.setOperatorGraph(JsonUtil.toJson(operatorGraph));
         model.setOperatorGraphVersion(1);
         model.setCostPolicy(defaultCostPolicyJson());
@@ -366,6 +385,19 @@ public class DwdModelService {
             .orElseThrow(() -> new BizException(40442, "DWD 模型运行不存在"));
         refreshRunStatus(run);
         return toRunDTO(run);
+    }
+
+    @Override
+    @Transactional
+    public boolean refreshByDagsterRunId(String dagsterRunId) {
+        if (!StringUtils.hasText(dagsterRunId)) {
+            return false;
+        }
+        List<DataModelRun> runs = runRepo.findByDagsterRunIdAndTenantId(dagsterRunId, requireTenant());
+        for (DataModelRun run : runs) {
+            refreshRunStatus(run);
+        }
+        return !runs.isEmpty();
     }
 
     private void refreshRunStatus(DataModelRun run) {
@@ -714,6 +746,7 @@ public class DwdModelService {
     }
 
     private List<ColumnDraft> normalizeMappings(
+        UUID tenantId,
         List<DwdModelDraftRequest.ColumnMappingRequest> requested,
         List<CatalogColumn> sourceColumns
     ) {
@@ -735,6 +768,9 @@ public class DwdModelService {
                     source.classification(),
                     source.piiType(),
                     source.suggestLevel(),
+                    null,
+                    null,
+                    null,
                     i++
                 ));
             }
@@ -748,6 +784,7 @@ public class DwdModelService {
             if (source == null) {
                 throw new BizException(40050, "字段映射引用了不存在的源字段: " + sourceName);
             }
+            TermSelection term = resolveTermSelection(tenantId, item.termId(), item.termCode(), item.termName());
             drafts.add(new ColumnDraft(
                 sourceName,
                 targetName,
@@ -757,17 +794,20 @@ public class DwdModelService {
                 Boolean.TRUE.equals(item.primaryKey()),
                 firstText(item.classification(), source.classification()),
                 firstText(item.piiType(), source.piiType()),
-                firstText(item.suggestLevel(), source.suggestLevel()),
+                firstText(item.suggestLevel(), firstText(source.suggestLevel(), term.sensitivityLevel())),
+                term.termId(),
+                term.termCode(),
+                term.termName(),
                 i++
             ));
         }
         return drafts;
     }
 
-    private void saveMappings(UUID modelId, List<ColumnDraft> mappings) {
+    private void saveMappings(DataModel model, List<ColumnDraft> mappings) {
         for (ColumnDraft item : mappings) {
             DataModelColumnMapping mapping = new DataModelColumnMapping();
-            mapping.setModelId(modelId);
+            mapping.setModelId(model.getId());
             mapping.setSourceColumn(item.source());
             mapping.setTargetColumn(item.target());
             mapping.setSourceType(item.sourceType());
@@ -777,9 +817,105 @@ public class DwdModelService {
             mapping.setClassification(item.classification());
             mapping.setPiiType(item.piiType());
             mapping.setSuggestLevel(item.suggestLevel());
+            mapping.setTermId(item.termId());
+            mapping.setTermCode(item.termCode());
+            mapping.setTermName(item.termName());
             mapping.setSortNo(item.sortNo());
             mappingRepo.save(mapping);
+            upsertTermBinding(model, item);
         }
+    }
+
+    private TermSelection resolveTermSelection(UUID tenantId, UUID termId, String termCode, String termName) {
+        if (termId == null && !StringUtils.hasText(termCode)) {
+            return TermSelection.empty(termCode, termName);
+        }
+        try {
+            Map<String, Object> row = termId != null
+                ? jdbc.queryForMap("""
+                    SELECT id, code, name, sensitivity_level
+                    FROM modeling.business_term
+                    WHERE tenant_id = ? AND id = ? AND status = 'APPROVED'
+                    """, tenantId, termId)
+                : jdbc.queryForMap("""
+                    SELECT id, code, name, sensitivity_level
+                    FROM modeling.business_term
+                    WHERE tenant_id = ? AND lower(code) = lower(?) AND status = 'APPROVED'
+                    """, tenantId, termCode.trim());
+            return new TermSelection(
+                row.get("id") instanceof UUID id ? id : UUID.fromString(String.valueOf(row.get("id"))),
+                String.valueOf(row.get("code")),
+                String.valueOf(row.get("name")),
+                row.get("sensitivity_level") == null ? null : String.valueOf(row.get("sensitivity_level"))
+            );
+        } catch (EmptyResultDataAccessException e) {
+            throw new BizException(40053, "字段映射引用了不存在或未审定的业务术语: " + (termId != null ? termId : termCode));
+        }
+    }
+
+    private void upsertTermBinding(DataModel model, ColumnDraft item) {
+        if (item.termId() == null) {
+            return;
+        }
+        int updated = jdbc.update("""
+            UPDATE modeling.business_term_binding
+            SET asset_id = NULL,
+                relation_type = 'DEFINES',
+                source = 'MODELING',
+                confidence = 0.95,
+                status = 'ACTIVE',
+                updated_at = now()
+            WHERE tenant_id = ?
+              AND term_id = ?
+              AND asset_fqn = ?
+              AND coalesce(column_name, '') = coalesce(?, '')
+            """,
+            model.getTenantId(),
+            item.termId(),
+            model.getTargetFqn(),
+            item.target()
+        );
+        if (updated == 0) {
+            jdbc.update("""
+                INSERT INTO modeling.business_term_binding
+                    (tenant_id, term_id, asset_id, asset_fqn, column_name, relation_type, source, confidence, status, created_by, created_at, updated_at)
+                VALUES (?, ?, NULL, ?, ?, 'DEFINES', 'MODELING', 0.95, 'ACTIVE', ?, now(), now())
+                """,
+                model.getTenantId(),
+                item.termId(),
+                model.getTargetFqn(),
+                item.target(),
+                TenantContext.getUserId()
+            );
+        }
+        createPiiCandidateIfSensitive(model, item);
+    }
+
+    private void createPiiCandidateIfSensitive(DataModel model, ColumnDraft item) {
+        if (!isSensitive(item.suggestLevel()) && !isSensitive(item.classification())) {
+            return;
+        }
+        jdbc.update("""
+            INSERT INTO security.pii_scan_record
+                (tenant_id, fqn, pii_type, confidence, suggest_level, status, scanned_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', now())
+            ON CONFLICT (tenant_id, fqn)
+            DO UPDATE SET
+                pii_type = EXCLUDED.pii_type,
+                confidence = GREATEST(security.pii_scan_record.confidence, EXCLUDED.confidence),
+                suggest_level = EXCLUDED.suggest_level,
+                status = CASE
+                    WHEN security.pii_scan_record.status = 'IGNORED' THEN 'PENDING'
+                    ELSE security.pii_scan_record.status
+                END,
+                scanned_at = now()
+            """,
+            model.getTenantId(),
+            model.getTargetFqn() + "." + item.target(),
+            limit(StringUtils.hasText(item.termName()) ? item.termName() : firstText(item.piiType(), "业务术语敏感字段"), 32),
+            0.86d,
+            firstText(item.suggestLevel(), item.classification())
+        );
     }
 
     private DataModelDTO toDTO(DataModel model) {
@@ -829,6 +965,9 @@ public class DwdModelService {
                 m.getClassification(),
                 m.getPiiType(),
                 m.getSuggestLevel(),
+                m.getTermId(),
+                m.getTermCode(),
+                m.getTermName(),
                 m.getSortNo()
             )).toList()
         );
@@ -925,49 +1064,633 @@ public class DwdModelService {
         return sql.toString();
     }
 
-    private String generateSourceYaml(CatalogAsset source, String sourceSchema, String sourceTable) {
+    private String generateSourceYaml(
+        DataModel model,
+        CatalogAsset currentSource,
+        Map<String, Object> operatorGraph
+    ) {
+        Map<String, CatalogAsset> sourcesByFqn = new LinkedHashMap<>();
+        Map<String, SourceFreshnessSpec> freshnessByFqn = new LinkedHashMap<>();
+        sourcesByFqn.put(currentSource.fqn(), currentSource);
+        SourceFreshnessSpec currentFreshness = sourceFreshnessSpec(operatorGraph, currentSource.fqn());
+        if (currentFreshness != null) {
+            freshnessByFqn.put(currentSource.fqn(), currentFreshness);
+        }
+
+        for (DataModel existing : modelRepo.findByTenantIdOrderByCreatedAtDesc(model.getTenantId())) {
+            if (!contributesGeneratedSource(existing, model.getId())) {
+                continue;
+            }
+            String sourceFqn = existing.getSourceFqn();
+            if (sourcesByFqn.containsKey(sourceFqn)) {
+                continue;
+            }
+            sourcesByFqn.put(sourceFqn, loadCatalogAsset(model.getTenantId(), sourceFqn));
+            SourceFreshnessSpec existingFreshness = sourceFreshnessSpec(
+                operatorGraphMap(existing.getOperatorGraph()),
+                sourceFqn
+            );
+            if (existingFreshness != null) {
+                freshnessByFqn.put(sourceFqn, existingFreshness);
+            }
+        }
+
+        List<CatalogAsset> sources = sourcesByFqn.values().stream()
+            .sorted(Comparator.comparing(CatalogAsset::fqn))
+            .toList();
+        return generateSourceYaml(sources, freshnessByFqn);
+    }
+
+    private boolean contributesGeneratedSource(DataModel model, UUID currentModelId) {
+        return model != null
+            && model.getId() != null
+            && !model.getId().equals(currentModelId)
+            && "DWD".equalsIgnoreCase(model.getLayer())
+            && "VALIDATED".equalsIgnoreCase(model.getStatus())
+            && StringUtils.hasText(model.getArtifactPath())
+            && StringUtils.hasText(model.getSourceFqn());
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> operatorGraphMap(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return Map.of();
+        }
+        try {
+            Object parsed = JsonUtil.fromJson(raw, Map.class);
+            if (parsed instanceof Map<?, ?> map) {
+                return (Map<String, Object>) map;
+            }
+        } catch (RuntimeException ignored) {
+            return Map.of();
+        }
+        return Map.of();
+    }
+
+    private SourceFreshnessSpec sourceFreshnessSpec(Map<String, Object> operatorGraph, String sourceFqn) {
+        Object nodesValue = operatorGraph == null ? null : operatorGraph.get("nodes");
+        if (!(nodesValue instanceof List<?> nodes)) {
+            return null;
+        }
+        for (Object nodeValue : nodes) {
+            if (!(nodeValue instanceof Map<?, ?> node) || !isQualityGateNode(node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            if (!(configValue instanceof Map<?, ?> config) || !isFreshnessGateNode(node, config)) {
+                continue;
+            }
+            String nodeSourceFqn = firstText(config.get("sourceFqn"), config.get("assetFqn"));
+            if (StringUtils.hasText(nodeSourceFqn) && !nodeSourceFqn.equalsIgnoreCase(sourceFqn)) {
+                continue;
+            }
+            String loadedAtField = firstText(
+                config.get("loadedAtField"),
+                config.get("loaded_at_field"),
+                config.get("column"),
+                config.get("timestampColumn"),
+                config.get("watermarkColumn")
+            );
+            if (!StringUtils.hasText(loadedAtField)) {
+                continue;
+            }
+
+            FreshnessThreshold warnAfter = freshnessThreshold(firstPresent(config.get("warnAfter"), config.get("warn_after")));
+            FreshnessThreshold errorAfter = freshnessThreshold(firstPresent(config.get("errorAfter"), config.get("error_after")));
+            if (warnAfter == null && errorAfter == null) {
+                FreshnessThreshold maxDelay = freshnessThreshold(firstPresent(config.get("maxDelay"), config.get("max_delay")));
+                if (maxDelay == null) {
+                    continue;
+                }
+                String action = firstText(config.get("actionOnViolation"), config.get("action"), config.get("severity"));
+                if ("WARN".equalsIgnoreCase(action)) {
+                    warnAfter = maxDelay;
+                } else {
+                    errorAfter = maxDelay;
+                }
+            }
+            return new SourceFreshnessSpec(loadedAtField, warnAfter, errorAfter);
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mergeStoredQualityGateNodes(
+        Map<String, Object> generatedGraph,
+        Map<String, Object> storedGraph
+    ) {
+        Object generatedNodesValue = generatedGraph.get("nodes");
+        Object storedNodesValue = storedGraph == null ? null : storedGraph.get("nodes");
+        if (!(generatedNodesValue instanceof List<?> generatedNodes)
+            || !(storedNodesValue instanceof List<?> storedNodes)) {
+            return generatedGraph;
+        }
+        List<Object> mergedNodes = new ArrayList<>(generatedNodes);
+        Set<String> nodeIds = new java.util.LinkedHashSet<>();
+        for (Object nodeValue : generatedNodes) {
+            if (nodeValue instanceof Map<?, ?> node) {
+                String id = stringValue(node.get("id"));
+                if (StringUtils.hasText(id)) {
+                    nodeIds.add(id);
+                }
+            }
+        }
+        for (Object nodeValue : storedNodes) {
+            if (!(nodeValue instanceof Map<?, ?> node) || !isPreservedQualityGateNode(node)) {
+                continue;
+            }
+            String id = stringValue(node.get("id"));
+            if (!StringUtils.hasText(id) || nodeIds.contains(id)) {
+                continue;
+            }
+            mergedNodes.add((Map<String, Object>) node);
+            nodeIds.add(id);
+        }
+        generatedGraph.put("nodes", mergedNodes);
+        return generatedGraph;
+    }
+
+    private boolean isPreservedQualityGateNode(Map<?, ?> node) {
+        Object configValue = node.get("config");
+        if (!(configValue instanceof Map<?, ?> config) || !isQualityGateNode(node)) {
+            return false;
+        }
+        return isFreshnessGateNode(node, config) || isCustomSqlGateNode(node, config);
+    }
+
+    private boolean isFreshnessGateNode(Map<?, ?> node, Map<?, ?> config) {
+        return isFreshnessRef(node.get("operatorRef"))
+            || isFreshnessRef(config.get("type"))
+            || isFreshnessRef(config.get("test"))
+            || stringList(config.get("tests")).stream().anyMatch(this::isFreshnessRef);
+    }
+
+    private boolean isCustomSqlGateNode(Map<?, ?> node, Map<?, ?> config) {
+        return isCustomSqlRef(node.get("operatorRef"))
+            || isCustomSqlRef(config.get("type"))
+            || isCustomSqlRef(config.get("test"))
+            || stringList(config.get("tests")).stream().anyMatch(this::isCustomSqlRef);
+    }
+
+    private boolean isFreshnessRef(Object value) {
+        String text = stringValue(value).toLowerCase(Locale.ROOT);
+        if (text.startsWith("gate.")) {
+            text = text.substring("gate.".length());
+        }
+        text = text.replace("-", "_");
+        return "freshness".equals(text) || "source_freshness".equals(text);
+    }
+
+    private boolean isCustomSqlRef(Object value) {
+        String text = stringValue(value).toLowerCase(Locale.ROOT);
+        if (text.startsWith("gate.")) {
+            text = text.substring("gate.".length());
+        }
+        text = text.replace("-", "_");
+        return "custom_sql".equals(text) || "customsql".equals(text);
+    }
+
+    private FreshnessThreshold freshnessThreshold(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Integer count = integerValue(map.get("count"));
+            String period = normalizeFreshnessPeriod(firstText(map.get("period"), map.get("unit")));
+            return count == null || !StringUtils.hasText(period) ? null : new FreshnessThreshold(count, period);
+        }
+        String text = stringValue(value);
+        if (!StringUtils.hasText(text)) {
+            return null;
+        }
+        var matcher = FRESHNESS_DELAY.matcher(text);
+        if (!matcher.matches()) {
+            return null;
+        }
+        String period = normalizeFreshnessPeriod(matcher.group(2));
+        return StringUtils.hasText(period)
+            ? new FreshnessThreshold(Integer.parseInt(matcher.group(1)), period)
+            : null;
+    }
+
+    private String normalizeFreshnessPeriod(String value) {
+        String normalized = stringValue(value).toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "m", "min", "mins", "minute", "minutes" -> "minute";
+            case "h", "hr", "hrs", "hour", "hours" -> "hour";
+            case "d", "day", "days" -> "day";
+            case "w", "week", "weeks" -> "week";
+            default -> null;
+        };
+    }
+
+    private Integer integerValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        String text = stringValue(value);
+        if (!text.matches("\\d+")) {
+            return null;
+        }
+        return Integer.parseInt(text);
+    }
+
+    private String firstText(Object... values) {
+        for (Object value : values) {
+            String text = stringValue(value);
+            if (StringUtils.hasText(text)) {
+                return text;
+            }
+        }
+        return null;
+    }
+
+    private String generateSourceYaml(List<CatalogAsset> sources, Map<String, SourceFreshnessSpec> freshnessByFqn) {
+        Map<String, List<CatalogAsset>> sourcesBySchema = new LinkedHashMap<>();
+        for (CatalogAsset source : sources) {
+            sourcesBySchema
+                .computeIfAbsent(sourceSchemaName(source.fqn()), ignored -> new ArrayList<>())
+                .add(source);
+        }
+
         StringBuilder yaml = new StringBuilder();
         yaml.append("version: 2\n");
         yaml.append("sources:\n");
-        yaml.append("  - name: ").append(sourceSchema).append("\n");
-        yaml.append("    schema: ").append(sourceSchema).append("\n");
-        yaml.append("    description: ").append(yamlQuote("OneLake generated source for " + source.fqn())).append("\n");
-        yaml.append("    tables:\n");
-        yaml.append("      - name: ").append(sourceTable).append("\n");
-        yaml.append("        description: ").append(yamlQuote("Generated from Catalog asset " + source.fqn())).append("\n");
-        yaml.append("        columns:\n");
-        for (CatalogColumn column : source.columns()) {
-            yaml.append("          - name: ").append(column.name()).append("\n");
-            yaml.append("            description: ")
-                .append(yamlQuote("Source column " + column.name() + " (" + column.type() + ")"))
+        sourcesBySchema.forEach((sourceSchema, schemaSources) -> {
+            yaml.append("  - name: ").append(sourceSchema).append("\n");
+            yaml.append("    schema: ").append(sourceSchema).append("\n");
+            yaml.append("    description: ")
+                .append(yamlQuote("OneLake generated sources for " + sourceSchema))
                 .append("\n");
-        }
+            yaml.append("    tables:\n");
+            schemaSources.stream()
+                .sorted(Comparator.comparing(source -> sourceTableName(source.fqn())))
+                .forEach(source -> {
+                    String sourceTable = sourceTableName(source.fqn());
+                    yaml.append("      - name: ").append(sourceTable).append("\n");
+                    yaml.append("        description: ")
+                        .append(yamlQuote("Generated from Catalog asset " + source.fqn()))
+                        .append("\n");
+                    SourceFreshnessSpec freshness = freshnessByFqn.get(source.fqn());
+                    if (freshness != null) {
+                        yaml.append("        loaded_at_field: ").append(yamlQuote(freshness.loadedAtField())).append("\n");
+                        yaml.append("        freshness:\n");
+                        appendFreshnessThresholdYaml(yaml, "warn_after", freshness.warnAfter());
+                        appendFreshnessThresholdYaml(yaml, "error_after", freshness.errorAfter());
+                    }
+                    yaml.append("        columns:\n");
+                    for (CatalogColumn column : source.columns()) {
+                        yaml.append("          - name: ").append(column.name()).append("\n");
+                        yaml.append("            description: ")
+                            .append(yamlQuote("Source column " + column.name() + " (" + column.type() + ")"))
+                            .append("\n");
+                    }
+                });
+        });
         return yaml.toString();
+    }
+
+    private void appendFreshnessThresholdYaml(
+        StringBuilder yaml,
+        String key,
+        FreshnessThreshold threshold
+    ) {
+        if (threshold == null) {
+            return;
+        }
+        yaml.append("          ").append(key).append(":\n");
+        yaml.append("            count: ").append(threshold.count()).append("\n");
+        yaml.append("            period: ").append(threshold.period()).append("\n");
     }
 
     private String generateSchemaYaml(
         DataModel model,
         List<DataModelColumnMapping> mappings,
-        String dbtModelName
+        String dbtModelName,
+        Map<String, Object> operatorGraph
     ) {
+        List<DbtTestSpec> modelTests = qualityGateModelDbtTests(operatorGraph);
+        Map<String, List<DbtTestSpec>> testsByColumn = qualityGateDbtTests(operatorGraph);
+        if (testsByColumn.isEmpty()) {
+            testsByColumn = primaryKeyDbtTests(mappings);
+        }
         StringBuilder yaml = new StringBuilder();
         yaml.append("version: 2\n");
         yaml.append("models:\n");
         yaml.append("  - name: ").append(dbtModelName).append("\n");
         yaml.append("    description: ").append(yamlQuote("OneLake generated DWD model from " + model.getSourceFqn())).append("\n");
+        if (!modelTests.isEmpty()) {
+            yaml.append("    tests:\n");
+            for (DbtTestSpec test : modelTests) {
+                appendDbtTestYaml(yaml, test, "      ", "          ", "            ", "              ");
+            }
+        }
         yaml.append("    columns:\n");
         for (DataModelColumnMapping mapping : mappings) {
             yaml.append("      - name: ").append(mapping.getTargetColumn()).append("\n");
             yaml.append("        description: ")
                 .append(yamlQuote("Mapped from " + mapping.getSourceColumn()))
                 .append("\n");
-            if (Boolean.TRUE.equals(mapping.getPrimaryKey())) {
+            List<DbtTestSpec> tests = testsByColumn.getOrDefault(mapping.getTargetColumn(), List.of());
+            if (!tests.isEmpty()) {
                 yaml.append("        tests:\n");
-                yaml.append("          - not_null\n");
-                yaml.append("          - unique\n");
+                for (DbtTestSpec test : tests) {
+                    appendDbtTestYaml(yaml, test);
+                }
             }
         }
         return yaml.toString();
+    }
+
+    private Map<String, List<DbtTestSpec>> primaryKeyDbtTests(List<DataModelColumnMapping> mappings) {
+        Map<String, List<DbtTestSpec>> testsByColumn = new LinkedHashMap<>();
+        for (DataModelColumnMapping mapping : mappings) {
+            if (Boolean.TRUE.equals(mapping.getPrimaryKey())) {
+                testsByColumn.put(mapping.getTargetColumn(), List.of(
+                    new DbtTestSpec("not_null", Map.of()),
+                    new DbtTestSpec("unique", Map.of())
+                ));
+            }
+        }
+        return testsByColumn;
+    }
+
+    private Map<String, List<DbtTestSpec>> qualityGateDbtTests(Map<String, Object> operatorGraph) {
+        Object nodesValue = operatorGraph == null ? null : operatorGraph.get("nodes");
+        if (!(nodesValue instanceof List<?> nodes)) {
+            return Map.of();
+        }
+
+        Map<String, List<DbtTestSpec>> testsByColumn = new LinkedHashMap<>();
+        for (Object nodeValue : nodes) {
+            if (!(nodeValue instanceof Map<?, ?> node)) {
+                continue;
+            }
+            if (!isQualityGateNode(node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            if (!(configValue instanceof Map<?, ?> config)) {
+                continue;
+            }
+            List<String> columns = stringList(config.get("columns"));
+            if (columns.isEmpty()) {
+                columns = stringList(config.get("column"));
+            }
+            List<DbtTestSpec> tests = dbtTestSpecs(config.get("tests"), config);
+            if (tests.isEmpty()) {
+                tests = dbtTestSpecs(node.get("operatorRef"), config);
+            }
+            if (columns.isEmpty() || tests.isEmpty()) {
+                continue;
+            }
+            for (String column : columns) {
+                if (!StringUtils.hasText(column)) {
+                    continue;
+                }
+                List<DbtTestSpec> columnTests = testsByColumn.computeIfAbsent(column, key -> new ArrayList<>());
+                for (DbtTestSpec test : tests) {
+                    if (isModelLevelDbtTest(test)) {
+                        continue;
+                    }
+                    if (!columnTests.contains(test)) {
+                        columnTests.add(test);
+                    }
+                }
+            }
+        }
+        return testsByColumn;
+    }
+
+    private List<DbtTestSpec> qualityGateModelDbtTests(Map<String, Object> operatorGraph) {
+        Object nodesValue = operatorGraph == null ? null : operatorGraph.get("nodes");
+        if (!(nodesValue instanceof List<?> nodes)) {
+            return List.of();
+        }
+
+        List<DbtTestSpec> tests = new ArrayList<>();
+        for (Object nodeValue : nodes) {
+            if (!(nodeValue instanceof Map<?, ?> node) || !isQualityGateNode(node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            if (!(configValue instanceof Map<?, ?> config)) {
+                continue;
+            }
+            List<DbtTestSpec> nodeTests = dbtTestSpecs(config.get("tests"), config);
+            if (nodeTests.isEmpty()) {
+                nodeTests = dbtTestSpecs(node.get("operatorRef"), config);
+            }
+            for (DbtTestSpec test : nodeTests) {
+                if (isModelLevelDbtTest(test) && !tests.contains(test)) {
+                    tests.add(test);
+                }
+            }
+        }
+        return tests;
+    }
+
+    private boolean isModelLevelDbtTest(DbtTestSpec test) {
+        return "onelake_row_count".equals(test.name())
+            || "onelake_custom_sql".equals(test.name());
+    }
+
+    private boolean isQualityGateNode(Map<?, ?> node) {
+        String nodeType = stringValue(node.get("nodeType"));
+        String type = stringValue(node.get("type"));
+        String category = stringValue(node.get("operatorCategory"));
+        String operatorRef = stringValue(node.get("operatorRef"));
+        return "QUALITY_GATE".equalsIgnoreCase(nodeType)
+            || "QUALITY_GATE".equalsIgnoreCase(type)
+            || "QUALITY_GATE".equalsIgnoreCase(category)
+            || operatorRef.startsWith("gate.");
+    }
+
+    private List<DbtTestSpec> dbtTestSpecs(Object value, Map<?, ?> config) {
+        return stringList(value).stream()
+            .map(this::normalizeDbtTestName)
+            .filter(StringUtils::hasText)
+            .map(testName -> dbtTestSpec(testName, config))
+            .filter(spec -> spec != null)
+            .toList();
+    }
+
+    private String normalizeDbtTestName(String value) {
+        if (!StringUtils.hasText(value)) {
+            return null;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("gate.")) {
+            normalized = normalized.substring("gate.".length());
+        }
+        return switch (normalized) {
+            case "not_null", "unique" -> normalized;
+            case "enum", "accepted_values" -> "accepted_values";
+            case "referential", "relationships" -> "relationships";
+            case "range" -> "onelake_range";
+            case "regex" -> "onelake_regex";
+            case "row_count", "rowcount" -> "onelake_row_count";
+            case "custom_sql", "customsql" -> "onelake_custom_sql";
+            default -> null;
+        };
+    }
+
+    private DbtTestSpec dbtTestSpec(String testName, Map<?, ?> config) {
+        if ("accepted_values".equals(testName)) {
+            List<String> values = stringList(config.get("values"));
+            if (values.isEmpty()) {
+                return null;
+            }
+            return new DbtTestSpec(testName, Map.of("values", values));
+        }
+        if ("relationships".equals(testName)) {
+            String refModel = stringValue(config.get("refModel"));
+            String refColumn = stringValue(config.get("refColumn"));
+            if (!StringUtils.hasText(refModel) || !StringUtils.hasText(refColumn)) {
+                return null;
+            }
+            Map<String, Object> arguments = new LinkedHashMap<>();
+            arguments.put("to", new YamlRaw("ref('" + refModel.replace("'", "''") + "')"));
+            arguments.put("field", new YamlRaw(refColumn));
+            return new DbtTestSpec(testName, arguments);
+        }
+        if ("onelake_range".equals(testName)) {
+            Map<String, Object> arguments = new LinkedHashMap<>();
+            Object min = firstPresent(config.get("min"), config.get("minValue"), config.get("min_value"));
+            Object max = firstPresent(config.get("max"), config.get("maxValue"), config.get("max_value"));
+            if (min != null) {
+                arguments.put("min_value", yamlRawIfNumeric(min));
+            }
+            if (max != null) {
+                arguments.put("max_value", yamlRawIfNumeric(max));
+            }
+            return arguments.isEmpty() ? null : new DbtTestSpec(testName, arguments);
+        }
+        if ("onelake_regex".equals(testName)) {
+            String pattern = stringValue(config.get("pattern"));
+            if (!StringUtils.hasText(pattern)) {
+                return null;
+            }
+            return new DbtTestSpec(testName, Map.of("pattern", pattern));
+        }
+        if ("onelake_row_count".equals(testName)) {
+            Map<String, Object> arguments = new LinkedHashMap<>();
+            Object min = firstPresent(config.get("min"), config.get("minValue"), config.get("min_value"));
+            Object max = firstPresent(config.get("max"), config.get("maxValue"), config.get("max_value"));
+            if (min != null) {
+                arguments.put("min_value", yamlRawIfNumeric(min));
+            }
+            if (max != null) {
+                arguments.put("max_value", yamlRawIfNumeric(max));
+            }
+            return arguments.isEmpty() ? null : new DbtTestSpec(testName, arguments);
+        }
+        if ("onelake_custom_sql".equals(testName)) {
+            String assertionSql = firstText(config.get("assertionSql"), config.get("assertion_sql"), config.get("sql"));
+            if (!StringUtils.hasText(assertionSql)) {
+                return null;
+            }
+            return new DbtTestSpec(testName, Map.of("assertion_sql", normalizeCustomAssertionSql(assertionSql)));
+        }
+        return new DbtTestSpec(testName, Map.of());
+    }
+
+    private String normalizeCustomAssertionSql(String assertionSql) {
+        String normalized = assertionSql
+            .replace("{{ model }}", CUSTOM_SQL_MODEL_PLACEHOLDER)
+            .replace("{{model}}", CUSTOM_SQL_MODEL_PLACEHOLDER)
+            .trim();
+        if (!normalized.contains(CUSTOM_SQL_MODEL_PLACEHOLDER)) {
+            throw new BizException(40056, "自定义 SQL 门禁必须使用 {{ model }} 占位符引用当前模型");
+        }
+        String parseSql = normalized.replace(CUSTOM_SQL_MODEL_PLACEHOLDER, "onelake_model_under_test");
+        Statement statement = ReadOnlySqlValidator.requireSingleReadOnlyStatement(
+            parseSql,
+            40056,
+            "自定义 SQL 门禁只允许单条只读 SELECT 断言",
+            "自定义 SQL 门禁只允许单条 SQL"
+        );
+        Set<String> referencedTables = ReadOnlySqlValidator.referencedTables(statement);
+        boolean onlyCurrentModel = referencedTables.stream()
+            .map(table -> table.replace("\"", "").toLowerCase(Locale.ROOT))
+            .allMatch("onelake_model_under_test"::equals);
+        if (!onlyCurrentModel) {
+            throw new BizException(40056, "自定义 SQL 门禁只能引用当前模型 {{ model }}");
+        }
+        return normalized;
+    }
+
+    private void appendDbtTestYaml(StringBuilder yaml, DbtTestSpec test) {
+        appendDbtTestYaml(yaml, test, "          ", "              ", "                ", "                  ");
+    }
+
+    private void appendDbtTestYaml(
+        StringBuilder yaml,
+        DbtTestSpec test,
+        String testIndent,
+        String argumentsIndent,
+        String argumentKeyIndent,
+        String listValueIndent
+    ) {
+        if (test.arguments().isEmpty()) {
+            yaml.append(testIndent).append("- ").append(test.name()).append("\n");
+            return;
+        }
+        yaml.append(testIndent).append("- ").append(test.name()).append(":\n");
+        yaml.append(argumentsIndent).append("arguments:\n");
+        for (Map.Entry<String, Object> entry : test.arguments().entrySet()) {
+            if (entry.getValue() instanceof List<?> values) {
+                yaml.append(argumentKeyIndent).append(entry.getKey()).append(":\n");
+                for (Object value : values) {
+                    yaml.append(listValueIndent).append("- ").append(yamlQuote(stringValue(value))).append("\n");
+                }
+            } else {
+                yaml.append(argumentKeyIndent).append(entry.getKey()).append(": ")
+                    .append(yamlScalar(entry.getValue()))
+                    .append("\n");
+            }
+        }
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value != null && StringUtils.hasText(stringValue(value))) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private Object yamlRawIfNumeric(Object value) {
+        String text = stringValue(value);
+        if (text.matches("-?\\d+(\\.\\d+)?")) {
+            return new YamlRaw(text);
+        }
+        return value;
+    }
+
+    private String yamlScalar(Object value) {
+        if (value instanceof YamlRaw raw) {
+            return raw.value();
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return value.toString();
+        }
+        return yamlQuote(stringValue(value));
+    }
+
+    private List<String> stringList(Object value) {
+        if (value instanceof List<?> list) {
+            return list.stream()
+                .map(this::stringValue)
+                .filter(StringUtils::hasText)
+                .toList();
+        }
+        if (value instanceof String text && StringUtils.hasText(text)) {
+            return List.of(text.trim());
+        }
+        return List.of();
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? "" : value.toString().trim();
     }
 
     private UUID ensureDwdDag(
@@ -1037,49 +1760,69 @@ public class DwdModelService {
     private Map<String, Object> operatorGraphDefinition(
         DataModel model,
         List<DataModelColumnMapping> mappings,
-        List<String> outputColumns
+        List<String> outputColumns,
+        Map<String, ResolvedOperator> operators
     ) {
+        List<String> primaryKeys = mappings.stream()
+            .filter(mapping -> Boolean.TRUE.equals(mapping.getPrimaryKey()))
+            .map(DataModelColumnMapping::getTargetColumn)
+            .toList();
+        List<String> sensitiveColumns = mappings.stream()
+            .filter(mapping -> isSensitive(mapping.getClassification()) || isSensitive(mapping.getSuggestLevel()))
+            .map(DataModelColumnMapping::getTargetColumn)
+            .toList();
+
         List<Map<String, Object>> nodes = new ArrayList<>();
         nodes.add(node(
             "input_ods", "INPUT", model.getSourceFqn(),
-            Map.of("assetFqn", model.getSourceFqn(), "layer", "ODS")
+            Map.of("assetFqn", model.getSourceFqn(), "sourceFqn", model.getSourceFqn(), "layer", "ODS"),
+            operators.get("input_ods")
         ));
         nodes.add(node(
             "transform_mapping", "TRANSFORM", "字段选择与标准化",
             Map.of(
                 "sourceFqn", model.getSourceFqn(),
                 "targetFqn", model.getTargetFqn(),
+                "mapping", mappingConfig(mappings),
                 "mappings", mappings.stream().map(m -> Map.of(
                     "source", m.getSourceColumn(),
                     "target", m.getTargetColumn(),
                     "expression", StringUtils.hasText(m.getExpression()) ? m.getExpression() : m.getSourceColumn()
                 )).toList()
-            )
+            ),
+            operators.get("transform_mapping")
         ));
         nodes.add(node(
             "govern_clean", "GOVERN", "脏数据过滤与标准治理",
             Map.of(
+                "requiredColumns", primaryKeys.isEmpty() ? outputColumns : primaryKeys,
                 "policies", List.of(
                     Map.of("type", "PRIMARY_KEY_NOT_NULL", "actionOnViolation", "FAIL"),
                     Map.of("type", "ENUM_STANDARDIZE", "actionOnViolation", "WARN")
                 )
-            )
+            ),
+            operators.get("govern_clean")
         ));
-        if (mappings.stream().anyMatch(m -> isSensitive(m.getClassification()) || isSensitive(m.getSuggestLevel()))) {
+        if (!sensitiveColumns.isEmpty()) {
             nodes.add(node(
                 "mask_sensitive", "MASK", "敏感字段透传检查",
                 Map.of(
                     "actionOnViolation", "WARN",
-                    "columns", mappings.stream()
-                        .filter(m -> isSensitive(m.getClassification()) || isSensitive(m.getSuggestLevel()))
-                        .map(DataModelColumnMapping::getTargetColumn)
-                        .toList()
-                )
+                    "columns", sensitiveColumns,
+                    "keepHead", 3,
+                    "keepTail", 4
+                ),
+                operators.get("mask_sensitive")
             ));
         }
         nodes.add(node(
             "quality_gate", "QUALITY_GATE", "主键与非空门禁",
-            Map.of("actionOnViolation", "FAIL", "tests", List.of("not_null", "unique"))
+            Map.of(
+                "actionOnViolation", "FAIL",
+                "columns", primaryKeys.isEmpty() ? outputColumns : primaryKeys,
+                "tests", List.of("not_null", "unique")
+            ),
+            operators.get("quality_gate")
         ));
         nodes.add(node(
             "dbt_model", "DBT_MODEL", model.getDbtModelName(),
@@ -1092,7 +1835,8 @@ public class DwdModelService {
         ));
         nodes.add(node(
             "output_dwd", "OUTPUT", model.getTargetFqn(),
-            Map.of("assetFqn", model.getTargetFqn(), "layer", "DWD", "columns", outputColumns)
+            outputConfig(model, outputColumns),
+            operators.get("output_dwd")
         ));
 
         List<Map<String, String>> edges = new ArrayList<>();
@@ -1119,14 +1863,161 @@ public class DwdModelService {
     }
 
     private Map<String, Object> node(String id, String nodeType, String name, Map<String, Object> config) {
+        return node(id, nodeType, name, config, null);
+    }
+
+    private Map<String, Object> node(
+        String id,
+        String nodeType,
+        String name,
+        Map<String, Object> config,
+        ResolvedOperator operator
+    ) {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", id);
         node.put("type", nodeType);
         node.put("nodeType", nodeType);
         node.put("name", name);
+        if (operator != null) {
+            node.put("operatorRef", operator.operatorRef());
+            node.put("operatorVersion", operator.version());
+            node.put("operatorCategory", operator.category());
+            node.put("compileTarget", operator.compileTarget());
+            node.put("manifest", operator.manifest());
+            node.put("emitsLineage", operator.manifest().path("lineageRule").isObject());
+            node.put("emitsQualityResult", operator.manifest().path("emitsQualityResult").asBoolean(false));
+            JsonNode policy = operator.manifest().path("policy");
+            if (policy.isObject() && policy.size() > 0) {
+                node.put("policy", policy);
+            }
+        }
         node.put("config", config);
         node.put("resourceProfile", Map.of("resourceGroup", "default", "computeProfile", "trino-small"));
         return node;
+    }
+
+    private Map<String, ResolvedOperator> resolveDefaultOperators(
+        DataModel model,
+        List<DataModelColumnMapping> mappings
+    ) {
+        boolean hasSensitiveColumns = mappings.stream()
+            .anyMatch(mapping -> isSensitive(mapping.getClassification()) || isSensitive(mapping.getSuggestLevel()));
+        List<DefaultOperatorSpec> specs = new ArrayList<>();
+        specs.add(new DefaultOperatorSpec("input_ods", OP_INPUT_ODS_TABLE, "INPUT"));
+        specs.add(new DefaultOperatorSpec("transform_mapping", OP_TRANSFORM_RENAME_COLUMNS, "TRANSFORM"));
+        specs.add(new DefaultOperatorSpec("govern_clean", OP_GOVERN_DROP_REQUIRED_MISSING, "GOVERN"));
+        if (hasSensitiveColumns) {
+            specs.add(new DefaultOperatorSpec("mask_sensitive", OP_MASK_PARTIAL, "MASK"));
+        }
+        specs.add(new DefaultOperatorSpec("quality_gate", OP_GATE_NOT_NULL, "QUALITY_GATE"));
+        specs.add(new DefaultOperatorSpec("output_dwd", outputOperatorRef(model), "OUTPUT"));
+
+        Map<String, ResolvedOperator> operators = new LinkedHashMap<>();
+        for (DefaultOperatorSpec spec : specs) {
+            operators.put(spec.nodeId(), loadBuiltInOperatorManifest(spec));
+        }
+        return operators;
+    }
+
+    private ResolvedOperator loadBuiltInOperatorManifest(DefaultOperatorSpec spec) {
+        OperatorManifestRow row;
+        try {
+            row = jdbc.queryForObject("""
+                SELECT o.operator_ref, ov.version, o.category, ov.manifest::text AS manifest
+                FROM orchestration.operator o
+                JOIN orchestration.operator_version ov
+                  ON ov.operator_id = o.id
+                 AND ov.version = o.latest_version
+                WHERE o.operator_ref = ?
+                  AND o.scope = 'BUILTIN'
+                  AND o.tenant_id IS NULL
+                  AND o.status = 'ACTIVE'
+                LIMIT 1
+                """, (rs, rowNum) -> new OperatorManifestRow(
+                    rs.getString("operator_ref"),
+                    rs.getString("version"),
+                    rs.getString("category"),
+                    rs.getString("manifest")
+                ), spec.operatorRef());
+        } catch (EmptyResultDataAccessException e) {
+            throw new BizException(40059, "DWD 默认算子 Manifest 不存在: " + spec.operatorRef());
+        } catch (DataAccessException e) {
+            throw new BizException(40059, "DWD 默认算子 Manifest 读取失败: " + e.getMessage());
+        }
+        if (row == null || !StringUtils.hasText(row.manifestJson())) {
+            throw new BizException(40059, "DWD 默认算子 Manifest 为空: " + spec.operatorRef());
+        }
+
+        JsonNode manifest;
+        try {
+            manifest = JsonUtil.parse(row.manifestJson());
+        } catch (RuntimeException e) {
+            throw new BizException(40059, "DWD 默认算子 Manifest JSON 非法: " + spec.operatorRef());
+        }
+        String manifestRef = manifest.path("operatorRef").asText("");
+        String manifestVersion = manifest.path("version").asText(row.version());
+        String manifestCategory = manifest.path("category").asText(row.category());
+        String compileTarget = manifest.path("compileTarget").asText("");
+
+        List<String> errors = new ArrayList<>();
+        if (!spec.operatorRef().equals(manifestRef)) {
+            errors.add("operatorRef 不匹配");
+        }
+        if (!StringUtils.hasText(manifestVersion)) {
+            errors.add("version 为空");
+        }
+        if (!spec.category().equalsIgnoreCase(manifestCategory)) {
+            errors.add("category 不匹配");
+        }
+        if (!"SQL_DBT".equalsIgnoreCase(compileTarget)) {
+            errors.add("compileTarget 必须为 SQL_DBT");
+        }
+        if (!manifest.path("template").isObject()) {
+            errors.add("template 缺失");
+        }
+        if (!errors.isEmpty()) {
+            throw new BizException(40059, "DWD 默认算子 Manifest 校验失败: "
+                + spec.operatorRef() + " - " + String.join("; ", errors));
+        }
+        return new ResolvedOperator(manifestRef, manifestVersion, manifestCategory, compileTarget, manifest);
+    }
+
+    private String outputOperatorRef(DataModel model) {
+        String materialization = normalizeMaterialization(model.getMaterialization());
+        return switch (materialization) {
+            case "VIEW" -> OP_OUTPUT_VIEW;
+            case "INCREMENTAL" -> OP_OUTPUT_INCREMENTAL_MERGE;
+            default -> OP_OUTPUT_ICEBERG_TABLE;
+        };
+    }
+
+    private Map<String, String> mappingConfig(List<DataModelColumnMapping> mappings) {
+        Map<String, String> mapping = new LinkedHashMap<>();
+        for (DataModelColumnMapping item : mappings) {
+            mapping.put(item.getSourceColumn(), item.getTargetColumn());
+        }
+        return mapping;
+    }
+
+    private Map<String, Object> outputConfig(DataModel model, List<String> outputColumns) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("assetFqn", model.getTargetFqn());
+        config.put("targetFqn", model.getTargetFqn());
+        config.put("layer", "DWD");
+        config.put("columns", outputColumns);
+        if (StringUtils.hasText(model.getPartitionExpr())) {
+            config.put("partitionBy", model.getPartitionExpr());
+        }
+        if (StringUtils.hasText(model.getUniqueKey())) {
+            config.put("uniqueKey", model.getUniqueKey());
+        }
+        if (StringUtils.hasText(model.getIncrementalColumn())) {
+            config.put("incrementalColumn", model.getIncrementalColumn());
+        }
+        if ("INCREMENTAL".equalsIgnoreCase(model.getMaterialization())) {
+            config.put("strategy", "merge");
+        }
+        return config;
     }
 
     private void applyExecutionDefaults(DataModel model) {
@@ -1219,6 +2110,9 @@ public class DwdModelService {
             mapping.getClassification(),
             mapping.getPiiType(),
             mapping.getSuggestLevel(),
+            mapping.getTermId(),
+            mapping.getTermCode(),
+            mapping.getTermName(),
             mapping.getSortNo() == null ? 0 : mapping.getSortNo()
         );
     }
@@ -1264,6 +2158,13 @@ public class DwdModelService {
         return StringUtils.hasText(first) ? first : blankToNull(second);
     }
 
+    private String limit(String value, int max) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= max ? value : value.substring(0, max);
+    }
+
     private void assignCurrentOwnerIfMissing(DataModel model) {
         if (model.getOwnerId() == null) {
             model.setOwnerId(TenantContext.getUserId());
@@ -1293,6 +2194,53 @@ public class DwdModelService {
         String classification,
         String piiType,
         String suggestLevel,
+        UUID termId,
+        String termCode,
+        String termName,
         int sortNo
     ) {}
+
+    private record TermSelection(
+        UUID termId,
+        String termCode,
+        String termName,
+        String sensitivityLevel
+    ) {
+        static TermSelection empty(String termCode, String termName) {
+            return new TermSelection(null, blank(termCode), blank(termName), null);
+        }
+
+        private static String blank(String value) {
+            return StringUtils.hasText(value) ? value.trim() : null;
+        }
+    }
+
+    private record DefaultOperatorSpec(String nodeId, String operatorRef, String category) {}
+
+    private record OperatorManifestRow(
+        String operatorRef,
+        String version,
+        String category,
+        String manifestJson
+    ) {}
+
+    private record ResolvedOperator(
+        String operatorRef,
+        String version,
+        String category,
+        String compileTarget,
+        JsonNode manifest
+    ) {}
+
+    private record DbtTestSpec(String name, Map<String, Object> arguments) {}
+
+    private record SourceFreshnessSpec(
+        String loadedAtField,
+        FreshnessThreshold warnAfter,
+        FreshnessThreshold errorAfter
+    ) {}
+
+    private record FreshnessThreshold(int count, String period) {}
+
+    private record YamlRaw(String value) {}
 }

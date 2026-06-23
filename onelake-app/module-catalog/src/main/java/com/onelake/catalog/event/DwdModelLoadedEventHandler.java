@@ -134,7 +134,14 @@ public class DwdModelLoadedEventHandler implements DomainEventHandler {
                 String source = item.path("source").asText("");
                 String target = item.path("target").asText("");
                 if (source.isBlank() || target.isBlank()) continue;
-                lineage.add(Map.of("from", source, "to", target));
+                // modeling 的 fieldMapping 用 expression 字段（DwdModelDraftRequest.ColumnMappingRequest.expression）
+                String transform = item.path("transform").asText("");
+                if (transform.isBlank()) transform = item.path("expression").asText("");
+                Map<String, String> entry = new java.util.HashMap<>();
+                entry.put("from", source);
+                entry.put("to", target);
+                if (!transform.isBlank()) entry.put("transform", transform);
+                lineage.add(entry);
             }
         }
         return lineage;

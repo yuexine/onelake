@@ -3,10 +3,10 @@
  */
 import { Table, Tag, Space, Button, Modal, Form, Select, Input, Typography, message } from 'antd';
 import { PlusOutlined, SafetyOutlined, CheckCircleOutlined, WarningOutlined } from '@ant-design/icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
-import { CatalogAPI, QualityAPI } from '../../api';
-import type { Asset, QualityRule } from '../../types';
+import { CatalogAPI, GlossaryAPI, QualityAPI } from '../../api';
+import type { Asset, BusinessTerm, QualityRule } from '../../types';
 
 const { Text } = Typography;
 
@@ -17,6 +17,8 @@ export default function QualityRules() {
   const [form] = Form.useForm();
   const [rules, setRules] = useState<QualityRule[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [terms, setTerms] = useState<BusinessTerm[]>([]);
+  const [selectedTermId, setSelectedTermId] = useState<string>();
   const [selectedAssetFqn, setSelectedAssetFqn] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -38,9 +40,26 @@ export default function QualityRules() {
     CatalogAPI.listAssets()
       .then(setAssets)
       .catch(() => message.warning('资产列表加载失败，请稍后重试'));
+    GlossaryAPI.listTerms({ status: 'APPROVED' })
+      .then(setTerms)
+      .catch(() => message.warning('已审定术语加载失败，请稍后重试'));
   }, []);
 
   const selectedAsset = assets.find((asset) => asset.fqn === selectedAssetFqn);
+  const selectedTerm = terms.find((item) => item.id === selectedTermId);
+  const termOptions = useMemo(() => {
+    const boundTermIds = new Set<string>();
+    assets.forEach((asset) => asset.columns.forEach((column) => column.terms?.forEach((term) => boundTermIds.add(term.id))));
+    return terms
+      .filter((term) => boundTermIds.has(term.id))
+      .map((term) => ({ label: `${term.code} · ${term.name}`, value: term.id }));
+  }, [assets, terms]);
+  const assetsForTerm = selectedTermId
+    ? assets.filter((asset) => asset.columns.some((column) => column.terms?.some((term) => term.id === selectedTermId)))
+    : assets;
+  const columnsForSelectedAsset = (selectedAsset?.columns || []).filter((column) => (
+    !selectedTermId || column.terms?.some((term) => term.id === selectedTermId)
+  ));
 
   const counts = {
     total: rules.length,
@@ -51,9 +70,10 @@ export default function QualityRules() {
 
   const createRule = async () => {
     const values = await form.validateFields();
+    const { businessTermId: _businessTermId, ...payload } = values;
     setSaving(true);
     try {
-      await QualityAPI.createRule(values);
+      await QualityAPI.createRule(payload);
       message.success('规则已创建');
       setOpen(false);
       form.resetFields();
@@ -152,6 +172,29 @@ export default function QualityRules() {
         confirmLoading={saving}
       >
         <Form form={form} layout="vertical" initialValues={{ ruleType: 'NOT_NULL', severity: 'BLOCK', schedule: 'ON_PARTITION' }}>
+          <Form.Item label="业务术语" name="businessTermId">
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              placeholder="可先选择业务术语筛选字段"
+              value={selectedTermId}
+              onChange={(value) => {
+                setSelectedTermId(value);
+                const firstAsset = value
+                  ? assets.find((asset) => asset.columns.some((column) => column.terms?.some((term) => term.id === value)))
+                  : undefined;
+                const firstColumn = firstAsset?.columns.find((column) => column.terms?.some((term) => term.id === value));
+                setSelectedAssetFqn(firstAsset?.fqn);
+                form.setFieldsValue({
+                  targetFqn: firstAsset?.fqn,
+                  targetColumn: firstColumn?.name,
+                  expression: terms.find((term) => term.id === value)?.caliberSql || (firstColumn ? `${firstColumn.name} IS NOT NULL` : undefined),
+                });
+              }}
+              options={termOptions}
+            />
+          </Form.Item>
           <Form.Item label="绑定资产" name="targetFqn" rules={[{ required: true, message: '请选择资产' }]}>
             <Select
               showSearch
@@ -160,16 +203,22 @@ export default function QualityRules() {
                 setSelectedAssetFqn(value);
                 form.setFieldValue('targetColumn', undefined);
               }}
-              options={assets.map((asset) => ({ label: asset.fqn, value: asset.fqn }))}
+              options={assetsForTerm.map((asset) => ({ label: asset.fqn, value: asset.fqn }))}
             />
           </Form.Item>
           <Form.Item label="字段" name="targetColumn">
             <Select
               allowClear
-              options={(selectedAsset?.columns || []).map((column) => ({ label: column.name, value: column.name }))}
+              options={columnsForSelectedAsset.map((column) => ({ label: column.name, value: column.name }))}
               placeholder="不选择则绑定全表"
             />
           </Form.Item>
+          {selectedTerm && (
+            <div className="ol-section" style={{ padding: 12, marginBottom: 12, background: 'var(--ol-fill-soft)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 4 }}>{selectedTerm.code} · {selectedTerm.name}</div>
+              <Text type="secondary" style={{ fontSize: 12 }}>{selectedTerm.definition || '已按该术语筛选可绑定字段'}</Text>
+            </div>
+          )}
           <Form.Item label="规则库（卡片选择）" name="ruleType" rules={[{ required: true, message: '请选择规则类型' }]}>
             <Select options={RULE_LIBRARY.map((v) => ({ label: v, value: v }))} />
           </Form.Item>

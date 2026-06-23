@@ -11,6 +11,9 @@ public record DagDTO(
     Map<String, Object> definition,
     String scheduleCron,
     Boolean enabled,
+    Boolean triggerable,
+    String triggerBlockedReason,
     Integer version,
-    Instant createdAt
+    Instant createdAt,
+    JobRunDTO lastRun
 ) {}

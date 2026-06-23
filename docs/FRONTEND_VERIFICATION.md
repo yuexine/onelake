@@ -102,12 +102,12 @@
 | 线框 | 文件 | 状态 |
 |------|------|------|
 | §4.4.1 流水线列表 | `PipelineList.tsx` | ✅ |
-| §8.4.1 DAG 画布（三区：算子面板/画布/属性） | `DagCanvas.tsx` SVG 实现 | ✅ |
+| §8.4.1 DAG 画布（三区：算子面板/画布/属性） | `DagCanvas.tsx` 读取真实 DAG/算子市场，支持添加 market 节点、拖拽定位、端口连线/删边、连线合法性可视化、动态参数面板和图级校验；后端图校验已覆盖环路、端口、字段 schema 自一致、敏感字段治理和资源契约 | ✅ |
 | §8.4.2 试运行面板（节点进度 + 采样预览） | `DagCanvas` 内 Drawer | ✅ |
 | §8.4.3 版本管理（diff/回滚/灰度） | `DagCanvas` 内 Modal | ✅ |
 | §8.4.4 DAG 校验结果面板 | `DagCanvas` 内 Modal | ✅ |
 | §8.4.5 发布确认 / 结果 | `DagCanvas` 内 Modal | ✅ |
-| §8.4.6 算子市场（分类/内置/自定义/租户私有） | `OperatorMarket.tsx` | ✅ |
+| §8.4.6 算子市场（分类/内置/自定义/租户私有） | `OperatorMarket.tsx` 真实列表/安装/Manifest 校验/注册/发布版本/废弃恢复生命周期治理，注册表单支持完整 `template/resourceHint` JSON 与扩展态提示 | ✅ |
 | 运行实例列表 | `RunInstances.tsx` | ✅ |
 
 ### 4.5 数据质量（§4.5 / §8.5，3 个页面）

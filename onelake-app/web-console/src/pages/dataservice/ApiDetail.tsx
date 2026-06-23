@@ -9,7 +9,7 @@ import { useEffect, useState } from 'react';
 import { apis, apiVersions, subscriptions, apiCallTrend } from '../../mock';
 import { DataserviceAPI } from '../../api';
 import { DetailPageLayout, StatusBadge, ClassificationBadge, DangerConfirm, SectionCard, StatCard, useAsyncAction } from '../../components';
-import type { ApiDefinition } from '../../types';
+import type { ApiDefinition, ApiReturnField } from '../../types';
 import ReactECharts from 'echarts-for-react';
 
 const { Text } = Typography;
@@ -33,6 +33,16 @@ function errorMessage(e: unknown) {
   return e instanceof Error && e.message ? e.message : '调试失败，请检查 API 是否可用';
 }
 
+function parseApiReturns(raw?: string): ApiReturnField[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function ApiDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -42,6 +52,7 @@ export default function ApiDetail() {
   const [debugResult, setDebugResult] = useState<ApiDebugResult>();
   const [debugError, setDebugError] = useState<string>();
   const { run, isLoading } = useAsyncAction();
+  const responseFields = parseApiReturns(api.responseSchema);
 
   useEffect(() => {
     if (!id) return;
@@ -72,6 +83,26 @@ export default function ApiDetail() {
               <pre style={{ padding: 12, background: 'var(--ol-fill-soft)', borderRadius: 6, fontSize: 12, fontFamily: 'monospace', margin: 0 }}>{api.selectSql}</pre>
             </div>
           </div>
+          {responseFields.length > 0 && (
+            <div>
+              <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>响应字段与术语</Text>
+              <Table
+                size="small"
+                rowKey="name"
+                pagination={false}
+                style={{ marginTop: 6 }}
+                dataSource={responseFields}
+                columns={[
+                  { title: '字段', dataIndex: 'name', render: (value: string) => <Text code style={{ fontSize: 12 }}>{value}</Text> },
+                  { title: '类型', dataIndex: 'type', width: 110 },
+                  { title: '术语', width: 180, render: (_: unknown, row: ApiReturnField) => row.termCode ? <Tag color="blue">{row.termCode} · {row.termName}</Tag> : '-' },
+                  { title: '口径/定义', ellipsis: true, render: (_: unknown, row: ApiReturnField) => row.caliberSql || row.termDefinition || '-' },
+                  { title: '密级', width: 90, render: (_: unknown, row: ApiReturnField) => row.suggestLevel || row.classification ? <Tag color={row.masked ? 'error' : 'default'}>{row.suggestLevel || row.classification}</Tag> : '-' },
+                  { title: '脱敏', dataIndex: 'masked', width: 80, render: (value?: boolean) => value ? <Tag color="error">动态脱敏</Tag> : '-' },
+                ]}
+              />
+            </div>
+          )}
           <Button>下载 OpenAPI YAML</Button>
         </Space>
       </SectionCard>

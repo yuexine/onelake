@@ -8,8 +8,23 @@ import type {
   AssetMaintenanceOperation,
   AssetMaintenanceResult,
   ApprovalRequest,
+  BusinessTerm,
+  BusinessTermBinding,
+  BusinessTermBindingRequest,
+  BusinessTermImpact,
+  BusinessTermRequest,
+  BusinessTermVersion,
+  BusinessTermVersionDiff,
   DataSource,
+  ImpactReport,
+  LineageGraphData,
   Notification,
+  ComputeProfile,
+  Operator,
+  OperatorManifest,
+  OperatorValidationResult,
+  ResourceGroup,
+  RuntimeContract,
   QualityAlert,
   QualityRule,
   QualityRunResult,
@@ -17,12 +32,14 @@ import type {
   QueryTemplate,
   QueryTemplatePlaceholder,
   Dag,
+  JobRun,
   DataModel,
   DwdModelRun,
   DwdModelCompileResult,
   DwdModelDraftRequest,
   DwdModelValidation,
   RunningTask,
+  SubjectDomain,
   SqlExecuteResult,
   SqlQueryHistory,
   SyncRun,
@@ -278,16 +295,73 @@ export const OrchestrationAPI = {
   getDag: (id: string) => unwrap<Dag>(http.get(`/orchestration/dags/${id}`)),
   createDag: (payload: Partial<Dag> & { dagsterJob?: string; scheduleCron?: string; enabled?: boolean }) =>
     unwrap<Dag>(http.post('/orchestration/dags', payload)),
+  updateDag: (id: string, payload: Partial<Dag> & { dagsterJob?: string; scheduleCron?: string; enabled?: boolean }) =>
+    unwrap<Dag>(http.put(`/orchestration/dags/${id}`, payload)),
   triggerDag: (id: string, trigger = 'MANUAL') =>
     unwrap<{ runId: string }>(http.post(`/orchestration/dags/${id}/run`, null, { params: { trigger } })),
+  listRuns: (page = 0, size = 20) =>
+    unwrap<PageResult<JobRun>>(http.get('/orchestration/runs', { params: { page, size } })),
+  listDagRuns: (id: string, page = 0, size = 20) =>
+    unwrap<PageResult<JobRun>>(http.get(`/orchestration/dags/${id}/runs`, { params: { page, size } })),
+};
+
+export const OperatorAPI = {
+  listOperators: (params?: { category?: string; scope?: string; keyword?: string }) =>
+    unwrap<Operator[]>(http.get('/orchestration/operators', { params })),
+
+  getOperator: (ref: string) =>
+    unwrap<Operator>(http.get(`/orchestration/operators/${encodeURIComponent(ref)}`)),
+
+  validateOperator: (manifest: OperatorManifest) =>
+    unwrap<OperatorValidationResult>(http.post('/orchestration/operators/validate', manifest)),
+
+  validateGraph: (graph: unknown) =>
+    unwrap<OperatorValidationResult>(http.post('/orchestration/operators/graph/validate', graph)),
+
+  registerOperator: (manifest: OperatorManifest) =>
+    unwrap<Operator>(http.post('/orchestration/operators', manifest)),
+
+  publishVersion: (ref: string, payload: { manifest: OperatorManifest; changelog?: string }) =>
+    unwrap<Operator>(http.post(`/orchestration/operators/${encodeURIComponent(ref)}/versions`, payload)),
+
+  updateOperator: (ref: string, payload: { displayName?: string; description?: string; status?: string }) =>
+    unwrap<Operator>(http.put(`/orchestration/operators/${encodeURIComponent(ref)}`, payload)),
+
+  installOperator: (ref: string, payload?: { pinnedVersion?: string }) =>
+    unwrap<Operator>(http.post(`/orchestration/operators/${encodeURIComponent(ref)}/install`, payload ?? {})),
+
+  listResourceGroups: () =>
+    unwrap<ResourceGroup[]>(http.get('/orchestration/resource-groups')),
+
+  upsertResourceGroup: (payload: Partial<ResourceGroup> & { code: string; engine: string }) =>
+    unwrap<ResourceGroup>(http.post('/orchestration/resource-groups', payload)),
+
+  upsertComputeProfile: (groupCode: string, payload: { code: string; displayName?: string; engine?: string; status?: string; cpuCores?: number; memoryGb?: number; maxScanBytes?: number; timeoutSeconds?: number }) =>
+    unwrap<ComputeProfile>(http.post(`/orchestration/resource-groups/${encodeURIComponent(groupCode)}/profiles`, payload)),
+
+  listRuntimeContracts: () =>
+    unwrap<RuntimeContract[]>(http.get('/orchestration/runtime-contracts')),
 };
 
 export const CatalogAPI = {
-  listAssets: (layer?: string) => unwrap<Asset[]>(http.get('/catalog/assets', { params: { layer } })),
+  listAssets: (layerOrParams?: string | { layer?: string; keyword?: string; term?: string }) =>
+    unwrap<Asset[]>(http.get('/catalog/assets', {
+      params: typeof layerOrParams === 'string' ? { layer: layerOrParams } : layerOrParams,
+    })),
   getAsset: (id: string) => unwrap<Asset>(http.get(`/catalog/assets/${id}`)),
   getAssetDetail: (id: string) => unwrap<AssetDetail>(http.get(`/catalog/assets/${id}/detail`)),
   createTable: (payload: TableCreateRequest) => unwrap<Asset>(http.post('/catalog/tables', payload)),
   downstream: (fqn: string) => unwrap<string[]>(http.get('/catalog/lineage/downstream', { params: { fqn } })),
+  lineageGraph: (fqn: string, direction: 'UP' | 'DOWN' | 'BOTH' = 'BOTH', depth = 3) =>
+    unwrap<LineageGraphData>(http.get('/catalog/lineage/graph', { params: { fqn, direction, depth } })),
+  lineageImpact: (fqn: string) =>
+    unwrap<ImpactReport>(http.get('/catalog/lineage/impact', { params: { fqn } })),
+  exportImpactUrl: (fqn: string) =>
+    `/api/v1/catalog/lineage/impact/export?fqn=${encodeURIComponent(fqn)}`,
+  notifyImpact: (fqn: string) =>
+    unwrap<{ notified: boolean; severity: string; rootFqn: string; message: string }>(
+      http.post('/catalog/lineage/impact/notify', null, { params: { fqn } }),
+    ),
   sync: () => unwrap<{ synced: number }>(http.post('/catalog/sync')),
   refreshColumns: () => unwrap<{ refreshed: number }>(http.post('/catalog/assets/refresh-columns')),
   listMaintenance: () => unwrap<AssetMaintenanceAssessment[]>(http.get('/catalog/assets/maintenance')),
@@ -369,7 +443,7 @@ export const SqlWorkbenchAPI = {
 };
 
 export const ModelingAPI = {
-  listDomains: () => http.get('/modeling/domains'),
+  listDomains: () => unwrap<SubjectDomain[]>(http.get('/modeling/domains')),
   listMetricsByDomain: (domainId: string) =>
     http.get(`/modeling/metrics/by-domain/${domainId}`),
   createDwdDraft: (payload: DwdModelDraftRequest) =>
@@ -396,6 +470,39 @@ export const ModelingAPI = {
     unwrap<DwdModelRun[]>(http.get(`/modeling/models/${id}/runs`)),
   getModelRun: (runId: string) =>
     unwrap<DwdModelRun>(http.get(`/modeling/model-runs/${runId}`)),
+};
+
+export const GlossaryAPI = {
+  listTerms: (params?: { keyword?: string; domainId?: string; status?: string }) =>
+    unwrap<BusinessTerm[]>(http.get('/modeling/glossary/terms', { params })),
+  createTerm: (payload: BusinessTermRequest) =>
+    unwrap<BusinessTerm>(http.post('/modeling/glossary/terms', payload)),
+  getTerm: (id: string) =>
+    unwrap<BusinessTerm>(http.get(`/modeling/glossary/terms/${id}`)),
+  updateTerm: (id: string, payload: BusinessTermRequest) =>
+    unwrap<BusinessTerm>(http.put(`/modeling/glossary/terms/${id}`, payload)),
+  submitTerm: (id: string) =>
+    unwrap<BusinessTerm>(http.post(`/modeling/glossary/terms/${id}/submit`)),
+  approveTerm: (id: string, comment?: string) =>
+    unwrap<BusinessTerm>(http.post(`/modeling/glossary/terms/${id}/approve`, { comment })),
+  rejectTerm: (id: string, comment?: string) =>
+    unwrap<BusinessTerm>(http.post(`/modeling/glossary/terms/${id}/reject`, { comment })),
+  deprecateTerm: (id: string, comment?: string) =>
+    unwrap<BusinessTerm>(http.post(`/modeling/glossary/terms/${id}/deprecate`, { comment })),
+  listBindings: (termId: string) =>
+    unwrap<BusinessTermBinding[]>(http.get(`/modeling/glossary/terms/${termId}/bindings`)),
+  bindTerm: (termId: string, payload: BusinessTermBindingRequest) =>
+    unwrap<BusinessTermBinding>(http.post(`/modeling/glossary/terms/${termId}/bindings`, payload)),
+  removeBinding: (bindingId: string) =>
+    unwrap<BusinessTermBinding>(http.delete(`/modeling/glossary/bindings/${bindingId}`)),
+  bindingsByAsset: (assetFqn: string) =>
+    unwrap<BusinessTermBinding[]>(http.get('/modeling/glossary/bindings/by-asset', { params: { assetFqn } })),
+  termVersions: (termId: string) =>
+    unwrap<BusinessTermVersion[]>(http.get(`/modeling/glossary/terms/${termId}/versions`)),
+  termImpact: (termId: string) =>
+    unwrap<BusinessTermImpact>(http.get(`/modeling/glossary/terms/${termId}/impact`)),
+  termVersionDiff: (termId: string) =>
+    unwrap<BusinessTermVersionDiff>(http.get(`/modeling/glossary/terms/${termId}/version-diff`)),
 };
 
 export const QualityAPI = {

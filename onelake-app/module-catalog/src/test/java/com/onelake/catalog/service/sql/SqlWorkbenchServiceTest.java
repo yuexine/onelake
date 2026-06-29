@@ -116,6 +116,18 @@ class SqlWorkbenchServiceTest {
     }
 
     @Test
+    void saveQueryStripsTrailingSemicolon() {
+        when(savedQueryRepo.findByTenantIdAndName(TENANT_ID, "带分号查询")).thenReturn(Optional.empty());
+        when(savedQueryRepo.save(any(SavedQuery.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.saveQuery(new SqlSaveQueryRequest("带分号查询", "select * from dwd.user;  ", true));
+
+        org.mockito.ArgumentCaptor<SavedQuery> captor = org.mockito.ArgumentCaptor.forClass(SavedQuery.class);
+        verify(savedQueryRepo).save(captor.capture());
+        assertThat(captor.getValue().getSqlText()).isEqualTo("select * from dwd.user");
+    }
+
+    @Test
     void updateSavedQueryPreservesOwnershipAndChangesSql() {
         UUID id = UUID.randomUUID();
         SavedQuery query = new SavedQuery();

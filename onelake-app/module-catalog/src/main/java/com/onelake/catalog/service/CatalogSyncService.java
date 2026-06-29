@@ -32,7 +32,13 @@ public class CatalogSyncService {
     @Transactional
     public int syncTables() {
         UUID tenantId = TenantContext.getTenantId();
-        JsonNode page = om.listTables(200);
+        JsonNode page;
+        try {
+            page = om.listTables(200);
+        } catch (RuntimeException e) {
+            log.warn("catalog sync skipped: OpenMetadata is unavailable ({})", e.getMessage());
+            return 0;
+        }
         int n = 0;
         for (JsonNode t : page.path("data")) {
             String fqn = t.path("fullyQualifiedName").asText();

@@ -20,7 +20,9 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -52,9 +54,11 @@ public class SqlAssetSecurityService {
         Set<String> grantRequired = new LinkedHashSet<>();
         Map<String, SecurityService.FieldProtection> protections = new LinkedHashMap<>();
 
+        Set<String> resolvedTables = new LinkedHashSet<>();
         for (String table : referencedTables) {
-            Asset asset = assetRepo.findByTenantIdAndOmFqn(tenantId, table)
+            Asset asset = findAsset(tenantId, table)
                 .orElseThrow(() -> new BizException(missingAssetCode, missingAssetMessagePrefix + table));
+            resolvedTables.add(asset.getOmFqn());
             if (asset.getOwnerId() == null || !asset.getOwnerId().equals(userId)) {
                 grantRequired.add(asset.getOmFqn());
             }
@@ -63,7 +67,34 @@ public class SqlAssetSecurityService {
         collectAliasProtections(statement, protections);
 
         securityService.requireQueryAccess(grantRequired);
-        return new SqlAssetSecurityContext(referencedTables, protections);
+        return new SqlAssetSecurityContext(resolvedTables, protections);
+    }
+
+    private Optional<Asset> findAsset(UUID tenantId, String table) {
+        Optional<Asset> exact = assetRepo.findByTenantIdAndOmFqn(tenantId, table);
+        if (exact.isPresent()) {
+            return exact;
+        }
+        String normalized = normalizeTableFqn(table);
+        if (normalized.equals(table)) {
+            return Optional.empty();
+        }
+        return assetRepo.findByTenantIdAndOmFqn(tenantId, normalized);
+    }
+
+    private String normalizeTableFqn(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        String value = raw.trim().replace("\"", "").replace("`", "");
+        String[] parts = value.split("\\.");
+        if (parts.length >= 3) {
+            String catalog = parts[0].toLowerCase(Locale.ROOT);
+            if ("iceberg".equals(catalog) || "onelake".equals(catalog) || "hive".equals(catalog)) {
+                return parts[parts.length - 2] + "." + parts[parts.length - 1];
+            }
+        }
+        return value;
     }
 
     private void collectAliasProtections(

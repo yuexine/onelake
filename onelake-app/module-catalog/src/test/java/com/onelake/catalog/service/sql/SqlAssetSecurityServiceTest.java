@@ -117,6 +117,29 @@ class SqlAssetSecurityServiceTest {
     }
 
     @Test
+    void resolvesKnownCatalogPrefixToRegisteredAssetFqn() {
+        Asset asset = asset("dwd.user_governed", USER_ID);
+        asset.setColumns("""
+            [
+              {"name":"mobile","type":"varchar","classification":"L3","piiType":"手机号"}
+            ]
+            """);
+        when(assetRepo.findByTenantIdAndOmFqn(TENANT_ID, "iceberg.dwd.user_governed"))
+            .thenReturn(Optional.empty());
+        when(assetRepo.findByTenantIdAndOmFqn(TENANT_ID, "dwd.user_governed"))
+            .thenReturn(Optional.of(asset));
+
+        var context = service.validateAndPlan(
+            "select mobile from iceberg.dwd.user_governed",
+            40341,
+            "missing "
+        );
+
+        assertThat(context.referencedTables()).containsExactly("dwd.user_governed");
+        assertThat(context.protectionsByColumn()).containsKey("mobile");
+    }
+
+    @Test
     void requiresGrantForNonOwner() {
         when(assetRepo.findByTenantIdAndOmFqn(TENANT_ID, "ods.orders"))
             .thenReturn(Optional.of(asset("ods.orders", null)));

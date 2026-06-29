@@ -764,6 +764,12 @@ public class SqlWorkbenchService {
             throw new BizException(40000, "SQL 不能为空");
         }
         String normalized = sql.trim();
+        while (normalized.endsWith(";")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        if (normalized.isBlank()) {
+            throw new BizException(40000, "SQL 不能为空");
+        }
         if (normalized.length() > 100_000) {
             throw new BizException(40043, "SQL 长度不能超过 100000 字符");
         }
@@ -818,11 +824,14 @@ public class SqlWorkbenchService {
 
     private String rootMessage(Exception e) {
         Throwable current = e;
-        while (current.getCause() != null) {
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                return message;
+            }
             current = current.getCause();
         }
-        String message = current.getMessage();
-        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
+        return e.getClass().getSimpleName();
     }
 
     /**

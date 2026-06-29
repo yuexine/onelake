@@ -41,6 +41,7 @@ public class SecurityConfig {
                     "/swagger-ui/**",
                     "/swagger-ui.html",
                     "/api/v1/dataservice/apis/runtime/**",
+                    "/api/v1/analytics/share/**",
                     "/error"
                 ).permitAll()
                 .anyRequest().authenticated())

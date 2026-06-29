@@ -59,4 +59,18 @@ public final class DomainEvents {
     public static final String PIPELINE_RUN_SUCCEEDED = "pipeline.run.succeeded";
     public static final String PIPELINE_RUN_FAILED = "pipeline.run.failed";
     public static final String PIPELINE_TASK_LOADED = "pipeline.task.loaded";
+
+    // ============ 数据分析与可视化（analytics）============
+    /** 大屏发布：catalog 模块消费，登记大屏为资产下游消费者，回写血缘。 */
+    public static final String ANALYTICS_DASHBOARD_PUBLISHED = "analytics.dashboard.published";
+    /** Notebook 调度提交：monitor / 全局任务条消费。 */
+    public static final String ANALYTICS_NOTEBOOK_RUN_SUBMITTED = "analytics.notebook.run-submitted";
+    /** Notebook 状态变更：monitor 消费。 */
+    public static final String ANALYTICS_NOTEBOOK_RUN_STATUS_CHANGED = "analytics.notebook.run-status-changed";
+    /** Notebook 运行超时（30min 兜底）。 */
+    public static final String ANALYTICS_NOTEBOOK_TIMEOUT = "analytics.notebook.timeout";
+    /** Notebook 产出新资产（onelake.publish 调用）：catalog 消费，登记新数据集 / 资产。 */
+    public static final String ANALYTICS_NOTEBOOK_ARTIFACT_PUBLISHED = "analytics.notebook.artifact-published";
+    /** 数据集查询慢查询告警：monitor 消费。 */
+    public static final String ANALYTICS_QUERY_SLOW = "analytics.query.slow";
 }

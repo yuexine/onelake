@@ -232,9 +232,85 @@ def onelake_pipeline_run():
     run_spark_task_op()
 
 
+# ---------------------------------------------------------------------------
+# Notebook op — papermill 参数化执行（P4c）
+# 文档参考：docs/数据分析与可视化模块设计方案.md §7.9
+# ---------------------------------------------------------------------------
+
+
+@op(
+    name="run_notebook_op",
+    config_schema={
+        "notebook_path": Field(String, description="MinIO/JupyterHub 上的 .ipynb 路径"),
+        "parameters": Field(
+            Shape({}),
+            default_value={},
+            description="papermill 参数化字典（与 Notebook.params_schema 对齐）",
+        ),
+        "run_id": Field(String, description="analytics.notebook_run.id"),
+        "tenant_id": Field(String),
+        "kernel_name": Field(String, default_value="python3"),
+        "output_dir": Field(String, default_value="/artifacts"),
+    },
+)
+def run_notebook_op(context):
+    cfg = context.op_config
+    import papermill as pm
+
+    notebook_path = cfg["notebook_path"]
+    parameters = cfg.get("parameters") or {}
+    run_id = cfg["run_id"]
+    kernel_name = cfg.get("kernel_name", "python3")
+    output_dir = cfg.get("output_dir", "/artifacts")
+    os.makedirs(output_dir, exist_ok=True)
+
+    out_ipynb = os.path.join(output_dir, f"{run_id}.ipynb")
+    out_html = os.path.join(output_dir, f"{run_id}.html")
+
+    context.log.info(
+        "OneLake papermill run_id=%s tenant=%s notebook=%s kernel=%s",
+        run_id, cfg["tenant_id"], notebook_path, kernel_name,
+    )
+
+    # papermill 执行；产出 .ipynb（含 outputs）
+    pm.execute_notebook(
+        notebook_path,
+        out_ipynb,
+        parameters=parameters,
+        kernel_name=kernel_name,
+        progress_bar=False,
+        log_output=True,
+        cwd="/tmp",
+    )
+
+    # nbconvert 转 HTML 报告（供前端展示）
+    try:
+        import subprocess
+        subprocess.run(
+            ["jupyter", "nbconvert", "--to", "html", "--output", out_html, out_ipynb],
+            check=True, timeout=300,
+        )
+        context.log.info("notebook HTML generated: %s", out_html)
+    except Exception as e:
+        context.log.warning("nbconvert failed: %s", e)
+
+    return {
+        "run_id": run_id,
+        "output_ipynb": out_ipynb,
+        "output_html": out_html,
+    }
+
+
+@job(name="onelake_notebook_run")
+def onelake_notebook_run():
+    """Notebook 调度执行 job（papermill）。"""
+    run_notebook_op()
+
+
 @repository(name="onelake")
 def onelake_repository():
     return [
         onelake_sync_task_schedule_reconcile,
         onelake_pipeline_run,
+        onelake_notebook_run,
     ]

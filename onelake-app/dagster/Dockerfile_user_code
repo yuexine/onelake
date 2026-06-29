@@ -7,7 +7,11 @@ RUN apt-get update \
 RUN pip install --no-cache-dir \
     dagster \
     dagster-postgres \
-    pyspark==3.5.1
+    pyspark==3.5.1 \
+    papermill==2.6.* \
+    nbconvert==7.16.* \
+    ipykernel==6.29.* \
+    requests==2.32.*
 
 ENV SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
 ENV PATH="${SPARK_HOME}/bin:${PATH}"

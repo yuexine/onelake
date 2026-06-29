@@ -26,7 +26,7 @@ spring:
   flyway:
     enabled: ${SPRING_FLYWAY_ENABLED:false}
     baseline-on-migrate: true
-    schemas: common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api
+    schemas: common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api,analytics
     locations: >
       classpath:db/migration/common,
       classpath:db/migration/integration,
@@ -35,7 +35,8 @@ spring:
       classpath:db/migration/modeling,
       classpath:db/migration/quality,
       classpath:db/migration/security,
-      classpath:db/migration/dataservice
+      classpath:db/migration/dataservice,
+      classpath:db/migration/analytics
   security:
     oauth2:
       resourceserver:
@@ -138,6 +139,27 @@ onelake:
       bootstrap-servers: ${KAFKA_BOOTSTRAP:kafka:29092}
     flink:
       jobmanager-url: ${FLINK_URL:http://localhost:8082}
+    analytics:
+      superset:
+        base-url: ${SUPERSET_URL:http://localhost:8088}
+        admin-user: ${SUPERSET_ADMIN_USER:admin}
+        admin-password: ${SUPERSET_ADMIN_PASSWORD:admin}
+        guest-token-jwt-secret: ${SUPERSET_GUEST_TOKEN_JWT_SECRET:onelake-superset-guest}
+      jupyterhub:
+        base-url: ${JUPYTERHUB_URL:http://localhost:8000}
+        admin-token: ${JUPYTERHUB_ADMIN_TOKEN:}
+        notebook-token-ttl-seconds: ${JUPYTERHUB_NOTEBOOK_TOKEN_TTL:3600}
+      notebook:
+        poll-interval: ${ANALYTICS_NOTEBOOK_POLL_INTERVAL:30000}
+        run-timeout-minutes: ${ANALYTICS_NOTEBOOK_RUN_TIMEOUT_MINUTES:30}
+      query:
+        slow-threshold-ms: ${ANALYTICS_QUERY_SLOW_THRESHOLD:5000}
+      llm:
+        provider: ${ONELAKE_LLM_PROVIDER:openai}
+        openai:
+          api-key: ${OPENAI_API_KEY:}
+          base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+          model: ${OPENAI_MODEL:gpt-4o-mini}
 
 logging:
   level:

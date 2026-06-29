@@ -270,7 +270,33 @@ services:
     ports: ["8088:8088"]
     environment:
       SUPERSET_SECRET_KEY: onelake-superset-dev
-    volumes: ["supersetdata:/app/superset_home"]
+      # 开启嵌入式 SDK（对应 §7.10）
+      SUPERSET_FEATURE_EMBEDDED_SUPERSET: "true"
+      # guest token JWT 密钥（与 backend application.yml 的 superset.guest-token-jwt-secret 对齐）
+      GUEST_TOKEN_JWT_SECRET: onelake-superset-guest
+      GUEST_TOKEN_JWT_EXP_SECONDS: "3600"
+    volumes:
+      - supersetdata:/app/superset_home
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+
+  jupyterhub:
+    build:
+      context: ./jupyter
+      dockerfile: Dockerfile
+    image: onelake/jupyterhub:4.1
+    container_name: onelake-jupyterhub
+    ports: ["8000:8000"]
+    environment:
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/onelake
+      OAUTH_CALLBACK_URL: http://localhost:8000/hub/oauth_callback
+      OAUTH_CLIENT_ID: jupyterhub
+      OAUTH_CLIENT_SECRET: jupyterhub-dev-secret
+      ONELAKE_CONTROL_PLANE_URL: http://backend:8080
+      TRINO_HOST: trino
+    depends_on: [keycloak]
+    volumes:
+      - jupyterdata:/srv/jupyterhub
+      - ./jupyter/onelake:/opt/onelake/sdk:ro
 
   # ──────────────────────────────────────────────
   # CDC 数据面：Kafka + Flink（对应《数据面开发指南》§4）
@@ -332,3 +358,4 @@ volumes:
   dagsterhome:
   dagsterpgdata:
   supersetdata:
+  jupyterdata:

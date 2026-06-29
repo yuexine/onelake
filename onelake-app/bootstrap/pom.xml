@@ -19,6 +19,7 @@
         <dependency><groupId>com.onelake</groupId><artifactId>module-quality</artifactId></dependency>
         <dependency><groupId>com.onelake</groupId><artifactId>module-security</artifactId></dependency>
         <dependency><groupId>com.onelake</groupId><artifactId>module-dataservice</artifactId></dependency>
+        <dependency><groupId>com.onelake</groupId><artifactId>module-analytics</artifactId></dependency>
 
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
@@ -33,6 +34,12 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -51,7 +58,7 @@
                     <url>jdbc:postgresql://${env.PG_HOST:localhost}:5432/onelake</url>
                     <user>${env.PG_USER:onelake}</user>
                     <password>${env.PG_PASSWORD:onelake}</password>
-                    <schemas>common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api</schemas>
+                    <schemas>common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api,analytics</schemas>
                     <locations>
                         classpath:db/migration/common,
                         classpath:db/migration/integration,
@@ -60,7 +67,8 @@
                         classpath:db/migration/modeling,
                         classpath:db/migration/quality,
                         classpath:db/migration/security,
-                        classpath:db/migration/dataservice
+                        classpath:db/migration/dataservice,
+                        classpath:db/migration/analytics
                     </locations>
                 </configuration>
             </plugin>

@@ -32,6 +32,7 @@ const TableWizard = lazy(() => import('./pages/lakehouse/TableWizard'));
 const TableDetail = lazy(() => import('./pages/lakehouse/TableDetail'));
 const SqlWorkbench = lazy(() => import('./pages/lakehouse/SqlWorkbench'));
 const OptimizeCenter = lazy(() => import('./pages/lakehouse/OptimizeCenter'));
+const GovernanceFactory = lazy(() => import('./pages/lakehouse/GovernanceFactory'));
 
 // 编排
 const PipelineList = lazy(() => import('./pages/orchestration/PipelineList'));
@@ -65,6 +66,17 @@ const AppKeysPage = lazy(() => import('./pages/dataservice/AppKeys'));
 const GatewayPage = lazy(() => import('./pages/dataservice/Gateway'));
 const SubscriptionsPage = lazy(() => import('./pages/dataservice/Subscriptions'));
 
+// 数据分析与可视化
+const AnalyticsDatasetList = lazy(() => import('./pages/analytics/datasets/DatasetList'));
+const AnalyticsDatasetDetail = lazy(() => import('./pages/analytics/datasets/DatasetDetail'));
+const AnalyticsDashboardList = lazy(() => import('./pages/analytics/dashboards/DashboardList'));
+const AnalyticsScreenDesigner = lazy(() => import('./pages/analytics/screen/ScreenDesigner'));
+const AnalyticsNotebooks = lazy(() => import('./pages/analytics/notebooks/Notebooks'));
+const AnalyticsLibrary = lazy(() => import('./pages/analytics/library/Library'));
+
+// 公开分享（无鉴权布局）
+const ScreenShare = lazy(() => import('./pages/share/ScreenShare'));
+
 // 运营
 const MonitorOverview = lazy(() => import('./pages/monitor/Overview'));
 const AlertCenter = lazy(() => import('./pages/monitor/AlertCenter'));
@@ -79,12 +91,6 @@ const AuditLogs = lazy(() => import('./pages/system/Audit'));
 const Channels = lazy(() => import('./pages/system/Channels'));
 const AuthCallback = lazy(() => import('./pages/auth/AuthCallback'));
 const AuthLogin = lazy(() => import('./pages/auth/AuthCallback').then((module) => ({ default: module.AuthLogin })));
-
-function GovernanceFactoryRedirect() {
-  const search = new URLSearchParams(window.location.search);
-  search.set('template', 'ods-dwd');
-  return <Navigate to={`/orchestration/pipelines/new?${search.toString()}`} replace />;
-}
 
 /** Old DagCanvas route — redirect to the unified editor. */
 function DagCanvasRedirect() {
@@ -103,6 +109,9 @@ export function AppRoutes() {
       <Routes>
         <Route path="/sso/login" element={<AuthLogin />} />
         <Route path="/sso/callback" element={<AuthCallback />} />
+
+        {/* 公开分享大屏：无鉴权，不挂 App layout */}
+        <Route path="/share/screen/:token" element={<ScreenShare />} />
 
         {/* App 作为 layout route，渲染 Sider/TopBar/全局任务条，Outlet 输出业务页面 */}
         <Route element={<App />}>
@@ -128,7 +137,7 @@ export function AppRoutes() {
           <Route path="/lakehouse/tables" element={<LakehouseTables />} />
           <Route path="/lakehouse/tables/new" element={<TableWizard />} />
           <Route path="/lakehouse/tables/:id" element={<TableDetail />} />
-          <Route path="/lakehouse/governance-factory" element={<GovernanceFactoryRedirect />} />
+          <Route path="/lakehouse/governance-factory" element={<GovernanceFactory />} />
           <Route path="/lakehouse/sql" element={<SqlWorkbench />} />
           <Route path="/lakehouse/optimize" element={<OptimizeCenter />} />
 
@@ -142,6 +151,7 @@ export function AppRoutes() {
           <Route path="/orchestration/pipelines/:pipelineId/editor" element={<UnifiedPipelineEditor />} />
           <Route path="/orchestration/operators" element={<OperatorMarket />} />
           <Route path="/orchestration/runs" element={<RunInstances />} />
+          <Route path="/orchestration/runs/:runId" element={<RunInstances />} />
 
           {/* 质量 */}
           <Route path="/quality" element={<Navigate to="/quality/rules" replace />} />
@@ -171,6 +181,16 @@ export function AppRoutes() {
           <Route path="/dataservice/appkeys" element={<AppKeysPage />} />
           <Route path="/dataservice/gateway" element={<GatewayPage />} />
           <Route path="/dataservice/subscriptions" element={<SubscriptionsPage />} />
+
+          {/* 数据分析与可视化 */}
+          <Route path="/analytics" element={<Navigate to="/analytics/dashboards" replace />} />
+          <Route path="/analytics/dashboards" element={<AnalyticsDashboardList />} />
+          <Route path="/analytics/dashboards/:id" element={<AnalyticsScreenDesigner />} />
+          <Route path="/analytics/dashboards/:id/view" element={<AnalyticsScreenDesigner readOnly />} />
+          <Route path="/analytics/notebooks" element={<AnalyticsNotebooks />} />
+          <Route path="/analytics/datasets" element={<AnalyticsDatasetList />} />
+          <Route path="/analytics/datasets/:id" element={<AnalyticsDatasetDetail />} />
+          <Route path="/analytics/library" element={<AnalyticsLibrary />} />
 
           {/* 运营 */}
           <Route path="/monitor" element={<Navigate to="/monitor/overview" replace />} />

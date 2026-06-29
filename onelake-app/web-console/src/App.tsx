@@ -14,7 +14,7 @@ import {
   BellOutlined, QuestionCircleOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined, DownOutlined, UserOutlined,
   CloudSyncOutlined, NodeIndexOutlined, FileSearchOutlined, MonitorOutlined,
-  SettingOutlined,
+  SettingOutlined, BarChartOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from './stores/app';
 import { GlobalSearch } from './components/GlobalSearch';
@@ -84,6 +84,14 @@ const NAV: MenuProps['items'] = [
       { key: '/dataservice/appkeys', label: '我的凭据' },
       { key: '/dataservice/gateway', label: '网关路由' },
       { key: '/dataservice/subscriptions', label: '订阅与计量' },
+    ],
+  },
+  { key: '/analytics', icon: <BarChartOutlined />, label: '数据分析',
+    children: [
+      { key: '/analytics/dashboards', label: '大屏中心' },
+      { key: '/analytics/notebooks', label: '分析工作台' },
+      { key: '/analytics/datasets', label: '数据集' },
+      { key: '/analytics/library', label: '组件 / 模板库' },
     ],
   },
   { key: '/monitor', icon: <MonitorOutlined />, label: '运营与监控',
@@ -469,10 +477,13 @@ export default function App() {
         {/* 底部全局任务条 */}
         {!taskBarCollapsed && (
           <div
+            className="global-task-bar-layer"
             style={{
               position: 'fixed', bottom: 16,
               left: collapsed ? 80 : 248, right: 24,
               zIndex: 100,
+              maxHeight: 'calc(100vh - 96px)',
+              minHeight: 0,
               transition: 'left var(--ol-dur-base) var(--ol-ease)',
             }}
           >

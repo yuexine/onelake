@@ -311,6 +311,8 @@ export const OrchestrationAPI = {
     unwrap<{ runId: string }>(http.post(`/orchestration/dags/${id}/run`, null, { params: { trigger } })),
   listRuns: (page = 0, size = 20) =>
     unwrap<PageResult<JobRun>>(http.get('/orchestration/runs', { params: { page, size } })),
+  getRun: (id: string) =>
+    unwrap<JobRun>(http.get(`/orchestration/runs/${id}`)),
   listDagRuns: (id: string, page = 0, size = 20) =>
     unwrap<PageResult<JobRun>>(http.get(`/orchestration/dags/${id}/runs`, { params: { page, size } })),
 };
@@ -642,4 +644,187 @@ export const DataserviceAPI = {
     }>(http.post(`/dataservice/apis/${id}/debug`, params)),
   publishApi: (id: string) => unwrap<ApiDefinition>(http.post(`/dataservice/apis/${id}/publish`)),
   offlineApi: (id: string) => unwrap<void>(http.post(`/dataservice/apis/${id}/offline`)),
+};
+
+// ============================================================================
+// 数据分析与可视化模块（对应 backend module-analytics）
+// ============================================================================
+
+export type AnalyticsSourceType = 'ASSET' | 'SQL' | 'API' | 'NOTEBOOK';
+
+export interface AnalyticsFieldSchema {
+  name: string;
+  type: string;
+  classification: string;  // L1..L4
+}
+
+export interface AnalyticsDataset {
+  id: string;
+  tenantId?: string;
+  name: string;
+  sourceType: AnalyticsSourceType;
+  assetFqn?: string;
+  selectSql?: string;
+  apiId?: string;
+  fieldSchema?: AnalyticsFieldSchema[];
+  classification: string;
+  cacheTtlSec: number;
+  rowFilter?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AnalyticsDatasetRequest {
+  name: string;
+  sourceType: AnalyticsSourceType;
+  assetFqn?: string;
+  selectSql?: string;
+  apiId?: string;
+  fieldSchema?: AnalyticsFieldSchema[];
+  classification?: string;
+  cacheTtlSec?: number;
+  rowFilter?: string;
+}
+
+export interface AnalyticsDataBinding {
+  datasetId?: string;
+  dimensions?: string[];
+  measures?: { field: string; agg: 'sum' | 'avg' | 'max' | 'min' | 'count' }[];
+  filters?: { field: string; op: string; value: unknown; fromVar?: string }[];
+  refreshSec?: number;
+  limit?: number;
+}
+
+export interface AnalyticsQueryResult {
+  rows: Record<string, unknown>[];
+  fields: AnalyticsFieldSchema[];
+  cacheHit: boolean;
+  durationMs: number;
+}
+
+export interface AnalyticsDashboard {
+  id: string;
+  name: string;
+  description?: string;
+  canvas: { width: number; height: number; theme: 'light' | 'dark'; background: string };
+  spec: AnalyticsWidgetNode[] | unknown[];
+  status: 'DRAFT' | 'PUBLISHED' | 'OFFLINE';
+  currentPublicationId?: string;
+  version: number;
+  thumbnail?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AnalyticsWidgetNode {
+  id: string;
+  type: string;
+  layout: { x: number; y: number; w: number; h: number; z: number };
+  title?: string;
+  style?: Record<string, unknown>;
+  option?: Record<string, unknown>;
+  data?: AnalyticsDataBinding;
+  supersetUuid?: string;
+  events?: { type: 'jump' | 'filter'; target?: string }[];
+}
+
+export interface AnalyticsPublication {
+  id: string;
+  dashboardId: string;
+  version: number;
+  snapshot: { canvas: unknown; spec: unknown };
+  shareToken?: string;
+  isPublic: boolean;
+  isCurrent: boolean;
+  expireAt?: string;
+  publishedAt: string;
+}
+
+export const AnalyticsAPI = {
+  // 数据集
+  listDatasets: (keyword?: string) =>
+    unwrap<AnalyticsDataset[]>(http.get('/analytics/datasets', { params: { keyword } })),
+  getDataset: (id: string) => unwrap<AnalyticsDataset>(http.get(`/analytics/datasets/${id}`)),
+  createDataset: (payload: AnalyticsDatasetRequest) =>
+    unwrap<AnalyticsDataset>(http.post('/analytics/datasets', payload)),
+  updateDataset: (id: string, payload: AnalyticsDatasetRequest) =>
+    unwrap<AnalyticsDataset>(http.put(`/analytics/datasets/${id}`, payload)),
+  deleteDataset: (id: string) => unwrap<void>(http.delete(`/analytics/datasets/${id}`)),
+  queryDataset: (id: string, binding: AnalyticsDataBinding, dashboardId?: string) =>
+    unwrap<AnalyticsQueryResult>(http.post(`/analytics/datasets/${id}/query`, binding, { params: { dashboardId } })),
+
+  // 大屏
+  listDashboards: () => unwrap<AnalyticsDashboard[]>(http.get('/analytics/dashboards')),
+  getDashboard: (id: string) => unwrap<AnalyticsDashboard>(http.get(`/analytics/dashboards/${id}`)),
+  createDashboard: (name: string, description?: string) =>
+    unwrap<AnalyticsDashboard>(http.post('/analytics/dashboards', undefined, { params: { name, description } })),
+  saveDashboard: (id: string, payload: Partial<AnalyticsDashboard> & { expectedVersion?: number }) =>
+    unwrap<AnalyticsDashboard>(http.put(`/analytics/dashboards/${id}`, payload)),
+  deleteDashboard: (id: string) => unwrap<void>(http.delete(`/analytics/dashboards/${id}`)),
+  publishDashboard: (id: string, isPublic: boolean, expireAt?: string) =>
+    unwrap<AnalyticsPublication>(http.post(`/analytics/dashboards/${id}/publish`, { isPublic, expireAt })),
+  currentPublication: (id: string) =>
+    unwrap<{ version: number; current_publication_id: string; canvas: unknown; spec: unknown }>(
+      http.get(`/analytics/dashboards/${id}/publication`),
+    ),
+
+  // Superset 嵌入
+  supersetGuestToken: (uuid: string) =>
+    unwrap<{ token: string }>(http.post('/analytics/superset/guest-token', { uuid })),
+
+  // 公开分享
+  shareSnapshot: (token: string) =>
+    unwrap<{ snapshot: unknown; version: number; expireAt: string }>(
+      http.get(`/analytics/share/screen/${token}`),
+    ),
+};
+
+// ============================================================================
+// 算法模板（P4d）
+// ============================================================================
+
+export type TemplateCategory = 'CLUSTERING' | 'REGRESSION' | 'FORECAST' | 'CORRELATION' | 'EDA' | 'RFM';
+
+export interface NotebookTemplate {
+  id: string;
+  tenantId?: string;
+  name: string;
+  category: TemplateCategory;
+  description?: string;
+  storagePath: string;
+  paramsSchema?: string;
+  kernel: string;
+  icon?: string;
+  sortOrder: number;
+}
+
+export const TemplateAPI = {
+  list: (category?: TemplateCategory) =>
+    unwrap<NotebookTemplate[]>(http.get('/analytics/notebook-templates', { params: { category } })),
+  get: (id: string) => unwrap<NotebookTemplate>(http.get(`/analytics/notebook-templates/${id}`)),
+  create: (payload: {
+    name: string;
+    category: TemplateCategory;
+    storagePath: string;
+    description?: string;
+    paramsSchemaJson?: string;
+    kernel?: string;
+  }) => unwrap<NotebookTemplate>(http.post('/analytics/notebook-templates', undefined, { params: payload })),
+  delete: (id: string) => unwrap<void>(http.delete(`/analytics/notebook-templates/${id}`)),
+};
+
+// ============================================================================
+// NL2SQL（P5-C 智能建数据集）
+// ============================================================================
+
+export interface Nl2SqlRequest {
+  asset_fqn: string;
+  question: string;
+  field_schema?: { name: string; type: string; classification?: string }[];
+  dataset_id?: string;
+}
+
+export const Nl2SqlAPI = {
+  generate: (req: Nl2SqlRequest) =>
+    unwrap<{ sql: string }>(http.post('/analytics/nl2sql', req)),
 };

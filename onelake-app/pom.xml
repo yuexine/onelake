@@ -20,6 +20,7 @@
         <module>module-quality</module>
         <module>module-security</module>
         <module>module-dataservice</module>
+        <module>module-analytics</module>
         <module>bootstrap</module>
     </modules>
 
@@ -86,6 +87,11 @@
             <dependency>
                 <groupId>com.onelake</groupId>
                 <artifactId>module-dataservice</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.onelake</groupId>
+                <artifactId>module-analytics</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

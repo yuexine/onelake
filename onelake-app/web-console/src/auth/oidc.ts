@@ -6,7 +6,10 @@ const STATE_KEY = 'onelake.oidc_state';
 const VERIFIER_KEY = 'onelake.oidc_code_verifier';
 const RETURN_TO_KEY = 'onelake.oidc_return_to';
 
-const authority = import.meta.env.VITE_OIDC_AUTHORITY || 'http://localhost:8081/realms/onelake';
+const defaultAuthority = import.meta.env.DEV
+  ? 'http://localhost:8081/realms/onelake'
+  : `${window.location.origin}/auth/realms/onelake`;
+const authority = (import.meta.env.VITE_OIDC_AUTHORITY || defaultAuthority).replace(/\/$/, '');
 const clientId = import.meta.env.VITE_OIDC_CLIENT_ID || 'onelake-app';
 
 export interface AuthUser {

@@ -58,7 +58,7 @@ class RunningTaskServiceTest {
         service.upsertIntegrationRun(row);
 
         ArgumentCaptor<RunningTask> captor = ArgumentCaptor.forClass(RunningTask.class);
-        verify(repo).save(captor.capture());
+        verify(repo).saveAndFlush(captor.capture());
         RunningTask task = captor.getValue();
         assertThat(task.getTenantId()).isEqualTo(tenantId);
         assertThat(task.getSourceModule()).isEqualTo("INTEGRATION");
@@ -105,7 +105,7 @@ class RunningTaskServiceTest {
         assertThat(existing.getErrorCode()).isEqualTo("AIRBYTE_JOB_FAILED");
         assertThat(existing.getErrorMessage()).isEqualTo("source timeout");
         assertThat(existing.getExpiresAt()).isNull();
-        verify(repo).save(existing);
+        verify(repo).saveAndFlush(existing);
     }
 
     @Test
@@ -134,7 +134,7 @@ class RunningTaskServiceTest {
         service.upsertSqlQuery(row);
 
         ArgumentCaptor<RunningTask> captor = ArgumentCaptor.forClass(RunningTask.class);
-        verify(repo).save(captor.capture());
+        verify(repo).saveAndFlush(captor.capture());
         RunningTask task = captor.getValue();
         assertThat(task.getSourceModule()).isEqualTo("LAKEHOUSE");
         assertThat(task.getTaskType()).isEqualTo("SQL");
@@ -155,7 +155,7 @@ class RunningTaskServiceTest {
             UUID.randomUUID().toString(),
             tenantId,
             "daily_sales_pipeline",
-            "onelake_dbt_model_run",
+            "onelake_pipeline_run",
             "dagster-run-1",
             "MANUAL",
             "SUCCESS",
@@ -168,7 +168,7 @@ class RunningTaskServiceTest {
         service.upsertOrchestrationRun(row);
 
         ArgumentCaptor<RunningTask> captor = ArgumentCaptor.forClass(RunningTask.class);
-        verify(repo).save(captor.capture());
+        verify(repo).saveAndFlush(captor.capture());
         RunningTask task = captor.getValue();
         assertThat(task.getSourceModule()).isEqualTo("ORCHESTRATION");
         assertThat(task.getTaskType()).isEqualTo("DAG");
@@ -202,7 +202,7 @@ class RunningTaskServiceTest {
         service.upsertQualityResult(row);
 
         ArgumentCaptor<RunningTask> captor = ArgumentCaptor.forClass(RunningTask.class);
-        verify(repo).save(captor.capture());
+        verify(repo).saveAndFlush(captor.capture());
         RunningTask task = captor.getValue();
         assertThat(task.getSourceModule()).isEqualTo("QUALITY");
         assertThat(task.getTaskType()).isEqualTo("QUALITY");

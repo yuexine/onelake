@@ -6,6 +6,7 @@ import com.onelake.common.notification.NotificationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -588,9 +589,41 @@ public class RunningTaskService {
     }
 
     private RunningTask saveAndNotify(RunningTask task) {
-        RunningTask saved = repo.save(task);
+        RunningTask saved;
+        try {
+            saved = repo.saveAndFlush(task);
+        } catch (DataIntegrityViolationException e) {
+            saved = repo.findByTenantIdAndRefTypeAndRefId(
+                    task.getTenantId(), task.getRefType(), task.getRefId())
+                .map(existing -> {
+                    copyMutableFields(task, existing);
+                    return repo.saveAndFlush(existing);
+                })
+                .orElseThrow(() -> e);
+        }
         notificationService.notifyTaskIfNeeded(saved);
         return saved;
+    }
+
+    private void copyMutableFields(RunningTask source, RunningTask target) {
+        target.setUserId(source.getUserId());
+        target.setSourceModule(source.getSourceModule());
+        target.setTaskType(source.getTaskType());
+        target.setParentRefId(source.getParentRefId());
+        target.setTitle(source.getTitle());
+        target.setStatus(source.getStatus());
+        target.setProgress(source.getProgress());
+        target.setPhase(source.getPhase());
+        target.setDetail(source.getDetail());
+        target.setErrorCode(source.getErrorCode());
+        target.setErrorMessage(source.getErrorMessage());
+        target.setLink(source.getLink());
+        target.setCancellable(source.getCancellable());
+        target.setCancelEndpoint(source.getCancelEndpoint());
+        target.setStartedAt(source.getStartedAt());
+        target.setUpdatedAt(source.getUpdatedAt());
+        target.setFinishedAt(source.getFinishedAt());
+        target.setExpiresAt(source.getExpiresAt());
     }
 
     private static UUID uuid(ResultSet rs, String column) throws SQLException {

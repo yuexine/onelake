@@ -276,14 +276,23 @@ export default function Tables() {
                 { title: '操作', width: 220, fixed: 'right' as const, render: (_: unknown, r: Asset) => (
                   <Space size={4} wrap>
                     {r.layer === 'ODS' && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<BranchesOutlined />}
-                        onClick={() => navigate(`/lakehouse/tables/new?derive=dwd&sourceAssetId=${r.id}`)}
-                      >
-                        派生 DWD
-                      </Button>
+                      <>
+                        <Button
+                          size="small"
+                          type="primary"
+                          icon={<BranchesOutlined />}
+                          onClick={() => navigate(`/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=${r.id}`)}
+                        >
+                          治理成表
+                        </Button>
+                        <Button
+                          size="small"
+                          icon={<BranchesOutlined />}
+                          onClick={() => navigate(`/lakehouse/tables/new?derive=dwd&sourceAssetId=${r.id}`)}
+                        >
+                          派生 DWD
+                        </Button>
+                      </>
                     )}
                     <Button size="small" onClick={() => navigate(`/lakehouse/tables/${r.id}`)}>治理详情</Button>
                     <Button size="small" icon={<ThunderboltOutlined />} onClick={() => navigate(`/lakehouse/tables/${r.id}?tab=optimize`)}>优化</Button>

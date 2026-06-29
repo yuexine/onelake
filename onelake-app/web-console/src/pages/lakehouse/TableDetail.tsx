@@ -4,23 +4,14 @@
  */
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
-import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, HistoryOutlined, PlayCircleOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, HistoryOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { DetailPageLayout, ClassificationBadge, SectionCard, StateView } from '../../components';
-import type { AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, DataModel, DwdModelRun } from '../../types';
+import type { AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, DataModel } from '../../types';
 import { CatalogAPI, ModelingAPI } from '../../api';
 import { normalizeCatalogAsset } from './assetAdapter';
 
 const { Text } = Typography;
-const TERMINAL_RUN_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
-
-function runStatusColor(status?: string) {
-  if (status === 'SUCCEEDED') return 'success';
-  if (status === 'FAILED' || status === 'CANCELLED') return 'error';
-  if (status === 'RUNNING') return 'processing';
-  if (status === 'QUEUED') return 'warning';
-  return 'default';
-}
 
 function modelStatusColor(status?: string) {
   if (status === 'VALIDATED' || status === 'PUBLISHED') return 'success';
@@ -39,11 +30,6 @@ function fmtBytes(value?: number) {
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${value} B`;
-}
-
-function fmtCost(value?: number) {
-  if (value == null) return '-';
-  return value.toFixed(2);
 }
 
 function maintenanceColor(status?: string) {
@@ -69,7 +55,6 @@ export default function TableDetail() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [models, setModels] = useState<DataModel[]>([]);
-  const [runsByModel, setRunsByModel] = useState<Record<string, DwdModelRun[]>>({});
   const [modelingLoading, setModelingLoading] = useState(false);
   const [modelingError, setModelingError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -113,21 +98,9 @@ export default function TableDetail() {
     setModelingError(null);
     const params = layer === 'DWD' ? { targetFqn: assetFqn } : { sourceFqn: assetFqn };
     ModelingAPI.listModels(params)
-      .then(async (items) => {
-        setModels(items);
-        const runEntries = await Promise.all(items.map(async (model) => {
-          try {
-            return [model.id, await ModelingAPI.listModelRuns(model.id)] as const;
-          } catch (e) {
-            setModelingError(e instanceof Error ? e.message : 'DWD 运行历史加载失败');
-            return [model.id, []] as const;
-          }
-        }));
-        setRunsByModel(Object.fromEntries(runEntries));
-      })
+      .then(setModels)
       .catch((e) => {
         setModels([]);
-        setRunsByModel({});
         setModelingError(e.message || 'DWD 模型加载失败');
       })
       .finally(() => setModelingLoading(false));
@@ -176,31 +149,7 @@ export default function TableDetail() {
     ...column,
   })));
 
-  const latestRunOf = (modelId: string) => runsByModel[modelId]?.[0];
-
   const refreshModeling = () => loadModeling(asset.fqn, asset.layer);
-
-  const replaceRun = (modelId: string, run: DwdModelRun) => {
-    setRunsByModel((prev) => {
-      const current = prev[modelId] || [];
-      const next = current.some((item) => item.id === run.id)
-        ? current.map((item) => item.id === run.id ? run : item)
-        : [run, ...current];
-      return { ...prev, [modelId]: next };
-    });
-  };
-
-  const pollRun = async (modelId: string, runId: string) => {
-    for (let i = 0; i < 30; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      const run = await ModelingAPI.getModelRun(runId);
-      replaceRun(modelId, run);
-      if (TERMINAL_RUN_STATUSES.has(run.status)) {
-        refreshModeling();
-        return;
-      }
-    }
-  };
 
   const handleCompile = async (model: DataModel) => {
     const key = `compile-${model.id}`;
@@ -211,23 +160,6 @@ export default function TableDetail() {
       refreshModeling();
     } catch (e) {
       message.error(e instanceof Error ? e.message : 'DWD 模型编译失败');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRun = async (model: DataModel) => {
-    const key = `run-${model.id}`;
-    setActionLoading(key);
-    try {
-      const run = await ModelingAPI.runModel(model.id, { triggerType: 'MANUAL' });
-      replaceRun(model.id, run);
-      message.success('DWD 运行已提交');
-      void pollRun(model.id, run.id).catch((e) => {
-        message.error(e instanceof Error ? e.message : 'DWD 运行状态刷新失败');
-      });
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : 'DWD 运行提交失败');
     } finally {
       setActionLoading(null);
     }
@@ -292,12 +224,12 @@ export default function TableDetail() {
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
                     <Space wrap>
                       <Tag>{model.materialization}</Tag>
-                      <Tag>{model.dbtModelName || 'dbt 未生成'}</Tag>
-                      <Tag>{model.resourceGroup || 'default'}</Tag>
-                      <Tag>{model.computeProfile || 'trino-small'}</Tag>
+                      <Tag>{model.engine || 'SPARK'}</Tag>
+                      <Tag>{model.resourceGroup || 'spark-default'}</Tag>
+                      <Tag>{model.computeProfile || 'spark-small'}</Tag>
                     </Space>
                     <pre style={{ margin: 0, padding: 12, overflowX: 'auto', background: 'var(--ol-bg-muted)', border: '1px solid var(--ol-border)', borderRadius: 6, fontSize: 12 }}>
-                      {model.compiledSql || model.sqlText || '暂无 SQL/dbt 预览，请先编译校验模型'}
+                      {model.compiledSql || model.sqlText || '暂无 Spark SQL 预览，请先编译校验模型'}
                     </pre>
                     <Table
                       size="small"
@@ -341,43 +273,14 @@ export default function TableDetail() {
                   render: (_, record) => <Tag color={modelStatusColor(record.status)}>{record.status}</Tag>,
                 },
                 {
-                  title: '最近运行',
-                  width: 260,
-                  render: (_, record) => {
-                    const latestRun = latestRunOf(record.id);
-                    if (!latestRun) return '-';
-                    return (
-                      <Space direction="vertical" size={2}>
-                        <Space size={6} wrap>
-                          <Tag color={runStatusColor(latestRun.status)}>{latestRun.status}</Tag>
-                          <Tag>{latestRun.triggerType}</Tag>
-                          {latestRun.rowsWritten != null && <Tag>写入 {latestRun.rowsWritten}</Tag>}
-                          {latestRun.resourceGroup && <Tag>{latestRun.resourceGroup}</Tag>}
-                          {latestRun.computeProfile && <Tag>{latestRun.computeProfile}</Tag>}
-                        </Space>
-                        <Text style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{fmtTime(latestRun.finishedAt || latestRun.updatedAt || latestRun.createdAt)}</Text>
-                        <Text style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
-                          扫描 {fmtBytes(latestRun.actualScanBytes ?? latestRun.estimatedScanBytes)}
-                          {' / '}成本 {fmtCost(latestRun.costEstimate)}
-                          {' / '}重试 {latestRun.retryCount ?? 0}
-                        </Text>
-                        {latestRun.errorMsg && <Text type="danger" style={{ fontSize: 12 }}>{latestRun.errorMsg}</Text>}
-                      </Space>
-                    );
-                  },
-                },
-                {
-                  title: '数据面',
+                  title: 'Spark 产物',
                   width: 220,
-                  render: (_, record) => {
-                    const latestRun = latestRunOf(record.id);
-                    return (
-                      <Space direction="vertical" size={2}>
-                        <Text style={{ fontSize: 12 }}>Dagster：<Text code>{latestRun?.dagsterRunId || '-'}</Text></Text>
-                        <Text style={{ fontSize: 12 }}>产物：<Text code>{latestRun?.artifactsPath || record.artifactPath || '-'}</Text></Text>
-                      </Space>
-                    );
-                  },
+                  render: (_, record) => (
+                    <Space direction="vertical" size={2}>
+                      <Text style={{ fontSize: 12 }}>产物：<Text code>{record.artifactPath || '-'}</Text></Text>
+                      <Text style={{ fontSize: 12 }}>资源：{record.resourceGroup || 'spark-default'} / {record.computeProfile || 'spark-small'}</Text>
+                    </Space>
+                  ),
                 },
                 {
                   title: '操作',
@@ -395,12 +298,11 @@ export default function TableDetail() {
                       <Button
                         size="small"
                         type="primary"
-                        icon={<PlayCircleOutlined />}
+                        icon={<ThunderboltOutlined />}
                         disabled={!['VALIDATED', 'PUBLISHED'].includes(record.status)}
-                        loading={actionLoading === `run-${record.id}`}
-                        onClick={() => handleRun(record)}
+                        onClick={() => navigate('/orchestration/pipelines')}
                       >
-                        运行
+                        去流水线运行
                       </Button>
                     </Space>
                   ),

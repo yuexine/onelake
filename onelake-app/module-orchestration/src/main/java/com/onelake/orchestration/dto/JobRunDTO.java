@@ -13,5 +13,6 @@ public record JobRunDTO(
     String status,
     Instant startedAt,
     Instant finishedAt,
-    UUID triggeredBy
+    UUID triggeredBy,
+    String triggeredByName
 ) {}

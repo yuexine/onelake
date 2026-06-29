@@ -1,12 +1,12 @@
 /**
  * 流水线列表（对应原型 §4.4.1 升级版）。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Form, Input, Modal, Radio, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import {
-  PlusOutlined, AppstoreOutlined, PlayCircleOutlined,
+  PlusOutlined, AppstoreOutlined, InfoCircleOutlined, PlayCircleOutlined,
 } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard } from '../../components';
 import { ModelingAPI, OrchestrationAPI, PipelineAPI } from '../../api';
 import type { Dag, DagNode, DataModel, JobRun } from '../../types';
@@ -24,18 +24,43 @@ function formatDate(value?: string) {
   return new Date(value).toLocaleString('zh-CN');
 }
 
+function runIdentity(run: JobRun) {
+  return run.dagsterRunId || run.id;
+}
+
 function LastRunSummary({ run }: { run?: JobRun }) {
+  if (!run) {
+    return <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>暂无运行</span>;
+  }
+  return (
+    <Space direction="vertical" size={4}>
+      <StatusBadge status={run.status} />
+      <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>
+        {formatDate(run.startedAt)}
+      </span>
+    </Space>
+  );
+}
+
+function LastRunIdCell({ run, onOpen }: { run?: JobRun; onOpen: (run: JobRun) => void }) {
   if (!run) {
     return <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>-</span>;
   }
+  const identity = runIdentity(run);
   return (
-    <Space direction="vertical" size={2}>
-      <Space size={8}>
-        <StatusBadge status={run.status} />
-        <Text code style={{ fontSize: 11 }}>{run.dagsterRunId || run.id}</Text>
-      </Space>
-      <span style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{formatDate(run.startedAt)}</span>
-    </Space>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+      <Text
+        code
+        copyable={{ text: identity }}
+        ellipsis={{ tooltip: identity }}
+        style={{ display: 'block', maxWidth: 176, fontSize: 11 }}
+      >
+        {identity}
+      </Text>
+      <Button size="small" type="link" style={{ paddingInline: 0, height: 20 }} onClick={() => onOpen(run)}>
+        详情
+      </Button>
+    </div>
   );
 }
 
@@ -88,6 +113,15 @@ function isDwdGovernancePipeline(dag: Dag) {
   ));
 }
 
+function nodeTargetFqn(node: DagNode) {
+  return String((node as any).targetFqn || node.config?.targetFqn || node.config?.targetModelFqn || '');
+}
+
+function dagContainsTargetFqn(dag: Dag, targetFqn: string) {
+  if (!targetFqn) return true;
+  return dagNodes(dag).some((node) => nodeTargetFqn(node) === targetFqn);
+}
+
 function pipelineOpenPath(dag: Dag) {
   // All pipelines open in the Unified Pipeline Editor.
   return `/orchestration/pipelines/${dag.id}`;
@@ -96,10 +130,12 @@ function pipelineOpenPath(dag: Dag) {
 export default function PipelineList() {
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [pipelines, setPipelines] = useState<Dag[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
+  const notifiedTargetFqnRef = useRef('');
 
   const loadPipelines = () => {
     setLoading(true);
@@ -114,11 +150,44 @@ export default function PipelineList() {
     loadPipelines();
   }, []);
 
+  const targetFqnFilter = searchParams.get('targetFqn') || '';
+  const visiblePipelines = useMemo(
+    () => pipelines.filter((pipeline) => dagContainsTargetFqn(pipeline, targetFqnFilter)),
+    [pipelines, targetFqnFilter],
+  );
+
+  const clearTargetFqnFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('targetFqn');
+    setSearchParams(next, { replace: true });
+  };
+
   const counts = useMemo(() => ({
-    total: pipelines.length,
-    enabled: pipelines.filter((p) => p.enabled).length,
-    draft: pipelines.filter((p) => !p.enabled).length,
-  }), [pipelines]);
+    total: visiblePipelines.length,
+    enabled: visiblePipelines.filter((p) => p.enabled).length,
+    draft: visiblePipelines.filter((p) => !p.enabled).length,
+  }), [visiblePipelines]);
+
+  const targetFqnFilterNotice = useMemo(() => {
+    if (!targetFqnFilter) return '';
+    if (loading) return '正在按目标表筛选流水线';
+    if (visiblePipelines.length === 0) return '未找到目标表关联流水线';
+    return `已按目标表筛选，显示 ${visiblePipelines.length} / ${pipelines.length} 条流水线`;
+  }, [loading, pipelines.length, targetFqnFilter, visiblePipelines.length]);
+
+  useEffect(() => {
+    if (!targetFqnFilter) {
+      notifiedTargetFqnRef.current = '';
+      return;
+    }
+    if (loading || error || notifiedTargetFqnRef.current === targetFqnFilter) return;
+    notifiedTargetFqnRef.current = targetFqnFilter;
+    message.info({
+      key: 'pipeline-target-fqn-filter',
+      content: `${targetFqnFilterNotice}：${targetFqnFilter}`,
+      duration: 3,
+    });
+  }, [error, loading, message, targetFqnFilter, targetFqnFilterNotice]);
 
   const triggerPipeline = (dag: Dag) => {
     if (!dag.triggerable) {
@@ -252,7 +321,25 @@ export default function PipelineList() {
         )}
       />
 
-      <SectionCard title="流水线列表" icon={<AppstoreOutlined />} flatBody>
+      <SectionCard
+        title="流水线列表"
+        icon={<AppstoreOutlined />}
+        flatBody
+        extra={targetFqnFilter ? (
+          <Space className="ol-filter-context" size={8}>
+            <span className="ol-filter-context__label">
+              <InfoCircleOutlined />
+              <span>目标表</span>
+              <Text code className="ol-filter-context__code" ellipsis={{ tooltip: targetFqnFilter }}>
+                {targetFqnFilter}
+              </Text>
+            </span>
+            <Button size="small" type="link" onClick={clearTargetFqnFilter}>
+              查看全部
+            </Button>
+          </Space>
+        ) : undefined}
+      >
         {error && (
           <Alert
             type="error"
@@ -265,9 +352,12 @@ export default function PipelineList() {
         <Table
           size="middle"
           rowKey="id"
-          dataSource={pipelines}
+          dataSource={visiblePipelines}
           loading={loading}
           pagination={false}
+          locale={{
+            emptyText: targetFqnFilter ? '未找到目标表关联流水线' : undefined,
+          }}
           columns={[
             { title: '名称', dataIndex: 'name', render: (n: string, r: Dag) => (
               <Space size={10}>
@@ -286,7 +376,15 @@ export default function PipelineList() {
             { title: '运行态', width: 90, render: (_: unknown, r: Dag) => <TriggerState dag={r} /> },
             { title: '版本', dataIndex: 'version', width: 80, render: (v: number) => <Tag style={{ margin: 0 }}>v{v}</Tag> },
             { title: '状态', dataIndex: 'enabled', width: 110, render: (enabled: boolean) => <StatusBadge status={enabled ? 'ENABLED' : 'DRAFT'} /> },
-            { title: '最近运行', width: 260, render: (_: unknown, r: Dag) => <LastRunSummary run={r.lastRun} /> },
+            { title: '创建时间', dataIndex: 'createdAt', width: 180, render: (value?: string) => (
+              <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatDate(value)}</span>
+            ) },
+            { title: '最近运行', width: 160, render: (_: unknown, r: Dag) => (
+              <LastRunSummary run={r.lastRun} />
+            ) },
+            { title: '最近运行 ID', width: 250, render: (_: unknown, r: Dag) => (
+              <LastRunIdCell run={r.lastRun} onOpen={(run) => navigate(`/orchestration/runs/${run.id}`)} />
+            ) },
             { title: '操作', width: 180, render: (_: unknown, r: Dag) => (
               <Space>
                 <Tooltip title={r.triggerable ? undefined : r.triggerBlockedReason}>

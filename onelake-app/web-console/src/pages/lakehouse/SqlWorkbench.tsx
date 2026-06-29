@@ -10,7 +10,7 @@ import {
   FileTextOutlined, PlusOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { format as formatSqlText } from 'sql-formatter';
 import ReactECharts from 'echarts-for-react';
@@ -286,9 +286,14 @@ function FieldTreeTitle({ name, type, classification }: { name: string; type: st
   );
 }
 
+function previewSqlForAsset(asset: Asset) {
+  return `SELECT * FROM ${asset.fqn}\nLIMIT 100`;
+}
+
 export default function SqlWorkbench() {
   const { message } = AntdApp.useApp();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const completionDisposeRef = useRef<{ dispose: () => void } | null>(null);
@@ -296,6 +301,7 @@ export default function SqlWorkbench() {
   const saveSqlRef = useRef<() => void>(() => {});
   const exportRef = useRef<(format: 'csv' | 'tsv') => void>(() => {});
   const abortRef = useRef<AbortController | null>(null);
+  const initialAssetParamRef = useRef<string>();
   const [sql, setSql] = useState('SHOW SCHEMAS');
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetLoading, setAssetLoading] = useState(true);
@@ -315,6 +321,7 @@ export default function SqlWorkbench() {
   const [selectedAssetFqn, setSelectedAssetFqn] = useState<string>();
   const [editorReady, setEditorReady] = useState(false);
   const [treeSearch, setTreeSearch] = useState('');
+  const [expandedTreeKeys, setExpandedTreeKeys] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exportHistoryId, setExportHistoryId] = useState<string>();
   const [leftView, setLeftView] = useState<'assets' | 'templates'>('assets');
@@ -337,6 +344,8 @@ export default function SqlWorkbench() {
   const [myApprovalsTotal, setMyApprovalsTotal] = useState(0);
   const [myGrants, setMyGrants] = useState<AccessGrant[]>([]);
   const [myGrantsLoading, setMyGrantsLoading] = useState(false);
+  const requestedAssetId = searchParams.get('assetId') || undefined;
+  const requestedAssetFqn = searchParams.get('assetFqn') || undefined;
 
   const showQueryError = useCallback((errorMessage: string, errorCode?: string) => {
     const formatted = formatSqlError(errorMessage, errorCode);
@@ -371,10 +380,10 @@ export default function SqlWorkbench() {
     return result;
   }, [assets, treeSearch]);
 
-  const expandedTreeKeys = useMemo(() => {
-    if (!treeSearch.trim()) return undefined;
-    return filteredAssets.map((a) => a.id);
-  }, [filteredAssets, treeSearch]);
+  const filteredAssetColumnCount = useMemo(
+    () => filteredAssets.reduce((sum, asset) => sum + (asset.columns?.length || 0), 0),
+    [filteredAssets],
+  );
 
   const filteredTemplates = useMemo(() => {
     const kw = templateSearch.trim().toLowerCase();
@@ -394,6 +403,20 @@ export default function SqlWorkbench() {
   const isTemplateOwner = useCallback((row: QueryTemplate) => {
     const user = getAuthUser();
     return Boolean(row.ownerId && user?.id && row.ownerId === user.id);
+  }, []);
+
+  const selectedAsset = useMemo(
+    () => assets.find((asset) => asset.fqn === selectedAssetFqn),
+    [assets, selectedAssetFqn],
+  );
+
+  const selectedTreeKeys = selectedAsset ? [selectedAsset.id] : [];
+
+  const loadAssetPreviewSql = useCallback((asset: Asset) => {
+    const previewSql = previewSqlForAsset(asset);
+    setSelectedAssetFqn(asset.fqn);
+    setSql(previewSql);
+    editorRef.current?.setValue(previewSql);
   }, []);
 
   const loadAssets = (attemptRefresh = true) => {
@@ -448,6 +471,34 @@ export default function SqlWorkbench() {
     loadSavedQueries();
     loadTemplates();
   }, []);
+
+  useEffect(() => {
+    if (treeSearch.trim()) {
+      setExpandedTreeKeys(filteredAssets.map((asset) => asset.id));
+      return;
+    }
+
+    const assetIds = new Set(assets.map((asset) => asset.id));
+    setExpandedTreeKeys((keys) => keys.filter((key) => assetIds.has(key)));
+  }, [assets, filteredAssets, treeSearch]);
+
+  useEffect(() => {
+    const requestKey = requestedAssetId || requestedAssetFqn;
+    if (!requestKey || assetLoading || assetError || assets.length === 0) return;
+    if (initialAssetParamRef.current === requestKey) return;
+
+    const requestedAsset = assets.find((asset) => asset.id === requestedAssetId || asset.fqn === requestedAssetFqn);
+    if (!requestedAsset) {
+      if (requestedAssetFqn) setTreeSearch(requestedAssetFqn);
+      return;
+    }
+
+    setLeftView('assets');
+    setTreeSearch(requestedAsset.fqn);
+    setExpandedTreeKeys([requestedAsset.id]);
+    loadAssetPreviewSql(requestedAsset);
+    initialAssetParamRef.current = requestKey;
+  }, [assets, assetError, assetLoading, loadAssetPreviewSql, requestedAssetFqn, requestedAssetId]);
 
   useEffect(() => {
     if (myApprovalsOpen) {
@@ -1174,7 +1225,7 @@ export default function SqlWorkbench() {
   ];
 
   return (
-    <div className="ol-page">
+    <div className="ol-page ol-sql-workbench-page">
       <PageHeader
         icon={<CodeOutlined />}
         title="SQL 工作台"
@@ -1196,170 +1247,199 @@ export default function SqlWorkbench() {
         }
       />
 
-      <Row gutter={16}>
-        <Col xs={24} lg={5}>
-          <SectionCard
-            title={
-              <Segmented
-                size="small"
-                value={leftView}
-                onChange={(v) => setLeftView(v as 'assets' | 'templates')}
-                options={[
-                  { label: '表树', value: 'assets', icon: <DatabaseOutlined /> },
-                  { label: '模板', value: 'templates', icon: <FileTextOutlined /> },
-                ]}
-              />
-            }
-            icon={leftView === 'assets' ? <DatabaseOutlined /> : <FileTextOutlined />}
-            padded="sm"
-          >
-            {leftView === 'assets' && (
-              <>
-                <Input.Search
+      <Row gutter={16} className="ol-sql-workbench-layout">
+        <Col xs={24} lg={5} className="ol-sql-workbench-sidebar-col">
+          <div className="ol-sql-workbench-sidebar-shell">
+            <SectionCard
+              title={
+                <Segmented
                   size="small"
-                  allowClear
-                  placeholder="搜索表名 / 字段 / 分级"
-                  value={treeSearch}
-                  onChange={(e) => setTreeSearch(e.target.value)}
-                  style={{ marginBottom: 8 }}
+                  value={leftView}
+                  onChange={(v) => setLeftView(v as 'assets' | 'templates')}
+                  options={[
+                    { label: '表树', value: 'assets', icon: <DatabaseOutlined /> },
+                    { label: '模板', value: 'templates', icon: <FileTextOutlined /> },
+                  ]}
                 />
-                {assetError && (
-                  <Alert
-                    type="error"
-                    showIcon
-                    style={{ marginBottom: 10, borderRadius: 6 }}
-                    message={<span style={{ fontSize: 12 }}>{assetError}</span>}
-                    action={<Button size="small" onClick={() => loadAssets()}>重试</Button>}
-                  />
-                )}
-                {!assetError && !assetLoading && assets.length === 0 && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 10, borderRadius: 6 }}
-                    message={<span style={{ fontSize: 12 }}>Catalog 暂无可查询表</span>}
-                  />
-                )}
-                {!assetError && assetLoading && (
-                  <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--ol-ink-3)' }}>正在加载 Catalog 资产...</div>
-                )}
-                {!assetLoading && !assetError && treeSearch.trim() && filteredAssets.length === 0 && (
-                  <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--ol-ink-3)' }}>
-                    未匹配到表或字段，请调整关键字「{treeSearch}」
+              }
+              icon={leftView === 'assets' ? <DatabaseOutlined /> : <FileTextOutlined />}
+              padded="none"
+              bodyStyle={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}
+            >
+              {leftView === 'assets' && (
+                <div className="ol-sql-workbench-left-panel">
+                  <div className="ol-sql-workbench-left-tools">
+                    <Input.Search
+                      size="small"
+                      allowClear
+                      placeholder="搜索表名 / 字段 / 分级"
+                      value={treeSearch}
+                      onChange={(e) => setTreeSearch(e.target.value)}
+                    />
+                    <div className="ol-sql-workbench-left-meta">
+                      <span>{treeSearch.trim() ? `匹配 ${filteredAssets.length} / ${assets.length} 张表` : `共 ${assets.length} 张表`}</span>
+                      <span>{filteredAssetColumnCount} 个字段</span>
+                    </div>
+                    {assetError && (
+                      <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginTop: 8, borderRadius: 6 }}
+                        message={<span style={{ fontSize: 12 }}>{assetError}</span>}
+                        action={<Button size="small" onClick={() => loadAssets()}>重试</Button>}
+                      />
+                    )}
+                    {!assetError && !assetLoading && assets.length === 0 && (
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginTop: 8, borderRadius: 6 }}
+                        message={<span style={{ fontSize: 12 }}>Catalog 暂无可查询表</span>}
+                      />
+                    )}
+                    {!assetError && assetLoading && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ol-ink-3)' }}>正在加载 Catalog 资产...</div>
+                    )}
+                    {!assetLoading && !assetError && treeSearch.trim() && filteredAssets.length === 0 && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                        未匹配到表或字段，请调整关键字「{treeSearch}」
+                      </div>
+                    )}
                   </div>
-                )}
-                <Tree
-                  blockNode
-                  expandedKeys={expandedTreeKeys}
-                  onExpand={() => {
-                    // 非搜索模式下不强制控制展开；搜索时始终展开匹配结果
-                  }}
-                  style={{ fontSize: 13 }}
-                  onSelect={(_, info) => {
-                    const key = String(info.node.key);
-                    if (key.includes(':')) {
-                      const [assetId, columnName] = key.split(':');
-                      const asset = assets.find((a) => a.id === assetId);
-                      if (asset) {
-                        setSelectedAssetFqn(asset.fqn);
-                        insertSqlText(columnName);
-                      }
-                      return;
-                    }
-                    const asset = assets.find((a) => a.id === key);
-                    if (asset) {
-                      setSelectedAssetFqn(asset.fqn);
-                      const previewSql = `SELECT * FROM ${asset.fqn}\nLIMIT 100`;
-                      setSql(previewSql);
-                      editorRef.current?.setValue(previewSql);
-                    }
-                  }}
-                  treeData={filteredAssets.map((a) => ({
-                    title: <TableTreeTitle fqn={a.fqn} />,
-                    key: a.id,
-                    children: (a.columns || []).map((column) => ({
-                      title: <FieldTreeTitle name={column.name} type={column.type} classification={column.classification || column.suggestLevel} />,
-                      key: `${a.id}:${column.name}`,
-                      isLeaf: true,
-                    })),
-                  }))}
-                />
-              </>
-            )}
-
-            {leftView === 'templates' && (
-              <>
-                <Space style={{ width: '100%', marginBottom: 8 }} direction="vertical" size={6}>
-                  <Input.Search
-                    size="small"
-                    allowClear
-                    placeholder="搜索模板名称 / 分类"
-                    value={templateSearch}
-                    onChange={(e) => setTemplateSearch(e.target.value)}
-                  />
-                  <Button size="small" type="dashed" block icon={<PlusOutlined />} onClick={saveCurrentAsTemplate}>
-                    将当前 SQL 存为模板
-                  </Button>
-                </Space>
-                {filteredTemplates.length === 0 && (
-                  <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--ol-ink-3)' }}>
-                    {templates.length === 0 ? '暂无模板。点击上方按钮把当前 SQL 沉淀为团队模板。' : `未匹配到模板「${templateSearch}」`}
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {filteredTemplates.map((tpl) => (
-                    <div
-                      key={tpl.id}
-                      style={{
-                        padding: 8,
-                        borderRadius: 6,
-                        border: '1px solid var(--ol-line-soft)',
-                        background: 'var(--ol-card)',
+                  <div className="ol-sql-workbench-left-scroll" aria-label="Catalog 表树">
+                    <Tree
+                      className="ol-asset-tree ol-sql-workbench-tree"
+                      blockNode
+                      expandedKeys={expandedTreeKeys}
+                      selectedKeys={selectedTreeKeys}
+                      autoExpandParent={Boolean(treeSearch.trim())}
+                      onExpand={(keys) => {
+                        setExpandedTreeKeys(keys.map(String));
                       }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        <FileTextOutlined style={{ color: 'var(--ol-brand)', fontSize: 12 }} />
-                        <span style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {tpl.name}
-                        </span>
-                        {isTemplateOwner(tpl)
-                          ? <Tag color="success" style={{ margin: 0, fontSize: 10 }}>我的</Tag>
-                          : <Tag color="processing" style={{ margin: 0, fontSize: 10 }}>共享给我</Tag>}
-                        {tpl.shared && <Tag color="processing" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>共享</Tag>}
+                      style={{ fontSize: 13, minWidth: 0 }}
+                      onSelect={(_, info) => {
+                        const key = String(info.node.key);
+                        if (key.includes(':')) {
+                          const [assetId, columnName] = key.split(':');
+                          const asset = assets.find((a) => a.id === assetId);
+                          if (asset) {
+                            setSelectedAssetFqn(asset.fqn);
+                            insertSqlText(columnName);
+                          }
+                          return;
+                        }
+                        const asset = assets.find((a) => a.id === key);
+                        if (asset) {
+                          loadAssetPreviewSql(asset);
+                        }
+                      }}
+                      treeData={filteredAssets.map((a) => ({
+                        title: <TableTreeTitle fqn={a.fqn} />,
+                        key: a.id,
+                        children: (a.columns || []).map((column) => ({
+                          title: <FieldTreeTitle name={column.name} type={column.type} classification={column.classification || column.suggestLevel} />,
+                          key: `${a.id}:${column.name}`,
+                          isLeaf: true,
+                        })),
+                      }))}
+                    />
+                  </div>
+                  {selectedAsset && (
+                    <div className="ol-sql-workbench-left-footer">
+                      <div className="ol-sql-workbench-selected-asset">
+                        <Text type="secondary" style={{ fontSize: 11 }}>已选</Text>
+                        <span className="mono ol-truncate" title={selectedAsset.fqn}>{selectedAsset.fqn}</span>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ol-ink-3)', marginBottom: 6 }}>
-                        {tpl.category && <Tag style={{ margin: 0, fontSize: 10 }}>{tpl.category}</Tag>}
-                        {tpl.placeholders?.length > 0 && (
-                          <Tooltip title={tpl.placeholders.map((p) => `${p.name}:${p.type}`).join(' · ')}>
-                            <Tag color="warning" style={{ margin: 0, fontSize: 10 }}>{tpl.placeholders.length} 个占位符</Tag>
-                          </Tooltip>
-                        )}
-                        {tpl.ownerName && <span>{tpl.ownerName}</span>}
-                      </div>
-                      <Space size={4} wrap>
-                        {tpl.placeholders?.length > 0 ? (
-                          <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => openRenderDialog(tpl)}>使用</Button>
-                        ) : (
-                          <Button size="small" type="primary" onClick={() => insertTemplateSql(tpl)}>载入</Button>
-                        )}
-                        <Tooltip title="直接插入到编辑器（不替换占位符）">
-                          <Button size="small" onClick={() => insertTemplateSql(tpl)}>插入</Button>
+                      <Space size={4}>
+                        <Tooltip title="插入表名到当前光标">
+                          <Button size="small" icon={<CodeOutlined />} onClick={() => insertSqlText(selectedAsset.fqn)} />
                         </Tooltip>
-                        {isTemplateOwner(tpl) && (
-                          <Popconfirm title="删除这个模板？" okText="删除" cancelText="取消" onConfirm={() => deleteTemplate(tpl)}>
-                            <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-                          </Popconfirm>
-                        )}
+                        <Tooltip title="载入 SELECT 预览 SQL">
+                          <Button size="small" icon={<FileTextOutlined />} onClick={() => loadAssetPreviewSql(selectedAsset)} />
+                        </Tooltip>
                       </Space>
                     </div>
-                  ))}
+                  )}
                 </div>
-              </>
-            )}
-          </SectionCard>
+              )}
+
+              {leftView === 'templates' && (
+                <div className="ol-sql-workbench-left-panel">
+                  <Space className="ol-sql-workbench-left-tools" style={{ width: '100%' }} direction="vertical" size={6}>
+                    <Input.Search
+                      size="small"
+                      allowClear
+                      placeholder="搜索模板名称 / 分类"
+                      value={templateSearch}
+                      onChange={(e) => setTemplateSearch(e.target.value)}
+                    />
+                    <Button size="small" type="dashed" block icon={<PlusOutlined />} onClick={saveCurrentAsTemplate}>
+                      将当前 SQL 存为模板
+                    </Button>
+                  </Space>
+                  <div className="ol-sql-workbench-left-scroll">
+                    {filteredTemplates.length === 0 && (
+                      <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                        {templates.length === 0 ? '暂无模板。点击上方按钮把当前 SQL 沉淀为团队模板。' : `未匹配到模板「${templateSearch}」`}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {filteredTemplates.map((tpl) => (
+                        <div
+                          key={tpl.id}
+                          style={{
+                            padding: 8,
+                            borderRadius: 6,
+                            border: '1px solid var(--ol-line-soft)',
+                            background: 'var(--ol-card)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                            <FileTextOutlined style={{ color: 'var(--ol-brand)', fontSize: 12 }} />
+                            <span style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {tpl.name}
+                            </span>
+                            {isTemplateOwner(tpl)
+                              ? <Tag color="success" style={{ margin: 0, fontSize: 10 }}>我的</Tag>
+                              : <Tag color="processing" style={{ margin: 0, fontSize: 10 }}>共享给我</Tag>}
+                            {tpl.shared && <Tag color="processing" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>共享</Tag>}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ol-ink-3)', marginBottom: 6 }}>
+                            {tpl.category && <Tag style={{ margin: 0, fontSize: 10 }}>{tpl.category}</Tag>}
+                            {tpl.placeholders?.length > 0 && (
+                              <Tooltip title={tpl.placeholders.map((p) => `${p.name}:${p.type}`).join(' · ')}>
+                                <Tag color="warning" style={{ margin: 0, fontSize: 10 }}>{tpl.placeholders.length} 个占位符</Tag>
+                              </Tooltip>
+                            )}
+                            {tpl.ownerName && <span>{tpl.ownerName}</span>}
+                          </div>
+                          <Space size={4} wrap>
+                            {tpl.placeholders?.length > 0 ? (
+                              <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => openRenderDialog(tpl)}>使用</Button>
+                            ) : (
+                              <Button size="small" type="primary" onClick={() => insertTemplateSql(tpl)}>载入</Button>
+                            )}
+                            <Tooltip title="直接插入到编辑器（不替换占位符）">
+                              <Button size="small" onClick={() => insertTemplateSql(tpl)}>插入</Button>
+                            </Tooltip>
+                            {isTemplateOwner(tpl) && (
+                              <Popconfirm title="删除这个模板？" okText="删除" cancelText="取消" onConfirm={() => deleteTemplate(tpl)}>
+                                <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                              </Popconfirm>
+                            )}
+                          </Space>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </SectionCard>
+          </div>
         </Col>
-        <Col xs={24} lg={19}>
+        <Col xs={24} lg={19} className="ol-sql-workbench-main">
           <SectionCard
+            style={{ flex: '0 0 auto' }}
             title={<Space><PlayCircleOutlined style={{ color: 'var(--ol-success)' }} /> SQL 编辑器</Space>}
             icon={<CodeOutlined />}
             subtitle="Monaco Editor"
@@ -1430,9 +1510,13 @@ export default function SqlWorkbench() {
             </div>
           </SectionCard>
 
-          <SectionCard style={{ marginTop: 12 }} padded="none" bodyStyle={{ padding: 0 }}>
-            <div style={{ padding: '0 16px 14px' }}>
-              <Tabs items={tabs} tabBarStyle={{ marginBottom: 12 }} />
+          <SectionCard
+            style={{ marginTop: 12, flex: '1 1 auto', minHeight: 0, overflow: 'visible' }}
+            padded="none"
+            bodyStyle={{ padding: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'visible' }}
+          >
+            <div className="ol-sql-workbench-result-tabs-shell">
+              <Tabs className="ol-sql-workbench-result-tabs" items={tabs} tabBarStyle={{ marginBottom: 12 }} />
             </div>
           </SectionCard>
         </Col>

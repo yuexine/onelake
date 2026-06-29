@@ -45,4 +45,5 @@ public class JobRun {
     private Instant startedAt;
     private Instant finishedAt;
     private UUID triggeredBy;
+    private String triggeredByName;
 }

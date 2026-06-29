@@ -198,19 +198,13 @@ export function usePipelineEditor(dagId: string | undefined) {
 
   const validate = useCallback(async () => {
     if (!dagId) return;
-    try {
-      const result = await PipelineAPI.validate(dagId);
-      setValidation(result);
-      // refresh tasks to pick up compile_status updates
-      const fresh = await PipelineAPI.listTasks(dagId);
-      setTasks(fresh);
-      if (result.valid) message.success('校验通过');
-      else message.warning('校验未通过，请检查节点错误');
-      return result;
-    } catch (err) {
-      message.error(`校验失败: ${(err as Error).message}`);
-    }
-  }, [dagId, message]);
+    const result = await PipelineAPI.validate(dagId);
+    setValidation(result);
+    // refresh tasks to pick up compile_status updates
+    const fresh = await PipelineAPI.listTasks(dagId);
+    setTasks(fresh);
+    return result;
+  }, [dagId]);
 
   const trigger = useCallback(async () => {
     if (!dagId) return;

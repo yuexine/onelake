@@ -197,7 +197,7 @@ public class CatalogController {
 
     @Operation(
         summary = "执行资产维护操作",
-        description = "用途：对湖仓表执行 OPTIMIZE、ANALYZE 等维护动作。前端对接：CatalogAPI.runMaintenance，由 OptimizeCenter 和 TableDetail 调用。"
+        description = "用途：对湖仓表执行 OPTIMIZE、EXPIRE_SNAPSHOTS、REMOVE_ORPHAN_FILES 维护动作。前端对接：CatalogAPI.runMaintenance，由 OptimizeCenter 和 TableDetail 调用。"
     )
     @PostMapping("/assets/{id}/maintenance")
     @PreAuthorize("hasAnyRole('ADMIN','DE')")

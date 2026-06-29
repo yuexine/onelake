@@ -130,6 +130,7 @@ public class CatalogMaintenanceService {
             files == null ? null : files.smallFileCount(),
             files == null ? null : files.totalBytes(),
             smallFileThresholdBytes,
+            smallFileRiskCount,
             risks,
             suggestions.stream().distinct().toList(),
             asset.getLastSyncAt(),

@@ -5,11 +5,17 @@
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
 import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, HistoryOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { DetailPageLayout, ClassificationBadge, SectionCard, StateView } from '../../components';
 import type { AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, DataModel } from '../../types';
 import { CatalogAPI, ModelingAPI } from '../../api';
 import { normalizeCatalogAsset } from './assetAdapter';
+import {
+  maintenanceFreshnessLabel,
+  maintenanceOperationLabels,
+  maintenanceStatusColor,
+  maintenanceStatusLabel,
+} from './maintenanceLabels';
 
 const { Text } = Typography;
 
@@ -32,25 +38,49 @@ function fmtBytes(value?: number) {
   return `${value} B`;
 }
 
-function maintenanceColor(status?: string) {
-  if (status === 'OK') return 'success';
-  if (status === 'CRITICAL') return 'error';
-  return 'warning';
+const allMaintenanceOperations: AssetMaintenanceOperation[] = ['OPTIMIZE', 'EXPIRE_SNAPSHOTS', 'REMOVE_ORPHAN_FILES'];
+const DEFAULT_SMALL_FILE_RISK_COUNT = 10;
+
+type OptimizeRiskLevel = 'critical' | 'warning' | 'info' | 'success';
+
+interface OptimizeRiskRow {
+  key: string;
+  level: OptimizeRiskLevel;
+  risk: string;
+  evidence: string;
+  remedy: string;
+  validation: string;
+  action: ReactNode;
 }
 
-const operationLabels: Record<AssetMaintenanceOperation, string> = {
-  OPTIMIZE: 'Compaction',
-  EXPIRE_SNAPSHOTS: '清理快照',
-  REMOVE_ORPHAN_FILES: '清理孤儿文件',
-};
+function riskLevelColor(level: OptimizeRiskLevel) {
+  if (level === 'critical') return 'error';
+  if (level === 'warning') return 'warning';
+  if (level === 'success') return 'success';
+  return 'processing';
+}
 
-const allMaintenanceOperations: AssetMaintenanceOperation[] = ['OPTIMIZE', 'EXPIRE_SNAPSHOTS', 'REMOVE_ORPHAN_FILES'];
+function hasMaintenanceRisk(maintenance: AssetMaintenanceAssessment | undefined, risk: string) {
+  return Boolean(maintenance?.risks.includes(risk));
+}
+
+function lagText(maintenance: AssetMaintenanceAssessment) {
+  return `${maintenance.freshnessLagMinutes ?? '-'} / ${maintenance.freshnessSlaMinutes} min`;
+}
+
+function smallFileRiskCount(maintenance: AssetMaintenanceAssessment) {
+  return maintenance.smallFileRiskCount ?? DEFAULT_SMALL_FILE_RISK_COUNT;
+}
+
+function smallFileText(maintenance: AssetMaintenanceAssessment) {
+  return `${maintenance.smallFileCount ?? '-'} / ${smallFileRiskCount(maintenance)} 个`;
+}
 
 export default function TableDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { message } = AntdApp.useApp();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [detail, setDetail] = useState<AssetDetail>();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -61,6 +91,7 @@ export default function TableDetail() {
   const [maintenance, setMaintenance] = useState<AssetMaintenanceAssessment>();
   const [maintenanceLoading, setMaintenanceLoading] = useState(false);
   const [maintenanceAction, setMaintenanceAction] = useState<AssetMaintenanceOperation | null>(null);
+  const [pipelineResolving, setPipelineResolving] = useState(false);
 
   const loadAsset = () => {
     if (!id) return;
@@ -173,10 +204,304 @@ export default function TableDetail() {
       loadMaintenance();
       loadAsset();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : `${operationLabels[operation]} 失败`);
+      message.error(e instanceof Error ? e.message : `${maintenanceOperationLabels[operation]} 失败`);
     } finally {
       setMaintenanceAction(null);
     }
+  };
+
+  const targetPipelineModel = (items = models) => items.find((model) => (
+    model.targetFqn === asset.fqn && Boolean(model.orchestrationDagId)
+  ));
+
+  const targetPipelineFallbackPath = () => `/orchestration/pipelines?${new URLSearchParams({
+    targetFqn: asset.fqn,
+  }).toString()}`;
+
+  const openTargetPipeline = async () => {
+    const localModel = targetPipelineModel();
+    if (localModel?.orchestrationDagId) {
+      navigate(`/orchestration/pipelines/${localModel.orchestrationDagId}`);
+      return;
+    }
+
+    setPipelineResolving(true);
+    try {
+      const refreshedModels = await ModelingAPI.listModels({ targetFqn: asset.fqn });
+      setModels(refreshedModels);
+      const matched = targetPipelineModel(refreshedModels);
+      if (matched?.orchestrationDagId) {
+        navigate(`/orchestration/pipelines/${matched.orchestrationDagId}`);
+        return;
+      }
+      message.warning('未找到当前表已绑定的目标流水线，已按目标表过滤流水线列表');
+      navigate(targetPipelineFallbackPath());
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '目标流水线定位失败');
+      navigate(targetPipelineFallbackPath());
+    } finally {
+      setPipelineResolving(false);
+    }
+  };
+  const freshnessRequiresRun = hasMaintenanceRisk(maintenance, 'FRESHNESS_SLA_BREACHED')
+    || hasMaintenanceRisk(maintenance, 'FRESHNESS_UNKNOWN');
+
+  const renderOptimizeTab = () => {
+    if (maintenanceLoading && !maintenance) {
+      return (
+        <SectionCard title="当前表运维诊断" icon={<TableOutlined />}>
+          <StateView state="loading" rows={4} />
+        </SectionCard>
+      );
+    }
+
+    if (!maintenance) {
+      return (
+        <SectionCard title="当前表运维诊断" icon={<TableOutlined />}>
+          <StateView
+            state="error"
+            title="运维状态加载失败"
+            description="未能读取当前资产的 Iceberg 维护状态"
+            onRetry={loadMaintenance}
+          />
+        </SectionCard>
+      );
+    }
+
+    const freshnessBreached = hasMaintenanceRisk(maintenance, 'FRESHNESS_SLA_BREACHED');
+    const freshnessUnknown = hasMaintenanceRisk(maintenance, 'FRESHNESS_UNKNOWN');
+    const metadataUnavailable = hasMaintenanceRisk(maintenance, 'ICEBERG_METADATA_UNAVAILABLE');
+    const smallFileRisk = hasMaintenanceRisk(maintenance, 'SMALL_FILE_RISK');
+    const hasBlockingRisk = freshnessBreached || metadataUnavailable;
+    const primaryTitle = freshnessBreached
+      ? '新鲜度超 SLA 是当前严重风险来源'
+      : metadataUnavailable
+        ? 'Iceberg 元数据暂不可用'
+        : smallFileRisk
+          ? '小文件数量达到优化阈值'
+          : freshnessUnknown
+            ? '缺少最近同步时间'
+            : '当前表暂无阻断性运维风险';
+    const primaryDescription = freshnessBreached
+      ? `已滞后 ${lagText(maintenance)}，需要运行上游采集或 DWD 流水线刷新数据。`
+      : metadataUnavailable
+        ? '当前无法读取 Iceberg $files 元数据，请先确认 Trino、Hive Metastore 和表 FQN 是否可用。'
+        : smallFileRisk
+          ? `小文件数量 ${smallFileText(maintenance)}，达到当前表的小文件风险阈值。`
+          : freshnessUnknown
+            ? '当前资产没有最近同步时间，需先完成一次采集或建模运行并回写 Catalog。'
+            : '评估结果没有命中严重风险；可按需执行存储维护动作。';
+
+    const riskRows: OptimizeRiskRow[] = [];
+
+    if (freshnessBreached) {
+      riskRows.push({
+        key: 'freshness-breached',
+        level: 'critical',
+        risk: '新鲜度超 SLA',
+        evidence: `滞后 ${lagText(maintenance)}，超过 DWD 新鲜度 SLA。`,
+        remedy: '运行上游采集或 DWD 流水线，让成功运行回写最近同步时间。',
+        validation: `刷新评估后滞后时间不超过 ${maintenance.freshnessSlaMinutes} min。`,
+        action: (
+          <Button
+            size="small"
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={pipelineResolving}
+            onClick={openTargetPipeline}
+          >
+            去运行流水线
+          </Button>
+        ),
+      });
+    }
+
+    if (freshnessUnknown) {
+      riskRows.push({
+        key: 'freshness-unknown',
+        level: 'warning',
+        risk: '新鲜度未知',
+        evidence: '当前资产缺少最近同步时间。',
+        remedy: '完成一次采集或 DWD 模型运行，确认 Catalog 收到同步回写。',
+        validation: '刷新评估后出现最近同步时间和明确的新鲜度状态。',
+        action: (
+          <Button size="small" icon={<ThunderboltOutlined />} loading={pipelineResolving} onClick={openTargetPipeline}>
+            查看运行入口
+          </Button>
+        ),
+      });
+    }
+
+    if (metadataUnavailable) {
+      riskRows.push({
+        key: 'metadata-unavailable',
+        level: 'warning',
+        risk: '元数据不可用',
+        evidence: '后端没有读取到 Iceberg $files 统计。',
+        remedy: '检查表是否存在、FQN 是否正确，以及 Trino / Hive Metastore 是否可访问。',
+        validation: '刷新评估后文件数、小文件数和总大小恢复为具体数值。',
+        action: (
+          <Button size="small" icon={<ReloadOutlined />} onClick={loadMaintenance} loading={maintenanceLoading}>
+            刷新评估
+          </Button>
+        ),
+      });
+    }
+
+    if (smallFileRisk) {
+      riskRows.push({
+        key: 'small-file-risk',
+        level: 'warning',
+        risk: '小文件风险',
+        evidence: `小文件 ${smallFileText(maintenance)}，小文件阈值 ${fmtBytes(maintenance.smallFileThresholdBytes)}。`,
+        remedy: '执行 Compaction 合并 Iceberg 小文件。',
+        validation: `刷新评估后小文件数量低于 ${smallFileRiskCount(maintenance)} 个。`,
+        action: (
+          <Button
+            size="small"
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={maintenanceAction === 'OPTIMIZE'}
+            onClick={() => handleMaintenance('OPTIMIZE')}
+          >
+            Compaction
+          </Button>
+        ),
+      });
+    }
+
+    if (riskRows.length === 0) {
+      riskRows.push({
+        key: 'healthy',
+        level: 'success',
+        risk: '未命中风险',
+        evidence: '新鲜度、Iceberg 元数据和小文件数量均未触发风险规则。',
+        remedy: '无需解除风险，可按维护窗口执行快照或孤儿文件清理。',
+        validation: '刷新评估后仍保持维护正常。',
+        action: (
+          <Button size="small" icon={<ReloadOutlined />} onClick={loadMaintenance} loading={maintenanceLoading}>
+            刷新评估
+          </Button>
+        ),
+      });
+    }
+
+    return (
+      <Space direction="vertical" size={14} style={{ width: '100%' }}>
+        <SectionCard
+          title="当前表运维诊断"
+          icon={<TableOutlined />}
+          extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadMaintenance} loading={maintenanceLoading}>刷新评估</Button>}
+        >
+          <div className="ol-maintenance-diagnosis">
+            <div className="ol-maintenance-diagnosis__copy">
+              <Space size={8} wrap>
+                <Tag color={maintenanceStatusColor(maintenance.status)} title={maintenance.status}>
+                  {maintenanceStatusLabel(maintenance.status)}
+                </Tag>
+                {hasBlockingRisk && <Tag color="error">需先解除数据新鲜度/元数据风险</Tag>}
+                {!hasBlockingRisk && smallFileRisk && <Tag color="warning">建议存储优化</Tag>}
+              </Space>
+              <div className="ol-maintenance-diagnosis__title">{primaryTitle}</div>
+              <div className="ol-maintenance-diagnosis__desc">{primaryDescription}</div>
+            </div>
+            <div className="ol-maintenance-diagnosis__action">
+              {freshnessBreached || freshnessUnknown ? (
+                <Button type="primary" icon={<ThunderboltOutlined />} loading={pipelineResolving} onClick={openTargetPipeline}>
+                  去运行流水线
+                </Button>
+              ) : smallFileRisk ? (
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  loading={maintenanceAction === 'OPTIMIZE'}
+                  onClick={() => handleMaintenance('OPTIMIZE')}
+                >
+                  执行 Compaction
+                </Button>
+              ) : (
+                <Button icon={<ReloadOutlined />} onClick={loadMaintenance} loading={maintenanceLoading}>
+                  刷新评估
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div className="ol-maintenance-facts">
+            <div className="ol-maintenance-fact">
+              <span>新鲜度</span>
+              <strong>{maintenanceFreshnessLabel(maintenance.freshnessStatus)}</strong>
+              <em>{lagText(maintenance)}</em>
+            </div>
+            <div className="ol-maintenance-fact">
+              <span>小文件</span>
+              <strong>{maintenance.smallFileCount ?? '-'}</strong>
+              <em>{smallFileRisk ? `达到 ${smallFileRiskCount(maintenance)} 个阈值` : `风险阈值 ${smallFileRiskCount(maintenance)} 个`}</em>
+            </div>
+            <div className="ol-maintenance-fact">
+              <span>文件 / 大小</span>
+              <strong>{maintenance.fileCount ?? '-'}</strong>
+              <em>{fmtBytes(maintenance.totalBytes)}</em>
+            </div>
+            <div className="ol-maintenance-fact">
+              <span>最近同步</span>
+              <strong>{fmtTime(maintenance.lastSyncAt)}</strong>
+              <em>资产同步时间</em>
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard title="风险原因与解除路径" icon={<HistoryOutlined />} flatBody>
+          <Table<OptimizeRiskRow>
+            size="middle"
+            rowKey="key"
+            dataSource={riskRows}
+            pagination={false}
+            columns={[
+              {
+                title: '风险项',
+                dataIndex: 'risk',
+                width: 150,
+                render: (value: string, row) => <Tag color={riskLevelColor(row.level)}>{value}</Tag>,
+              },
+              { title: '判断依据', dataIndex: 'evidence' },
+              { title: '解除方式', dataIndex: 'remedy' },
+              { title: '验证标准', dataIndex: 'validation' },
+              { title: '操作', dataIndex: 'action', width: 150, render: (value: ReactNode) => value },
+            ]}
+          />
+        </SectionCard>
+
+        <SectionCard
+          title="存储维护操作"
+          icon={<ThunderboltOutlined />}
+          subtitle="这些操作处理 Iceberg 文件与元数据维护，不会刷新 DWD 数据新鲜度"
+        >
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space wrap>
+              {allMaintenanceOperations.map((operation) => {
+                const recommended = operation === 'OPTIMIZE' && smallFileRisk;
+                return (
+                  <Button
+                    key={operation}
+                    size="small"
+                    type={recommended ? 'primary' : 'default'}
+                    icon={<ThunderboltOutlined />}
+                    loading={maintenanceAction === operation}
+                    onClick={() => handleMaintenance(operation)}
+                  >
+                    {maintenanceOperationLabels[operation]}
+                  </Button>
+                );
+              })}
+            </Space>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              当前小文件 {smallFileText(maintenance)}；只有达到风险阈值时，Compaction 才会作为解除风险的主操作。
+            </Text>
+          </Space>
+        </SectionCard>
+      </Space>
+    );
   };
 
   const tabs = [
@@ -318,63 +643,17 @@ export default function TableDetail() {
       <SectionCard title="快照管理" icon={<TableOutlined />}>
         <StateView
           state="empty"
-          title="快照能力暂未接入"
-          description="当前后端尚未提供 Iceberg 快照列表、回滚、过期快照清理和孤儿文件清理接口"
+          title="快照列表与回滚暂未接入"
+          description="当前后端尚未提供 Iceberg 快照列表和回滚；过期快照清理、孤儿文件清理已归入优化页的维护动作"
         />
         <Space style={{ marginTop: 12 }}>
-          <Button disabled title="暂未接入快照清理接口">清理过期快照</Button>
-          <Button disabled title="暂未接入孤儿文件清理接口">清理孤儿文件</Button>
+          <Button disabled title="请在优化 Tab 使用清理快照维护动作">清理过期快照</Button>
+          <Button disabled title="请在优化 Tab 使用清理孤儿文件维护动作">清理孤儿文件</Button>
         </Space>
       </SectionCard>
     ) },
     { key: 'optimize', label: '优化', children: (
-      <SectionCard title="存储与优化" icon={<TableOutlined />}>
-        {maintenanceLoading && !maintenance ? (
-          <StateView state="loading" rows={4} />
-        ) : maintenance ? (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Alert
-              type={maintenance.status === 'CRITICAL' ? 'error' : maintenance.status === 'OK' ? 'success' : 'warning'}
-              showIcon
-              message={<Space><span>运维状态</span><Tag color={maintenanceColor(maintenance.status)}>{maintenance.status}</Tag></Space>}
-              description={`文件 ${maintenance.fileCount ?? '-'} / 小文件 ${maintenance.smallFileCount ?? '-'} / 总大小 ${fmtBytes(maintenance.totalBytes)} / SLA ${maintenance.freshnessLagMinutes ?? '-'} min / ${maintenance.freshnessSlaMinutes} min`}
-            />
-            <div>
-              <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>小文件阈值</Text>
-              <div style={{ marginTop: 4 }}>
-                <Tag>{fmtBytes(maintenance.smallFileThresholdBytes)}</Tag>
-                {maintenance.risks.map((risk) => <Tag key={risk} color="warning">{risk}</Tag>)}
-              </div>
-            </div>
-            <div>
-              <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>最近同步</Text>
-              <div style={{ marginTop: 4, fontSize: 13 }}>{fmtTime(maintenance.lastSyncAt)}</div>
-            </div>
-            <Space wrap>
-              {allMaintenanceOperations.map((operation) => (
-                <Button
-                  key={operation}
-                  size="small"
-                  type={maintenance.suggestedOperations.includes(operation) ? 'primary' : 'default'}
-                  icon={<ThunderboltOutlined />}
-                  loading={maintenanceAction === operation}
-                  onClick={() => handleMaintenance(operation)}
-                >
-                  {operationLabels[operation]}
-                </Button>
-              ))}
-              <Button size="small" icon={<ReloadOutlined />} onClick={loadMaintenance} loading={maintenanceLoading}>刷新</Button>
-            </Space>
-          </Space>
-        ) : (
-          <StateView
-            state="error"
-            title="运维状态加载失败"
-            description="未能读取当前资产的 Iceberg 维护状态"
-            onRetry={loadMaintenance}
-          />
-        )}
-      </SectionCard>
+      renderOptimizeTab()
     ) },
     { key: 'quality', label: '质量', children: (
       <SectionCard
@@ -470,6 +749,17 @@ export default function TableDetail() {
       </SectionCard>
     ) },
   ];
+  const requestedTab = searchParams.get('tab');
+  const activeTab = tabs.some((tab) => tab.key === requestedTab) ? requestedTab || undefined : undefined;
+  const handleTabChange = (key: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (key === tabs[0]?.key) {
+      next.delete('tab');
+    } else {
+      next.set('tab', key);
+    }
+    setSearchParams(next, { replace: true });
+  };
 
   return (
     <>
@@ -480,6 +770,8 @@ export default function TableDetail() {
         status={<ClassificationBadge level={asset.classification} />}
         breadcrumb={[{ path: '/lakehouse/tables', label: '分层表管理' }, { label: asset.fqn }]}
         tabs={tabs}
+        activeTab={activeTab}
+        onTabChange={handleTabChange}
         actions={[
           ...(asset.layer === 'ODS' ? [
             <Button
@@ -491,15 +783,27 @@ export default function TableDetail() {
               派生 DWD
             </Button>,
           ] : []),
-          <Button
-            key="opt"
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            loading={maintenanceAction === 'OPTIMIZE'}
-            onClick={() => handleMaintenance('OPTIMIZE')}
-          >
-            立即优化
-          </Button>,
+          freshnessRequiresRun ? (
+            <Button
+              key="run-pipeline"
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              loading={pipelineResolving}
+              onClick={openTargetPipeline}
+            >
+              运行流水线
+            </Button>
+          ) : (
+            <Button
+              key="opt"
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              loading={maintenanceAction === 'OPTIMIZE'}
+              onClick={() => handleMaintenance('OPTIMIZE')}
+            >
+              立即优化
+            </Button>
+          ),
           <Button key="profile" icon={<DatabaseOutlined />} onClick={() => navigate(`/catalog/assets/${asset.id}?from=lakehouse`)}>资产画像</Button>,
           <Button key="api" onClick={() => navigate(`/dataservice/apis/new?sourceFqn=${asset.fqn}`)}>发布为 API</Button>,
           <Button key="add-col" disabled title="暂未接入 Schema 变更接口">加列</Button>,

@@ -16,6 +16,7 @@ public record AssetMaintenanceAssessmentDTO(
     Integer smallFileCount,
     Long totalBytes,
     Long smallFileThresholdBytes,
+    Integer smallFileRiskCount,
     List<String> risks,
     List<String> suggestedOperations,
     Instant lastSyncAt,

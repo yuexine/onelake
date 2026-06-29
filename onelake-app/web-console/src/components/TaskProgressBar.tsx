@@ -162,15 +162,21 @@ export function TaskProgressBar({
 
   return (
     <div
+      className="global-task-bar"
       style={{
         border: '1px solid var(--ol-line-soft)',
         borderRadius: 'var(--ol-radius-lg)',
         background: 'var(--ol-card)',
         boxShadow: 'var(--ol-shadow-e2)',
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: 'min(440px, calc(100vh - 96px))',
+        minHeight: 0,
         overflow: 'hidden',
       }}
     >
       <div
+        className="global-task-bar__header"
         style={{
           minHeight: 44,
           padding: '8px 14px',
@@ -179,6 +185,7 @@ export function TaskProgressBar({
           justifyContent: 'space-between',
           gap: 12,
           borderBottom: '1px solid var(--ol-line-soft)',
+          flexShrink: 0,
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -218,7 +225,17 @@ export function TaskProgressBar({
           <Text type="secondary" style={{ fontSize: 13 }}>暂无运行中任务</Text>
         </div>
       ) : (
-        <div style={{ display: 'grid', gap: 0, padding: '6px 14px 10px' }}>
+        <div
+          className="global-task-bar__list"
+          style={{
+            display: 'grid',
+            gap: 0,
+            minHeight: 0,
+            overflow: 'auto',
+            overscrollBehavior: 'contain',
+            padding: '6px 14px 10px',
+          }}
+        >
           {tasks.map((t) => (
             <div
               key={t.id}
@@ -228,6 +245,7 @@ export function TaskProgressBar({
                 alignItems: 'center',
                 gap: 14,
                 minHeight: 36,
+                minWidth: 620,
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>

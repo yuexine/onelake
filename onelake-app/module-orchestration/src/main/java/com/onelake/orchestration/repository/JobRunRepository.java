@@ -14,5 +14,7 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
 
     Page<JobRun> findByDagIdInOrderByStartedAtDesc(Collection<UUID> dagIds, Pageable pageable);
 
+    Optional<JobRun> findByIdAndDagIdIn(UUID id, Collection<UUID> dagIds);
+
     Optional<JobRun> findFirstByDagIdOrderByStartedAtDesc(UUID dagId);
 }

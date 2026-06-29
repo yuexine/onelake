@@ -122,6 +122,7 @@ export interface JobRun {
   startedAt?: string;
   finishedAt?: string;
   triggeredBy?: UUID;
+  triggeredByName?: string;
 }
 
 export interface DagNode {
@@ -406,6 +407,7 @@ export interface AssetMaintenanceAssessment {
   smallFileCount?: number;
   totalBytes?: number;
   smallFileThresholdBytes: number;
+  smallFileRiskCount: number;
   risks: string[];
   suggestedOperations: AssetMaintenanceOperation[];
   lastSyncAt?: string;

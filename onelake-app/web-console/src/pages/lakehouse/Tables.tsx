@@ -10,6 +10,7 @@ import { ClassificationBadge, PageHeader, SectionCard, StateView } from '../../c
 import type { Asset, AssetMaintenanceAssessment } from '../../types';
 import { CatalogAPI } from '../../api';
 import { normalizeCatalogAssets } from './assetAdapter';
+import { maintenanceRiskLabel, maintenanceStatusColor, maintenanceStatusLabel } from './maintenanceLabels';
 
 const { Text } = Typography;
 
@@ -40,11 +41,12 @@ function fmtTime(value?: string) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-function maintenanceColor(status?: string) {
-  if (status === 'OK') return 'success';
-  if (status === 'CRITICAL') return 'error';
-  if (status === 'WARN') return 'warning';
-  return 'default';
+function governanceFactoryPath(asset: Asset) {
+  return `/lakehouse/governance-factory?${new URLSearchParams({ sourceAssetId: asset.id }).toString()}`;
+}
+
+function sqlWorkbenchPath(asset: Asset) {
+  return `/lakehouse/sql?${new URLSearchParams({ assetId: asset.id, assetFqn: asset.fqn }).toString()}`;
 }
 
 function qualityColor(score?: number) {
@@ -144,7 +146,7 @@ export default function Tables() {
   });
 
   return (
-    <div className="ol-page">
+    <div className="ol-page ol-lakehouse-tables-page">
       <PageHeader
         icon={<ClusterOutlined />}
         title="湖仓分层表"
@@ -158,33 +160,35 @@ export default function Tables() {
         actions={<Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/lakehouse/tables/new')}>新建表</Button>}
       />
 
-      <Row gutter={16}>
+      <Row gutter={16} className="ol-lakehouse-tables-layout">
         <Col xs={24} lg={5}>
-          <SectionCard title="分层 / 业务域" icon={<ClusterOutlined />}>
-            <Tree
-              className="ol-asset-tree"
-              defaultExpandAll
-              treeData={layerTreeData}
-              onSelect={(keys, info) => {
-                const node = info.node;
-                if (node && (node as any).isLeaf && keys[0]) navigate(`/lakehouse/tables/${keys[0]}`);
-                else if (node) setLayer(node.key as string);
-              }}
-            />
-            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px dashed var(--ol-line-soft)' }}>
-              <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>业务域</Text>
+          <div className="ol-lakehouse-tables-sidebar">
+            <SectionCard title="分层 / 业务域" icon={<ClusterOutlined />}>
               <Tree
-                style={{ marginTop: 8 }}
-                treeData={domains.map((d) => ({
-                  title: `${d}${d.endsWith('域') ? '' : '域'}`,
-                  key: d,
-                }))}
-                onSelect={(keys) => keys[0] && setDomain(keys[0] as string)}
+                className="ol-asset-tree"
+                defaultExpandAll
+                treeData={layerTreeData}
+                onSelect={(keys, info) => {
+                  const node = info.node;
+                  if (node && (node as any).isLeaf && keys[0]) navigate(`/lakehouse/tables/${keys[0]}`);
+                  else if (node) setLayer(node.key as string);
+                }}
               />
-            </div>
-          </SectionCard>
+              <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px dashed var(--ol-line-soft)' }}>
+                <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>业务域</Text>
+                <Tree
+                  style={{ marginTop: 8 }}
+                  treeData={domains.map((d) => ({
+                    title: `${d}${d.endsWith('域') ? '' : '域'}`,
+                    key: d,
+                  }))}
+                  onSelect={(keys) => keys[0] && setDomain(keys[0] as string)}
+                />
+              </div>
+            </SectionCard>
+          </div>
         </Col>
-        <Col xs={24} lg={19}>
+        <Col xs={24} lg={19} className="ol-lakehouse-tables-main">
           <SectionCard
             title="表治理清单"
             icon={<TableOutlined />}
@@ -200,6 +204,7 @@ export default function Tables() {
             }
           >
             <Table
+              className="ol-lakehouse-governance-table"
               rowKey="id"
               dataSource={rows}
               loading={loading}
@@ -223,12 +228,25 @@ export default function Tables() {
                 ),
               }}
               size="middle"
+              tableLayout="fixed"
               pagination={{ pageSize: 20, showTotal: (t) => <span className="ol-quiet" style={{ fontSize: 12 }}>共 {t} 条</span> }}
               columns={[
-                { title: '表名', dataIndex: 'fqn', render: (v: string, r: Asset) => (
-                  <Space direction="vertical" size={2}>
-                    <a className="ol-link" onClick={() => navigate(`/lakehouse/tables/${r.id}`)}>{v}</a>
-                    <Text type="secondary" style={{ fontSize: 12 }}>{r.description || LAYER_META[r.layer]?.desc || '-'}</Text>
+                { title: '表名', dataIndex: 'fqn', width: 280, render: (v: string, r: Asset) => (
+                  <Space direction="vertical" size={2} className="ol-lakehouse-table-name-cell">
+                    <a
+                      className="ol-link ol-truncate ol-lakehouse-table-name"
+                      title={v}
+                      onClick={() => navigate(`/lakehouse/tables/${r.id}`)}
+                    >
+                      {v}
+                    </a>
+                    <Text
+                      type="secondary"
+                      className="ol-truncate ol-lakehouse-table-desc"
+                      title={r.description || LAYER_META[r.layer]?.desc || '-'}
+                    >
+                      {r.description || LAYER_META[r.layer]?.desc || '-'}
+                    </Text>
                   </Space>
                 ) },
                 { title: '层 / 域', dataIndex: 'layer', width: 130, render: (l: string, r: Asset) => {
@@ -262,12 +280,19 @@ export default function Tables() {
                 ) },
                 { title: '同步 / 维护', width: 190, render: (_: unknown, r: Asset) => {
                   const item = maintenanceByAssetId.get(r.id);
+                  const maintenanceStatus = item?.status || 'UNKNOWN';
                   return (
                     <Space direction="vertical" size={4}>
                       <Text type="secondary" style={{ fontSize: 12 }}>同步 {fmtTime(r.lastSyncAt || r.syncedAt)}</Text>
                       <Space size={4} wrap>
-                        <Tag color={maintenanceColor(item?.status)} style={{ margin: 0 }}>{item?.status || 'UNKNOWN'}</Tag>
-                        {(item?.risks || []).slice(0, 1).map((risk) => <Tag key={risk} color="warning" style={{ margin: 0 }}>{risk}</Tag>)}
+                        <Tag color={maintenanceStatusColor(maintenanceStatus)} title={maintenanceStatus} style={{ margin: 0 }}>
+                          {maintenanceStatusLabel(maintenanceStatus)}
+                        </Tag>
+                        {(item?.risks || []).slice(0, 1).map((risk) => (
+                          <Tag key={risk} color="warning" title={risk} style={{ margin: 0 }}>
+                            {maintenanceRiskLabel(risk)}
+                          </Tag>
+                        ))}
                       </Space>
                     </Space>
                   );
@@ -281,7 +306,7 @@ export default function Tables() {
                           size="small"
                           type="primary"
                           icon={<BranchesOutlined />}
-                          onClick={() => navigate(`/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=${r.id}`)}
+                          onClick={() => navigate(governanceFactoryPath(r))}
                         >
                           治理成表
                         </Button>
@@ -296,11 +321,11 @@ export default function Tables() {
                     )}
                     <Button size="small" onClick={() => navigate(`/lakehouse/tables/${r.id}`)}>治理详情</Button>
                     <Button size="small" icon={<ThunderboltOutlined />} onClick={() => navigate(`/lakehouse/tables/${r.id}?tab=optimize`)}>优化</Button>
-                    <Button size="small" type="link" onClick={() => navigate('/lakehouse/sql')}>SQL</Button>
+                    <Button size="small" type="link" onClick={() => navigate(sqlWorkbenchPath(r))}>SQL</Button>
                   </Space>
                 ) },
               ]}
-              scroll={{ x: 1180 }}
+              scroll={{ x: 1340 }}
             />
           </SectionCard>
         </Col>

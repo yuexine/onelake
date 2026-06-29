@@ -138,6 +138,7 @@ public class OrchestrationService {
         run.setStatus(DagStatus.QUEUED);
         run.setStartedAt(Instant.now());
         run.setTriggeredBy(TenantContext.getUserId());
+        run.setTriggeredByName(currentTriggerActorName());
         runRepo.save(run);
 
         try {
@@ -207,6 +208,7 @@ public class OrchestrationService {
         run.setStatus(DagStatus.QUEUED);
         run.setStartedAt(Instant.now());
         run.setTriggeredBy(TenantContext.getUserId());
+        run.setTriggeredByName(currentTriggerActorName());
         runRepo.save(run);
 
         // 4. Create TaskRun per valid task. Status is initialized from the data-flow
@@ -406,6 +408,19 @@ public class OrchestrationService {
             .collect(Collectors.toMap(Dag::getId, Function.identity()));
         return runRepo.findByDagIdInOrderByStartedAtDesc(dagById.keySet(), pageable)
             .map(r -> toRunDTO(refreshRunStatus(r), dagById.get(r.getDagId())));
+    }
+
+    @Transactional
+    public JobRunDTO getRun(UUID runId) {
+        List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
+        if (dags.isEmpty()) {
+            throw new BizException(40400, "运行实例不存在");
+        }
+        Map<UUID, Dag> dagById = dags.stream()
+                .collect(Collectors.toMap(Dag::getId, Function.identity()));
+        JobRun run = runRepo.findByIdAndDagIdIn(runId, dagById.keySet())
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        return toRunDTO(refreshRunStatus(run), dagById.get(run.getDagId()));
     }
 
     private void validateDag(String name, Map<String, Object> definition) {
@@ -837,13 +852,33 @@ public class OrchestrationService {
         return value.substring(0, maxLength);
     }
 
+    private String currentTriggerActorName() {
+        String username = TenantContext.getUsername();
+        return StringUtils.hasText(username) ? username.trim() : "system";
+    }
+
+    private String displayTriggerActor(JobRun run) {
+        if (StringUtils.hasText(run.getTriggeredByName())) {
+            return run.getTriggeredByName().trim();
+        }
+        if (run.getTriggeredBy() == null) {
+            return "system";
+        }
+        UUID currentUser = TenantContext.getUserId();
+        String currentUsername = TenantContext.getUsername();
+        if (currentUser != null && currentUser.equals(run.getTriggeredBy()) && StringUtils.hasText(currentUsername)) {
+            return currentUsername.trim();
+        }
+        return "未知用户";
+    }
+
     private JobRunDTO toRunDTO(JobRun r, Dag dag) {
         return new JobRunDTO(r.getId(), r.getDagId(),
             dag == null ? null : dag.getName(),
             dag == null ? null : dag.getDagsterJob(),
             r.getDagsterRunId(),
             r.getTriggerType().name(), r.getStatus().name(),
-            r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy());
+            r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r));
     }
 
     private record TriggerReadiness(boolean triggerable, String reason) {}

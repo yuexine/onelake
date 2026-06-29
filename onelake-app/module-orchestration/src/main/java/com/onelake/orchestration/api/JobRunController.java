@@ -10,9 +10,12 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/orchestration/runs")
@@ -33,5 +36,15 @@ public class JobRunController {
         int pageNumber = Math.max(page, 0);
         int pageSize = Math.min(Math.max(size, 1), 100);
         return ApiResponse.ok(service.listRuns(PageRequest.of(pageNumber, pageSize)));
+    }
+
+    @Operation(
+        summary = "获取运行实例详情",
+        description = "用途：按 runId 返回单次流水线运行的概览信息。前端对接：OrchestrationAPI.getRun，由运行实例详情页加载。"
+    )
+    @GetMapping("/{id}")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<JobRunDTO> get(@PathVariable UUID id) {
+        return ApiResponse.ok(service.getRun(id));
     }
 }

@@ -10,14 +10,16 @@ import {
 import { PageHeader, SectionCard, StatCard, StateView, useAsyncAction, DangerConfirm } from '../../components';
 import { CatalogAPI } from '../../api';
 import type { AssetMaintenanceAssessment, AssetMaintenanceOperation } from '../../types';
+import {
+  maintenanceFreshnessColor,
+  maintenanceFreshnessLabel,
+  maintenanceOperationLabels,
+  maintenanceRiskLabel,
+  maintenanceStatusColor,
+  maintenanceStatusLabel,
+} from './maintenanceLabels';
 
 const { Text } = Typography;
-
-const operationLabels: Record<AssetMaintenanceOperation, string> = {
-  OPTIMIZE: 'Compaction',
-  EXPIRE_SNAPSHOTS: '清理快照',
-  REMOVE_ORPHAN_FILES: '清理孤儿文件',
-};
 
 function fmtBytes(value?: number) {
   if (value == null) return '-';
@@ -25,12 +27,6 @@ function fmtBytes(value?: number) {
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${value} B`;
-}
-
-function statusColor(status: string) {
-  if (status === 'OK') return 'success';
-  if (status === 'CRITICAL') return 'error';
-  return 'warning';
 }
 
 export default function OptimizeCenter() {
@@ -77,7 +73,7 @@ export default function OptimizeCenter() {
       message.success(result.message);
       await loadAssessments();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : `${operationLabels[operation]} 失败`);
+      message.error(e instanceof Error ? e.message : `${maintenanceOperationLabels[operation]} 失败`);
     } finally {
       setRunningKey(null);
     }
@@ -106,7 +102,7 @@ export default function OptimizeCenter() {
       />
 
       <div className="ol-grid-stats">
-        <StatCard icon={<ThunderboltOutlined />} intent="warning" label="待优化表" value={stats.pending} suffix="张" hint="DWD 运维评估非 OK" />
+        <StatCard icon={<ThunderboltOutlined />} intent="warning" label="待优化表" value={stats.pending} suffix="张" hint="DWD 运维状态需关注或严重风险" />
         <StatCard icon={<FileSearchOutlined />} intent="error" label="小文件" value={stats.smallFiles} suffix="个" hint="低于阈值的 Iceberg data files" />
         <StatCard icon={<HddOutlined />} intent="info" label="DWD 数据量" value={fmtBytes(stats.totalBytes)} hint="来自 Iceberg $files" />
         <StatCard icon={<CloudOutlined />} intent="success" label="SLA 违约" value={stats.freshnessBreached} suffix="张" hint="DWD 新鲜度超过 1h" />
@@ -126,19 +122,23 @@ export default function OptimizeCenter() {
             pagination={false}
             columns={[
               { title: '表', dataIndex: 'fqn', render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text> },
-              { title: '状态', dataIndex: 'status', width: 110, render: (v: string) => <Tag color={statusColor(v)}>{v}</Tag> },
+              { title: '状态', dataIndex: 'status', width: 110, render: (v: string) => (
+                <Tag color={maintenanceStatusColor(v)} title={v}>{maintenanceStatusLabel(v)}</Tag>
+              ) },
               { title: '文件', dataIndex: 'fileCount', align: 'right' as const, render: (v?: number) => v ?? '-' },
               { title: '小文件', dataIndex: 'smallFileCount', align: 'right' as const, render: (v?: number) => v ? <Tag color="warning">{v}</Tag> : (v ?? '-') },
               { title: '大小', dataIndex: 'totalBytes', align: 'right' as const, render: (v?: number) => fmtBytes(v) },
               { title: '新鲜度', dataIndex: 'freshnessLagMinutes', render: (_: unknown, r) => (
                 <Space size={6}>
-                  <Tag color={r.freshnessStatus === 'BREACHED' ? 'error' : r.freshnessStatus === 'OK' ? 'success' : 'default'}>
-                    {r.freshnessStatus}
+                  <Tag color={maintenanceFreshnessColor(r.freshnessStatus)} title={r.freshnessStatus}>
+                    {maintenanceFreshnessLabel(r.freshnessStatus)}
                   </Tag>
                   <span className="mono tnum">{r.freshnessLagMinutes ?? '-'} / {r.freshnessSlaMinutes} min</span>
                 </Space>
               ) },
-              { title: '风险', dataIndex: 'risks', render: (risks: string[]) => risks.length ? risks.map((risk) => <Tag key={risk}>{risk}</Tag>) : '-' },
+              { title: '风险', dataIndex: 'risks', render: (risks: string[]) => risks.length ? risks.map((risk) => (
+                <Tag key={risk} title={risk}>{maintenanceRiskLabel(risk)}</Tag>
+              )) : '-' },
               { title: '操作', width: 240, render: (_: unknown, item) => {
                 const operations = item.suggestedOperations.length ? item.suggestedOperations : (['OPTIMIZE'] as AssetMaintenanceOperation[]);
                 return (
@@ -153,7 +153,7 @@ export default function OptimizeCenter() {
                         loading={runningKey === `${item.assetId}-${operation}`}
                         onClick={() => triggerMaintenance(item, operation)}
                       >
-                        {operationLabels[operation]}
+                        {maintenanceOperationLabels[operation]}
                       </Button>
                     ))}
                   </Space>

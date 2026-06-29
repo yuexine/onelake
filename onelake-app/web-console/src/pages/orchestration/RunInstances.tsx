@@ -4,13 +4,14 @@
  * <p>P4: supports {@code ?pipelineId=} (alias of {@code ?dagId=}) per design doc §4.1,
  * plus expandable row showing per-task task_run status from PipelineAPI.listTaskRuns.
  */
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { Alert, App as AntApp, Table, Tag, Space, Button, Typography } from 'antd';
-import { ReloadOutlined, HistoryOutlined } from '@ant-design/icons';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from 'react';
+import { Alert, App as AntApp, Descriptions, Table, Tag, Space, Button, Typography } from 'antd';
+import { ArrowLeftOutlined, ReloadOutlined, HistoryOutlined, UpOutlined } from '@ant-design/icons';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
-import { OrchestrationAPI, PipelineAPI } from '../../api';
-import type { JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRun } from '../../types';
+import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
+import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRun } from '../../types';
+import { normalizeCatalogAssets } from '../lakehouse/assetAdapter';
 
 const { Text } = Typography;
 
@@ -25,6 +26,19 @@ function formatDuration(run: JobRun) {
   if (!Number.isFinite(durationMs) || durationMs < 0) return '-';
   if (durationMs < 60_000) return `${Math.max(1, Math.round(durationMs / 1000))}s`;
   return `${(durationMs / 60_000).toFixed(1)}m`;
+}
+
+function displayRunId(run: JobRun) {
+  return run.dagsterRunId || run.id;
+}
+
+function triggerActorName(run: JobRun) {
+  return run.triggeredByName || (run.triggeredBy ? '未知用户' : 'system');
+}
+
+function triggerActorTitle(run: JobRun) {
+  if (!run.triggeredBy) return triggerActorName(run);
+  return `${triggerActorName(run)} · ${run.triggeredBy}`;
 }
 
 type RunDisplayStatus = TaskRun['status'] | 'NOT_STARTED' | 'BLOCKED';
@@ -119,6 +133,130 @@ function statusTone(status: RunDisplayStatus) {
 function artifactText(path?: string) {
   if (!path) return '-';
   return path.replace(/^table:/, '').replace(/^quality:/, '');
+}
+
+function artifactTableFqn(path?: string) {
+  const match = path?.trim().match(/^table:(.+)$/i);
+  return match?.[1]?.trim();
+}
+
+function normalizeFqnKey(fqn?: string) {
+  return (fqn || '').trim().toLowerCase();
+}
+
+function fqnLookupKeys(fqn?: string) {
+  const key = normalizeFqnKey(fqn);
+  if (!key) return [];
+  const parts = key.split('.').filter(Boolean);
+  const shortKey = parts.length > 2 ? parts.slice(-2).join('.') : key;
+  return [...new Set([key, shortKey])];
+}
+
+type AssetByFqn = Map<string, Asset>;
+
+function buildAssetByFqn(assets: Asset[]) {
+  const map: AssetByFqn = new Map();
+  assets.forEach((asset) => {
+    fqnLookupKeys(asset.fqn).forEach((key) => {
+      if (!map.has(key)) map.set(key, asset);
+    });
+  });
+  return map;
+}
+
+function findAssetByFqn(assetByFqn: AssetByFqn, fqn: string) {
+  for (const key of fqnLookupKeys(fqn)) {
+    const asset = assetByFqn.get(key);
+    if (asset) return asset;
+  }
+  return undefined;
+}
+
+function TableFqnLink({
+  fqn,
+  assetByFqn,
+  compact = false,
+}: {
+  fqn: string;
+  assetByFqn: AssetByFqn;
+  compact?: boolean;
+}) {
+  const navigate = useNavigate();
+  const asset = findAssetByFqn(assetByFqn, fqn);
+  const textStyle: CSSProperties = {
+    display: compact ? 'block' : 'inline-block',
+    maxWidth: compact ? '100%' : 260,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 11,
+    verticalAlign: 'bottom',
+  };
+
+  if (!asset) {
+    return (
+      <Text code ellipsis={{ tooltip: fqn }} style={textStyle}>
+        {fqn}
+      </Text>
+    );
+  }
+
+  const path = `/lakehouse/tables/${encodeURIComponent(asset.id)}`;
+  const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    navigate(path);
+  };
+
+  return (
+    <a
+      className="ol-link"
+      href={path}
+      title={`打开分层表详情：${asset.fqn}`}
+      onClick={handleClick}
+      style={textStyle}
+    >
+      {fqn}
+    </a>
+  );
+}
+
+function ArtifactPathValue({
+  path,
+  assetByFqn,
+  compact = false,
+  stripPrefix = false,
+}: {
+  path?: string;
+  assetByFqn: AssetByFqn;
+  compact?: boolean;
+  stripPrefix?: boolean;
+}) {
+  const tableFqn = artifactTableFqn(path);
+  if (tableFqn) {
+    return <TableFqnLink fqn={tableFqn} assetByFqn={assetByFqn} compact={compact} />;
+  }
+
+  const text = stripPrefix ? artifactText(path) : path;
+  return (
+    <Text
+      code
+      ellipsis={{ tooltip: text || '-' }}
+      style={{
+        display: compact ? 'block' : 'inline-block',
+        maxWidth: compact ? '100%' : 320,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        fontSize: 11,
+      }}
+    >
+      {text || '-'}
+    </Text>
+  );
 }
 
 function edgeNodeName(key: string, taskByKey: Map<string, PipelineTask>) {
@@ -262,10 +400,12 @@ function RunTaskGraph({
   rows,
   tasks,
   edges,
+  assetByFqn,
 }: {
   rows: TaskRunDisplayRow[];
   tasks: PipelineTask[];
   edges: PipelineTaskEdge[];
+  assetByFqn: AssetByFqn;
 }) {
   const taskByKey = useMemo(() => new Map(tasks.map((task) => [task.taskKey, task])), [tasks]);
   const levels = useMemo(() => taskLevels(tasks, edges), [tasks, edges]);
@@ -460,7 +600,7 @@ function RunTaskGraph({
             const pos = positions.get(node.key);
             if (!pos) return null;
             const borderColor = statusTone(node.row.status);
-            const target = node.task?.targetFqn || artifactText(node.row.run?.artifactPath);
+            const targetFqn = node.task?.targetFqn || artifactTableFqn(node.row.run?.artifactPath);
             const degree = degreeByKey.get(node.key) || { in: 0, out: 0 };
             const nodeStyle: CSSProperties = {
               position: 'absolute',
@@ -498,9 +638,16 @@ function RunTaskGraph({
                   </Space>
                 </div>
                 <div>
-                  <Text code ellipsis style={{ display: 'block', fontSize: 11 }}>
-                    {target}
-                  </Text>
+                  {targetFqn ? (
+                    <TableFqnLink fqn={targetFqn} assetByFqn={assetByFqn} compact />
+                  ) : (
+                    <ArtifactPathValue
+                      path={node.row.run?.artifactPath}
+                      assetByFqn={assetByFqn}
+                      compact
+                      stripPrefix
+                    />
+                  )}
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     输入 {degree.in} · 输出 {degree.out} · 行数 {node.row.run?.rowsWritten == null ? '-' : node.row.run.rowsWritten.toLocaleString()}
                   </Text>
@@ -517,6 +664,7 @@ function RunTaskGraph({
 export default function RunInstances() {
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
+  const { runId: routeRunId } = useParams<{ runId: string }>();
   const [searchParams] = useSearchParams();
   const dagIdFilter = searchParams.get('dagId') || searchParams.get('pipelineId') || '';
   const [runs, setRuns] = useState<JobRun[]>([]);
@@ -525,6 +673,10 @@ export default function RunInstances() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [detailRun, setDetailRun] = useState<JobRun | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [expandedRunIds, setExpandedRunIds] = useState<string[]>([]);
 
   const loadRuns = (nextPage = page, nextSize = pageSize) => {
     setLoading(true);
@@ -547,14 +699,39 @@ export default function RunInstances() {
       .finally(() => setLoading(false));
   };
 
+  const loadRunDetail = () => {
+    if (!routeRunId) return;
+    setDetailLoading(true);
+    setDetailError(null);
+    OrchestrationAPI.getRun(routeRunId)
+      .then(setDetailRun)
+      .catch((e) => {
+        const msg = e.message || '运行详情加载失败';
+        setDetailError(msg);
+        message.error(msg);
+      })
+      .finally(() => setDetailLoading(false));
+  };
+
   useEffect(() => {
+    if (routeRunId) return;
     loadRuns(0, pageSize);
-  }, [dagIdFilter]);
+  }, [dagIdFilter, routeRunId]);
+
+  useEffect(() => {
+    if (!routeRunId) return;
+    loadRunDetail();
+  }, [routeRunId]);
 
   const visibleRuns = useMemo(
     () => (dagIdFilter ? runs.filter((run) => run.dagId === dagIdFilter) : runs),
     [dagIdFilter, runs],
   );
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleRuns.map((run) => run.id));
+    setExpandedRunIds((keys) => keys.filter((key) => visibleIds.has(key)));
+  }, [visibleRuns]);
 
   const counts = useMemo(() => ({
     total: visibleRuns.length,
@@ -562,6 +739,80 @@ export default function RunInstances() {
     failed: visibleRuns.filter((r) => r.status === 'FAILED').length,
     cron: visibleRuns.filter((r) => r.triggerType === 'CRON').length,
   }), [visibleRuns]);
+
+  if (routeRunId) {
+    return (
+      <div className="ol-page">
+        <PageHeader
+          icon={<HistoryOutlined />}
+          title="运行详情"
+          subtitle={<span className="ol-chip">编排 · 运行实例</span>}
+          description={detailRun ? `${detailRun.dagName || detailRun.dagId} 的单次运行观测` : '查看单次运行的概览、任务拓扑和节点状态'}
+          meta={detailRun ? [
+            { label: '状态', value: detailRun.status },
+            { label: '触发方式', value: detailRun.triggerType },
+            { label: '触发人', value: triggerActorName(detailRun) },
+            { label: '耗时', value: formatDuration(detailRun) },
+          ] : []}
+          actions={(
+            <Space size={8} wrap>
+              <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/orchestration/runs')}>返回列表</Button>
+              {detailRun?.dagId && (
+                <Button onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}`)}>打开流水线</Button>
+              )}
+              <Button icon={<ReloadOutlined />} onClick={loadRunDetail} loading={detailLoading}>刷新</Button>
+            </Space>
+          )}
+        />
+
+        {detailLoading && !detailRun && (
+          <SectionCard title="运行概览" icon={<HistoryOutlined />}>
+            <StateView state="loading" rows={4} />
+          </SectionCard>
+        )}
+        {detailError && (
+          <SectionCard title="运行概览" icon={<HistoryOutlined />}>
+            <StateView
+              state="error"
+              title="运行详情加载失败"
+              description={detailError}
+              onRetry={loadRunDetail}
+            />
+          </SectionCard>
+        )}
+        {detailRun && (
+          <>
+            <SectionCard title="运行概览" icon={<HistoryOutlined />}>
+              <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} bordered>
+                <Descriptions.Item label="Run ID">
+                  <Text code copyable style={{ wordBreak: 'break-all' }}>{displayRunId(detailRun)}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="流水线">
+                  <a className="ol-link" onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}`)}>
+                    {detailRun.dagName || detailRun.dagId}
+                  </a>
+                </Descriptions.Item>
+                <Descriptions.Item label="Dagster Job">{detailRun.dagsterJob || '-'}</Descriptions.Item>
+                <Descriptions.Item label="触发方式">{detailRun.triggerType}</Descriptions.Item>
+                <Descriptions.Item label="状态"><StatusBadge status={detailRun.status} /></Descriptions.Item>
+                <Descriptions.Item label="触发人">
+                  <span title={triggerActorTitle(detailRun)}>{triggerActorName(detailRun)}</span>
+                </Descriptions.Item>
+                <Descriptions.Item label="开始时间">{formatDate(detailRun.startedAt)}</Descriptions.Item>
+                <Descriptions.Item label="结束时间">{formatDate(detailRun.finishedAt)}</Descriptions.Item>
+                <Descriptions.Item label="耗时">{formatDuration(detailRun)}</Descriptions.Item>
+              </Descriptions>
+            </SectionCard>
+            <SectionCard title="任务拓扑与节点状态" icon={<HistoryOutlined />} flatBody>
+              <div style={{ padding: 12 }}>
+                <TaskRunsPanel runId={detailRun.id} dagId={detailRun.dagId} />
+              </div>
+            </SectionCard>
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="ol-page">
@@ -599,7 +850,14 @@ export default function RunInstances() {
           dataSource={visibleRuns}
           loading={loading}
           expandable={{
-            expandedRowRender: (run: JobRun) => <TaskRunsPanel runId={run.id} dagId={run.dagId} />,
+            expandedRowKeys: expandedRunIds,
+            onExpand: (expanded, run) => setExpandedRunIds(expanded ? [run.id] : []),
+            expandedRowRender: (run: JobRun) => (
+              <ExpandedTaskRunsPanel
+                run={run}
+                onCollapse={() => setExpandedRunIds((keys) => keys.filter((key) => key !== run.id))}
+              />
+            ),
             rowExpandable: (record) => Boolean(record.dagId),
           }}
           locale={{
@@ -621,7 +879,19 @@ export default function RunInstances() {
             onChange: (nextPage, nextPageSize) => loadRuns(nextPage - 1, nextPageSize),
           }}
           columns={[
-            { title: 'Run ID', render: (_: unknown, r: JobRun) => <Text code style={{ fontSize: 12 }}>{r.dagsterRunId || r.id}</Text> },
+            {
+              title: 'Run ID',
+              width: 220,
+              render: (_: unknown, r: JobRun) => (
+                <Text
+                  code
+                  ellipsis={{ tooltip: displayRunId(r) }}
+                  style={{ display: 'block', maxWidth: 196, fontSize: 12 }}
+                >
+                  {displayRunId(r)}
+                </Text>
+              ),
+            },
             { title: '流水线', render: (_: unknown, r: JobRun) => (
               <div>
                 <a className="ol-link" onClick={() => navigate(`/orchestration/pipelines/${r.dagId}`)}>{r.dagName || r.dagId}</a>
@@ -639,17 +909,72 @@ export default function RunInstances() {
             { title: '开始', dataIndex: 'startedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatDate(t)}</span> },
             { title: '结束', dataIndex: 'finishedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatDate(t)}</span> },
             { title: '耗时', width: 90, render: (_: unknown, r: JobRun) => <Tag style={{ margin: 0 }}>{formatDuration(r)}</Tag> },
-            { title: '触发人', dataIndex: 'triggeredBy', width: 140, render: (b?: string) => (
-              <span style={{ fontSize: 12, color: b ? 'var(--ol-ink)' : 'var(--ol-ink-3)' }}>{b || 'system'}</span>
+            { title: '触发人', width: 120, render: (_: unknown, r: JobRun) => (
+              <span title={triggerActorTitle(r)} style={{ fontSize: 12, color: 'var(--ol-ink)' }}>{triggerActorName(r)}</span>
             ) },
-            { title: '操作', width: 120, render: (_: unknown, r: JobRun) => (
+            { title: '操作', width: 190, render: (_: unknown, r: JobRun) => (
               <Space>
+                <Button size="small" type="link" onClick={() => navigate(`/orchestration/runs/${r.id}`)}>查看详情</Button>
                 <Button size="small" type="link" onClick={() => navigate(`/orchestration/pipelines/${r.dagId}`)}>打开流水线</Button>
               </Space>
             ) },
           ]}
         />
       </SectionCard>
+    </div>
+  );
+}
+
+function ExpandedTaskRunsPanel({ run, onCollapse }: { run: JobRun; onCollapse: () => void }) {
+  return (
+    <div
+      className="orchestration-run-expanded-panel"
+      style={{
+        border: '1px solid var(--ol-line-soft)',
+        borderRadius: 8,
+        background: 'var(--ol-card)',
+        boxShadow: 'inset 0 1px 0 rgba(15, 23, 42, 0.03)',
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: 'min(72vh, 680px)',
+        minHeight: 0,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        className="orchestration-run-expanded-panel__header"
+        style={{
+          alignItems: 'center',
+          background: 'var(--ol-fill-soft)',
+          borderBottom: '1px solid var(--ol-line-soft)',
+          display: 'flex',
+          gap: 12,
+          justifyContent: 'space-between',
+          padding: '10px 12px',
+          flexShrink: 0,
+        }}
+      >
+        <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+          <Text strong style={{ fontSize: 13 }}>任务运行明细</Text>
+          <Text type="secondary" ellipsis style={{ maxWidth: 720, fontSize: 12 }}>
+            {run.dagName || run.dagId} · {displayRunId(run)} · {formatDate(run.startedAt)}
+          </Text>
+        </Space>
+        <Button size="small" icon={<UpOutlined />} onClick={onCollapse}>
+          收起
+        </Button>
+      </div>
+      <div
+        className="orchestration-run-expanded-panel__body"
+        style={{
+          minHeight: 0,
+          overflow: 'auto',
+          overscrollBehavior: 'contain',
+          padding: 12,
+        }}
+      >
+        <TaskRunsPanel runId={run.id} dagId={run.dagId} />
+      </div>
     </div>
   );
 }
@@ -662,6 +987,7 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
   const [taskRuns, setTaskRuns] = useState<TaskRun[] | null>(null);
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
   const [edges, setEdges] = useState<PipelineTaskEdge[]>([]);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -670,18 +996,24 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
       PipelineAPI.listTaskRuns(dagId, runId),
       PipelineAPI.listTasks(dagId),
       PipelineAPI.listEdges(dagId),
+      CatalogAPI.listAssets()
+        .then(normalizeCatalogAssets)
+        .catch(() => []),
     ])
-      .then(([runs, taskDefs, edgeDefs]) => {
+      .then(([runs, taskDefs, edgeDefs, catalogAssets]) => {
         if (cancelled) return;
         setTaskRuns(runs);
         setTasks(taskDefs);
         setEdges(edgeDefs);
+        setAssets(catalogAssets);
       })
       .catch((e) => !cancelled && setError(e.message || 'task_run 加载失败'));
     return () => {
       cancelled = true;
     };
   }, [runId, dagId]);
+
+  const assetByFqn = useMemo(() => buildAssetByFqn(assets), [assets]);
 
   if (error) {
     return <Alert type="info" showIcon message={error} />;
@@ -723,11 +1055,12 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
           description="下方仍按流水线定义展示完整拓扑，便于确认上游、下游和产物链路。"
         />
       )}
-      <RunTaskGraph rows={rows} tasks={tasks} edges={edges} />
+      <RunTaskGraph rows={rows} tasks={tasks} edges={edges} assetByFqn={assetByFqn} />
       <Table<TaskRunDisplayRow>
         rowKey="id"
         dataSource={rows}
         pagination={false}
+        scroll={{ x: 1180 }}
         size="small"
         columns={[
         {
@@ -780,7 +1113,11 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
           width: 210,
           render: (_: unknown, row: TaskRunDisplayRow) => {
             const task = row.task || taskByKey.get(row.taskKey);
-            return task?.targetFqn ? <Text code style={{ fontSize: 11 }}>{task.targetFqn}</Text> : '-';
+            return task?.targetFqn ? (
+              <TableFqnLink fqn={task.targetFqn} assetByFqn={assetByFqn} />
+            ) : (
+              '-'
+            );
           },
         },
         {
@@ -800,14 +1137,9 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
         },
         {
           title: '产物',
-          render: (_: unknown, row: TaskRunDisplayRow) =>
-            row.run?.artifactPath ? (
-              <Text code style={{ fontSize: 11 }}>
-                {row.run.artifactPath}
-              </Text>
-            ) : (
-              '-'
-            ),
+          render: (_: unknown, row: TaskRunDisplayRow) => (
+            <ArtifactPathValue path={row.run?.artifactPath} assetByFqn={assetByFqn} />
+          ),
         },
         {
           title: '错误',

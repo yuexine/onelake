@@ -5,7 +5,7 @@
  */
 import {
   Row, Col, Space, Button, Select, Tag, Typography, Drawer, Form, Input, Alert, Modal,
-  App as AntApp, Checkbox, InputNumber,
+  App as AntApp, Checkbox, InputNumber, Collapse,
 } from 'antd';
 import {
   PlayCircleOutlined, SaveOutlined, CheckCircleOutlined, WarningOutlined,
@@ -17,6 +17,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ClassificationBadge, PageHeader, SectionCard } from '../../components';
 import { OperatorAPI, OrchestrationAPI } from '../../api';
 import type { Dag, Operator, OperatorManifest, OperatorValidationResult } from '../../types';
+import GovernanceFactory from '../lakehouse/GovernanceFactory';
 
 const { Text, Title } = Typography;
 
@@ -152,8 +153,32 @@ const INITIAL_EDGES: Edge[] = [
   { id: 'e3', from: 'n3', to: 'n4', sourcePort: 'out', targetPort: 'in', valid: true },
 ];
 
+const NODE_CARD_WIDTH = 168;
+const NODE_CARD_HEIGHT = 92;
+const NODE_PORT_TOP = 24;
+const CANVAS_BASE_WIDTH = 1440;
+const CANVAS_BASE_HEIGHT = 720;
+const SPARK_GOVERNANCE_MODE = 'SPARK_GOVERNANCE';
+const SPARK_GOVERNANCE_OPERATOR_REF = 'govern.drop_required_missing';
+const SPARK_GOVERNANCE_NODE_NAME = 'DWD Spark 治理';
+const SPARK_GOVERNANCE_DRAWER_TITLE = 'DWD Spark 治理设计器';
+const CANVAS_OPERATOR_CATEGORIES = new Set(['INPUT', 'TRANSFORM', 'GOVERN', 'AGG', 'JOIN', 'QUALITY_GATE', 'OUTPUT']);
+
+function operatorUsageScope(operator: Operator) {
+  if (operator.category === 'QUALITY_GATE') return 'QUALITY_ASSERTION';
+  if (operator.category === 'STANDARD' || operator.category === 'MASK' || operator.category === 'ENCRYPT') return 'FIELD_PROCESSOR';
+  if (operator.category === 'INPUT' || operator.category === 'OUTPUT') return 'PIPELINE_STEP';
+  return 'MODEL_RECIPE';
+}
+
+function isFieldGovernanceNode(node?: Node | null) {
+  return node?.config?.governanceMode === SPARK_GOVERNANCE_MODE
+    || node?.config?.modelKind === 'DWD_SPARK_GOVERNANCE';
+}
+
 function inferredOperator(node: Node) {
   if (node.operatorRef) return node.operatorRef;
+  if (isFieldGovernanceNode(node)) return SPARK_GOVERNANCE_OPERATOR_REF;
   if (node.type === 'input-table' || node.type === 'INPUT') return 'input.ods_table';
   if (node.type === 'clean' || node.type === 'GOVERN') return 'govern.drop_required_missing';
   if (node.type === 'mask' || node.type === 'MASK') return 'mask.partial';
@@ -170,14 +195,18 @@ export default function DagCanvas() {
   const navigate = useNavigate();
   const incoming = (location.state || {}) as { dag?: Dag; sql?: string };
   const routeDagId = id && id !== 'new' && !id.startsWith('p-') ? id : undefined;
+  const query = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const template = query.get('template');
+  const templateSourceAssetId = query.get('sourceAssetId') || '';
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const templateAppliedRef = useRef(false);
   const [env, setEnv] = useState('dev');
   const [pipelineName, setPipelineName] = useState('order_pipeline');
   const [savedDagId, setSavedDagId] = useState<string | undefined>(routeDagId);
   const [nodes, setNodes] = useState<Node[]>(INITIAL_NODES);
   const [edges, setEdges] = useState<Edge[]>(INITIAL_EDGES);
-  const [selected, setSelected] = useState<Node | null>(INITIAL_NODES[2]);
+  const [selected, setSelected] = useState<Node | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [versionOpen, setVersionOpen] = useState(false);
   const [validateOpen, setValidateOpen] = useState(false);
@@ -190,10 +219,11 @@ export default function DagCanvas() {
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const [pendingConnection, setPendingConnection] = useState<ConnectionState | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [fieldGovernanceOpen, setFieldGovernanceOpen] = useState(false);
 
   const operatorGroups = useMemo(() => {
     const groups = new Map<string, Operator[]>();
-    marketOperators.forEach((operator) => {
+    marketOperators.filter((operator) => CANVAS_OPERATOR_CATEGORIES.has(operator.category)).forEach((operator) => {
       const category = operator.category || 'TRANSFORM';
       groups.set(category, [...(groups.get(category) || []), operator]);
     });
@@ -214,6 +244,10 @@ export default function DagCanvas() {
 
   const selectedOperatorRef = selected ? selected.operatorRef || inferredOperator(selected) : undefined;
   const selectedOperator = selectedOperatorRef ? operatorCatalog.get(selectedOperatorRef) : undefined;
+  const selectedIsFieldGovernance = isFieldGovernanceNode(selected);
+  const selectedGovernanceSourceAssetId = selectedIsFieldGovernance && typeof selected?.config?.sourceAssetId === 'string'
+    ? selected.config.sourceAssetId
+    : templateSourceAssetId;
   const selectedParamFields = useMemo(
     () => paramFieldsFromManifest(selectedOperator?.manifest),
     [selectedOperator?.manifest],
@@ -298,13 +332,84 @@ export default function DagCanvas() {
   }, []);
 
   useEffect(() => {
+    if (templateAppliedRef.current || routeDagId || incoming.dag || template !== 'ods-dwd') {
+      return;
+    }
+    templateAppliedRef.current = true;
+    const inputNode: Node = {
+      id: 'ods-input',
+      type: 'INPUT',
+      name: 'ODS 源表',
+      x: 80,
+      y: 120,
+      operatorRef: 'input.ods_table',
+      operatorVersion: '1.0.0',
+      config: { sourceAssetId: templateSourceAssetId, sourceFqn: 'ods.<待选择>' },
+    };
+    const governanceNode: Node = {
+      id: 'field-governance',
+      type: 'GOVERN',
+      name: SPARK_GOVERNANCE_NODE_NAME,
+      x: 330,
+      y: 120,
+      operatorRef: SPARK_GOVERNANCE_OPERATOR_REF,
+      operatorVersion: '1.0.0',
+      config: {
+        governanceMode: SPARK_GOVERNANCE_MODE,
+        modelKind: 'DWD_SPARK_GOVERNANCE',
+        sourceAssetId: templateSourceAssetId,
+        requiredColumns: ['id'],
+        resourceGroup: 'spark-default',
+        computeProfile: 'spark-small',
+        engine: 'SPARK',
+      },
+    };
+    const qualityGateNode: Node = {
+      id: 'governance-quality-gate',
+      type: 'QUALITY_GATE',
+      name: '治理质量门禁',
+      x: 600,
+      y: 120,
+      operatorRef: 'gate.not_null',
+      operatorVersion: '1.0.0',
+      config: {
+        gateType: 'DWD_GOVERNANCE',
+        columns: ['id'],
+        checks: ['primary_key_not_null', 'sensitive_passthrough_block', 'dict_lookup_hit_rate'],
+        actionOnViolation: 'BLOCK',
+      },
+    };
+    const outputNode: Node = {
+      id: 'dwd-output',
+      type: 'OUTPUT',
+      name: 'DWD 治理表',
+      x: 860,
+      y: 120,
+      operatorRef: 'output.iceberg_table',
+      operatorVersion: '1.0.0',
+      config: { targetFqn: 'dwd.<待生成>', partitionBy: 'days(dt)' },
+    };
+    setPipelineName('dwd_table_governance_pipeline');
+    setSavedDagId(undefined);
+    setNodes([inputNode, governanceNode, qualityGateNode, outputNode]);
+    setEdges([
+      { id: 'edge-ods-governance', from: inputNode.id, to: governanceNode.id, sourcePort: 'out', targetPort: 'in', valid: true },
+      { id: 'edge-governance-quality', from: governanceNode.id, to: qualityGateNode.id, sourcePort: 'out', targetPort: 'in', valid: true },
+      { id: 'edge-quality-output', from: qualityGateNode.id, to: outputNode.id, sourcePort: 'out', targetPort: 'in', valid: true },
+    ]);
+    setSelected(governanceNode);
+    setSelectedEdgeId(null);
+    setFieldGovernanceOpen(true);
+  }, [incoming.dag, routeDagId, template, templateSourceAssetId]);
+
+  useEffect(() => {
     const handleMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       const canvas = canvasRef.current;
       if (!drag || !canvas) return;
       const rect = canvas.getBoundingClientRect();
-      const maxX = Math.max(rect.width - 150, 8);
-      const maxY = Math.max(rect.height - 86, 8);
+      const maxX = Math.max(canvas.scrollWidth - NODE_CARD_WIDTH - 8, 8);
+      const maxY = Math.max(canvas.scrollHeight - NODE_CARD_HEIGHT - 8, 8);
       const nextX = Math.round(Math.min(Math.max(event.clientX - rect.left - drag.offsetX, 8), maxX));
       const nextY = Math.round(Math.min(Math.max(event.clientY - rect.top - drag.offsetY, 8), maxY));
       moveNode(drag.nodeId, nextX, nextY);
@@ -354,7 +459,8 @@ export default function DagCanvas() {
       if (draftNodes.length > 0) {
         setNodes(draftNodes);
         setEdges(draftEdges);
-        setSelected(draftNodes[0]);
+        setSelected(null);
+        setSelectedEdgeId(null);
       }
     };
     if (incoming.dag) {
@@ -490,6 +596,11 @@ export default function DagCanvas() {
   );
 
   const selectedEdge = selectedEdgeId ? annotatedEdges.find((edge) => edge.id === selectedEdgeId) : undefined;
+  const hasInspector = Boolean(selectedEdge || selected);
+  const canvasSize = useMemo(() => ({
+    width: Math.max(CANVAS_BASE_WIDTH, ...nodes.map((node) => node.x + NODE_CARD_WIDTH + 160)),
+    height: Math.max(CANVAS_BASE_HEIGHT, ...nodes.map((node) => node.y + NODE_CARD_HEIGHT + 160)),
+  }), [nodes]);
 
   const startConnection = (event: React.MouseEvent, node: Node, sourcePort = 'out') => {
     event.stopPropagation();
@@ -542,6 +653,11 @@ export default function DagCanvas() {
   };
 
   const buildValidationGraph = () => ({
+    version: '1.0',
+    pipelineMode: 'CUSTOM_DAG',
+    engine: 'SPARK',
+    resourceGroup: 'spark-default',
+    computeProfile: 'spark-small',
     nodes: nodes.map((node) => {
       const nodeType = nodeTypeForGraph(node);
       const operatorRef = inferredOperator(node);
@@ -578,9 +694,9 @@ export default function DagCanvas() {
       operatorGraph: {
         version: '1.0',
         pipelineMode: 'CUSTOM_DAG',
-        engine: 'TRINO_DBT',
-        resourceGroup: 'default',
-        computeProfile: 'trino-small',
+        engine: 'SPARK',
+        resourceGroup: 'spark-default',
+        computeProfile: 'spark-small',
         nodes: graph.nodes,
         edges: graph.edges,
       },
@@ -634,17 +750,26 @@ export default function DagCanvas() {
     const operator = operatorCatalog.get(n.operatorRef || inferredOperator(n) || '');
     const category = operator?.category || NODE_TYPE_TO_CATEGORY[n.type] || 'TRANSFORM';
     const meta = CATEGORY_META[category] || CATEGORY_META.TRANSFORM;
+    const fieldGovernanceNode = isFieldGovernanceNode(n);
     const isMask = n.type === 'mask' || n.type === 'MASK';
     const dragging = draggingNodeId === n.id;
     const inputPorts = inputPortsForNode(n);
     const pendingTarget = Boolean(pendingConnection && pendingConnection.from !== n.id && inputPorts.length > 0);
     return (
-      <div key={n.id} onClick={() => { setSelected(n); setSelectedEdgeId(null); }} onPointerDown={(event) => startNodeDrag(event, n)}
+      <div
+        key={n.id}
+        title={fieldGovernanceNode ? `${n.name} · 表级治理模型` : `${n.name} · ${operator?.operatorRef || inferredOperator(n) || meta.label}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          setSelected(n);
+          setSelectedEdgeId(null);
+        }}
+        onPointerDown={(event) => startNodeDrag(event, n)}
         style={{
-          position: 'absolute', left: n.x, top: n.y, width: 140, padding: 10,
+          position: 'absolute', left: n.x, top: n.y, width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT, padding: 10,
           background: '#fff', border: `2px solid ${pendingTarget ? 'var(--ol-warning)' : selected?.id === n.id && !selectedEdge ? 'var(--ol-brand)' : meta.color}`,
           borderRadius: 8, boxShadow: dragging ? 'var(--ol-shadow-e3)' : 'var(--ol-shadow-e2)',
-          cursor: dragging ? 'grabbing' : 'grab', userSelect: 'none',
+          cursor: dragging ? 'grabbing' : 'grab', userSelect: 'none', overflow: 'hidden',
           transition: 'box-shadow var(--ol-dur-fast) var(--ol-ease)',
         }}>
         {inputPorts.map((port, index) => (
@@ -657,7 +782,7 @@ export default function DagCanvas() {
             style={{
               position: 'absolute',
               left: -7,
-              top: 18 + index * 18,
+              top: NODE_PORT_TOP - 6 + index * 18,
               width: 14,
               height: 14,
               borderRadius: '50%',
@@ -676,7 +801,7 @@ export default function DagCanvas() {
           style={{
             position: 'absolute',
             right: -7,
-            top: 18,
+            top: NODE_PORT_TOP - 6,
             width: 14,
             height: 14,
             borderRadius: '50%',
@@ -686,11 +811,33 @@ export default function DagCanvas() {
             padding: 0,
           }}
         />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: meta.color, fontWeight: 600 }}>
-          {meta.icon}{n.name}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '16px minmax(0, 1fr)',
+          alignItems: 'center',
+          gap: 6,
+          color: meta.color,
+          fontWeight: 600,
+          minWidth: 0,
+        }}>
+          <span style={{ lineHeight: 1, display: 'inline-flex' }}>{meta.icon}</span>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
         </div>
         {isMask && <div style={{ marginTop: 4 }}><ClassificationBadge level="L3" size="small" /></div>}
-        <Tag style={{ marginTop: 6 }} color="success">{operator?.operatorRef || inferredOperator(n) || meta.label}</Tag>
+        <Tag
+          style={{
+            marginTop: 6,
+            maxWidth: '100%',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            display: 'inline-block',
+            verticalAlign: 'top',
+          }}
+          color="success"
+        >
+          {fieldGovernanceNode ? '表级治理模型' : operator?.operatorRef || inferredOperator(n) || meta.label}
+        </Tag>
       </div>
     );
   };
@@ -709,7 +856,7 @@ export default function DagCanvas() {
           </Space>
         }
         subtitle={<span className="ol-chip">编排 · L4-4.1</span>}
-        description="三区编辑：算子面板 / DAG 画布 / 属性面板，含试运行、版本管理、校验、发布"
+        description="顶层编排表资产、治理模型、质量门禁、发布与调度；字段级处理在治理设计器内维护"
         actions={
           <>
             <Select value={env} onChange={setEnv} style={{ width: 110 }}
@@ -723,10 +870,16 @@ export default function DagCanvas() {
         }
       />
 
-      <Row gutter={12}>
+      <Row gutter={[12, 12]} style={{ height: 'calc(100vh - 172px)', minHeight: 520, alignItems: 'stretch' }}>
         {/* 左算子面板 */}
-        <Col xs={24} lg={4}>
-          <SectionCard title="算子" icon={<AppstoreOutlined />} padded="sm" style={{ height: '100%' }}>
+        <Col xs={24} lg={4} style={{ height: '100%', minHeight: 0 }}>
+          <SectionCard
+            title="编排算子"
+            icon={<AppstoreOutlined />}
+            padded="sm"
+            style={{ height: '100%', minHeight: 0 }}
+            bodyStyle={{ overflowY: 'auto', minHeight: 0 }}
+          >
             {operatorLoading ? (
               <Alert type="info" showIcon message="正在加载算子市场" />
             ) : operatorError ? (
@@ -738,51 +891,104 @@ export default function DagCanvas() {
               />
             ) : operatorGroups.length === 0 ? (
               <Alert type="warning" showIcon message="暂无可见算子" />
-            ) : operatorGroups.map((group) => (
-              <div key={group.category} style={{ marginBottom: 12 }}>
-                <Text type="secondary" style={{ fontSize: 11, fontWeight: 600 }}>{group.label}</Text>
-                <div style={{ marginTop: 6 }}>
-                  {group.items.map((operator) => {
-                    const meta = CATEGORY_META[operator.category] || CATEGORY_META.TRANSFORM;
-                    return (
-                      <div key={operator.operatorRef} style={{
-                        padding: '6px 8px', border: '1px dashed var(--ol-line)',
-                        borderRadius: 6, marginBottom: 4, cursor: 'pointer',
-                        display: 'flex', alignItems: 'center', gap: 6,
-                        fontSize: 12, transition: 'all var(--ol-dur-fast) var(--ol-ease)',
-                      }}
-                        title={`${operator.operatorRef} · ${operator.latestVersion}`}
-                        onClick={() => addOperatorNode(operator)}
-                        onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--ol-brand)'; e.currentTarget.style.background = 'var(--ol-brand-soft)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--ol-line)'; e.currentTarget.style.background = 'transparent'; }}
-                      >
-                        <span style={{ color: meta.color }}>{meta.icon}</span>
-                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{operator.displayName}</span>
+            ) : (
+              <>
+                {marketOperators.some((operator) => operatorUsageScope(operator) === 'FIELD_PROCESSOR') && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="字段级算子在治理设计器内使用"
+                    style={{ marginBottom: 8 }}
+                  />
+                )}
+                <Collapse
+                  ghost
+                  size="small"
+                  items={operatorGroups.map((group) => ({
+                    key: group.category,
+                    label: (
+                      <Space size={6} style={{ width: '100%', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 12, fontWeight: 600 }}>{group.label}</Text>
+                        <Tag style={{ margin: 0 }}>{group.items.length}</Tag>
+                      </Space>
+                    ),
+                    children: (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {group.items.map((operator) => {
+                          const meta = CATEGORY_META[operator.category] || CATEGORY_META.TRANSFORM;
+                          return (
+                            <div
+                              key={operator.operatorRef}
+                              style={{
+                                padding: '7px 8px',
+                                border: '1px dashed var(--ol-line)',
+                                borderRadius: 6,
+                                cursor: 'pointer',
+                                display: 'grid',
+                                gridTemplateColumns: '16px minmax(0, 1fr)',
+                                alignItems: 'center',
+                                gap: 6,
+                                minWidth: 0,
+                                fontSize: 12,
+                                transition: 'all var(--ol-dur-fast) var(--ol-ease)',
+                              }}
+                              title={`${operator.displayName} · ${operator.operatorRef} · ${operator.latestVersion}`}
+                              onClick={() => addOperatorNode(operator)}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = 'var(--ol-brand)';
+                                e.currentTarget.style.background = 'var(--ol-brand-soft)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = 'var(--ol-line)';
+                                e.currentTarget.style.background = 'transparent';
+                              }}
+                            >
+                              <span style={{ color: meta.color, lineHeight: 1, display: 'inline-flex' }}>{meta.icon}</span>
+                              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {operator.displayName}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+                    ),
+                  }))}
+                />
+              </>
+            )}
           </SectionCard>
         </Col>
 
         {/* 中画布 */}
-        <Col xs={24} lg={14}>
-          <SectionCard padded="none" bodyStyle={{ padding: 0 }}>
-            <div ref={canvasRef} style={{
-              height: 460, position: 'relative', background: 'var(--ol-fill-soft)',
-              backgroundImage: 'radial-gradient(var(--ol-line) 1px, transparent 1px)',
-              backgroundSize: '20px 20px', borderRadius: 'inherit',
-            }}>
+        <Col xs={24} lg={hasInspector ? 14 : 20} style={{ height: '100%', minHeight: 0 }}>
+          <SectionCard padded="none" bodyStyle={{ padding: 0, minHeight: 0, overflow: 'hidden' }} style={{ height: '100%', minHeight: 0 }}>
+            <div
+              style={{ height: '100%', overflow: 'auto', borderRadius: 'inherit' }}
+              onClick={() => {
+                setSelected(null);
+                setSelectedEdgeId(null);
+                setPendingConnection(null);
+              }}
+            >
+              <div ref={canvasRef} style={{
+                width: canvasSize.width,
+                height: canvasSize.height,
+                minWidth: '100%',
+                minHeight: '100%',
+                position: 'relative',
+                background: 'var(--ol-fill-soft)',
+                backgroundImage: 'radial-gradient(var(--ol-line) 1px, transparent 1px)',
+                backgroundSize: '20px 20px',
+                borderRadius: 'inherit',
+              }}>
               <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'auto' }}>
                 {annotatedEdges.map((e) => {
                   const from = nodes.find((n) => n.id === e.from);
                   const to = nodes.find((n) => n.id === e.to);
                   if (!from || !to) return null;
                   const selectedLine = selectedEdgeId === e.id;
-                  const x1 = from.x + 140, y1 = from.y + 24;
-                  const x2 = to.x, y2 = to.y + 24;
+                  const x1 = from.x + NODE_CARD_WIDTH, y1 = from.y + NODE_PORT_TOP;
+                  const x2 = to.x, y2 = to.y + NODE_PORT_TOP;
                   const stroke = e.valid ? 'var(--ol-brand)' : 'var(--ol-error)';
                   return (
                     <g key={e.id}>
@@ -840,13 +1046,21 @@ export default function DagCanvas() {
                 </defs>
               </svg>
               {nodes.map(renderNode)}
+              </div>
             </div>
           </SectionCard>
         </Col>
 
         {/* 右属性面板 */}
-        <Col xs={24} lg={6}>
-          <SectionCard title="属性" icon={<FilterOutlined />} padded="sm" style={{ height: '100%' }}>
+        {hasInspector && (
+        <Col xs={24} lg={6} style={{ height: '100%', minHeight: 0 }}>
+          <SectionCard
+            title="属性"
+            icon={<FilterOutlined />}
+            padded="sm"
+            style={{ height: '100%', minHeight: 0 }}
+            bodyStyle={{ overflowY: 'auto', minHeight: 0 }}
+          >
             {selectedEdge ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div>
@@ -918,10 +1132,10 @@ export default function DagCanvas() {
                   </div>
                 </div>
                 <div>
-                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>算子引用</Text>
+                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>{selectedIsFieldGovernance ? '模型契约' : '算子引用'}</Text>
                   <div style={{ marginTop: 4 }}>
                     <Space size={6} wrap>
-                      <Text code style={{ fontSize: 12 }}>{selectedOperatorRef || '-'}</Text>
+                      <Text code style={{ fontSize: 12 }}>{selectedIsFieldGovernance ? 'DWD_SPARK_GOVERNANCE' : selectedOperatorRef || '-'}</Text>
                       {selected.operatorVersion && <Tag style={{ margin: 0 }}>{selected.operatorVersion}</Tag>}
                     </Space>
                   </div>
@@ -940,10 +1154,38 @@ export default function DagCanvas() {
                   <div style={{ marginTop: 4 }}>
                     <Space size={6} wrap>
                       <Tag color="processing" style={{ margin: 0 }}>{selectedOperator?.category || nodeTypeForGraph(selected)}</Tag>
-                      <Tag style={{ margin: 0 }}>{selectedOperator?.manifest?.compileTarget || selected.engine || 'TRINO_DBT'}</Tag>
+                      <Tag style={{ margin: 0 }}>{selectedOperator?.manifest?.compileTarget || selected.engine || 'SPARK'}</Tag>
+                      {selectedIsFieldGovernance && <Tag color="blue" style={{ margin: 0 }}>表级治理模型</Tag>}
                     </Space>
                   </div>
                 </div>
+                {selectedIsFieldGovernance && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="DWD 治理模型"
+                    description={(
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          流水线编排模型运行、质量门禁和发布；字段映射、字典匹配、关联查询在治理设计器内维护。
+                        </Text>
+                        <Space size={6} wrap>
+                          {typeof selected.config?.modelStatus === 'string' && (
+                            <Tag color={selected.config.modelStatus === 'PUBLISHED' ? 'success' : 'processing'} style={{ margin: 0 }}>
+                              {selected.config.modelStatus}
+                            </Tag>
+                          )}
+                          {typeof selected.config?.targetFqn === 'string' && (
+                            <Tag style={{ margin: 0 }}>{selected.config.targetFqn}</Tag>
+                          )}
+                        </Space>
+                        <Button type="primary" onClick={() => setFieldGovernanceOpen(true)}>
+                          打开治理设计器
+                        </Button>
+                      </Space>
+                    )}
+                  />
+                )}
                 {selected.sql && (
                   <div>
                     <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>SQL</Text>
@@ -976,7 +1218,9 @@ export default function DagCanvas() {
                 <div>
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>参数</Text>
                   <div style={{ marginTop: 6 }}>
-                    {selectedParamFields.length === 0 ? (
+                    {selectedIsFieldGovernance ? (
+                      <Alert type="success" showIcon message="字段规则在治理设计器中维护" />
+                    ) : selectedParamFields.length === 0 ? (
                       <Alert type="info" showIcon message="当前算子没有可编辑参数" />
                     ) : (
                       <Space direction="vertical" size={8} style={{ width: '100%' }}>
@@ -1008,7 +1252,45 @@ export default function DagCanvas() {
             ) : null}
           </SectionCard>
         </Col>
+        )}
       </Row>
+
+      <Drawer
+        open={fieldGovernanceOpen}
+        onClose={() => setFieldGovernanceOpen(false)}
+        title={SPARK_GOVERNANCE_DRAWER_TITLE}
+        width="calc(100vw - 96px)"
+        destroyOnClose={false}
+      >
+        <GovernanceFactory
+          embedded
+          initialSourceAssetId={selectedGovernanceSourceAssetId}
+          onModelChange={(nextModel) => {
+            if (!selected || !isFieldGovernanceNode(selected)) return;
+            const nextSourceFqn = nextModel?.sourceFqn;
+            const nextTargetFqn = nextModel?.targetFqn;
+            patchSelectedNode({
+              config: {
+                ...(selected.config || {}),
+                sourceAssetId: selectedGovernanceSourceAssetId,
+                modelId: nextModel?.id,
+                modelStatus: nextModel?.status,
+                sourceFqn: nextModel?.sourceFqn,
+                targetFqn: nextModel?.targetFqn,
+              },
+            });
+            setNodes((prev) => prev.map((node) => {
+              if (node.id === 'ods-input' && nextSourceFqn) {
+                return { ...node, name: nextSourceFqn, config: { ...(node.config || {}), sourceFqn: nextSourceFqn } };
+              }
+              if (node.id === 'dwd-output' && nextTargetFqn) {
+                return { ...node, name: nextTargetFqn, config: { ...(node.config || {}), targetFqn: nextTargetFqn } };
+              }
+              return node;
+            }));
+          }}
+        />
+      </Drawer>
 
       {/* 试运行抽屉 */}
       <Drawer open={previewOpen} onClose={() => setPreviewOpen(false)} title="试运行 @dev" width={680}>

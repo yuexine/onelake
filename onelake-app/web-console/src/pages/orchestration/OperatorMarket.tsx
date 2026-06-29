@@ -29,6 +29,22 @@ const SCOPE_LABEL: Record<string, string> = {
   TENANT_PRIVATE: '租户私有',
 };
 
+const USAGE_SCOPE_LABEL: Record<string, string> = {
+  PIPELINE_STEP: '编排步骤',
+  MODEL_RECIPE: '模型 Recipe',
+  FIELD_PROCESSOR: '字段处理器',
+  QUALITY_ASSERTION: '质量断言',
+  COMPOUND_TEMPLATE: '复合模板',
+};
+
+const USAGE_SCOPE_HINT: Record<string, string> = {
+  PIPELINE_STEP: '用于流水线顶层编排，表达输入、输出、发布、通知或外部任务。',
+  MODEL_RECIPE: '用于表级治理模型内部，表达 Join、聚合、过滤、窗口等表转换步骤。',
+  FIELD_PROCESSOR: '用于治理设计器字段行内，表达清洗、标准化、脱敏、加密和字典处理。',
+  QUALITY_ASSERTION: '用于流水线门禁或模型内部质量检查，决定阻断、告警或隔离。',
+  COMPOUND_TEMPLATE: '用于沉淀一组可复用治理步骤，例如客户字段标准化包。',
+};
+
 const CATEGORY_INTENT: Record<string, Intent> = {
   INPUT: 'neutral',
   TRANSFORM: 'brand',
@@ -54,15 +70,18 @@ const SCOPE_OPTIONS = [
   { label: '租户私有', value: 'TENANT_PRIVATE' },
 ];
 
+const USAGE_SCOPE_OPTIONS = [
+  { label: '全部适用范围', value: 'ALL' },
+  ...Object.entries(USAGE_SCOPE_LABEL).map(([value, label]) => ({ value, label })),
+];
+
 const EDITABLE_SCOPE_OPTIONS = [
   { label: '自定义', value: 'CUSTOM' },
   { label: '租户私有', value: 'TENANT_PRIVATE' },
 ];
 
 const COMPILE_TARGET_OPTIONS = [
-  { label: 'SQL_DBT', value: 'SQL_DBT' },
   { label: 'SPARK', value: 'SPARK' },
-  { label: 'PYTHON', value: 'PYTHON' },
 ];
 
 interface OperatorEditorValues {
@@ -89,7 +108,7 @@ const SAMPLE_VALUES: OperatorEditorValues = {
   category: 'TRANSFORM',
   scope: 'CUSTOM',
   displayName: '手机号规整扩展',
-  description: '去除手机号中的非数字字符，作为自定义 SQL_DBT 转换算子样例。',
+  description: '去除手机号中的非数字字符，作为自定义 Spark 转换算子样例。',
   tags: 'phone,normalize',
   inputPorts: JSON.stringify([{ name: 'input', accept: 'TABLE', cardinality: 'ONE' }], null, 2),
   outputSchema: JSON.stringify({ mode: 'ROW_MODIFY', modifies: ['phone'] }, null, 2),
@@ -100,15 +119,25 @@ const SAMPLE_VALUES: OperatorEditorValues = {
     },
     required: ['column'],
   }, null, 2),
-  compileTarget: 'SQL_DBT',
+  compileTarget: 'SPARK',
   template: JSON.stringify({
     kind: 'COLUMN_EXPR',
     sql: "regexp_replace({{ column }}, '[^0-9]', '')",
   }, null, 2),
-  resourceHint: JSON.stringify({ defaultResourceGroup: 'default', engine: 'TRINO_DBT' }, null, 2),
+  resourceHint: JSON.stringify({ defaultResourceGroup: 'spark-default', engine: 'SPARK' }, null, 2),
   policyActionOnViolation: '',
   changelog: 'initial version',
 };
+
+function operatorUsageScope(operator: Operator): keyof typeof USAGE_SCOPE_LABEL {
+  const tags = operator.manifest?.tags || [];
+  const templateKind = String(operator.manifest?.template?.kind || '').toUpperCase();
+  if (tags.includes('compound-template') || templateKind.includes('COMPOUND')) return 'COMPOUND_TEMPLATE';
+  if (operator.category === 'QUALITY_GATE') return 'QUALITY_ASSERTION';
+  if (operator.category === 'STANDARD' || operator.category === 'MASK' || operator.category === 'ENCRYPT') return 'FIELD_PROCESSOR';
+  if (operator.category === 'INPUT' || operator.category === 'OUTPUT') return 'PIPELINE_STEP';
+  return 'MODEL_RECIPE';
+}
 
 export default function OperatorMarket() {
   const { message, modal } = AntApp.useApp();
@@ -117,6 +146,7 @@ export default function OperatorMarket() {
   const [selected, setSelected] = useState<Operator | null>(null);
   const [category, setCategory] = useState('ALL');
   const [scope, setScope] = useState('ALL');
+  const [usageScope, setUsageScope] = useState('ALL');
   const [searchInput, setSearchInput] = useState('');
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(true);
@@ -148,13 +178,19 @@ export default function OperatorMarket() {
     loadOperators();
   }, [loadOperators]);
 
+  const visibleOperators = useMemo(
+    () => operators.filter((op) => usageScope === 'ALL' || operatorUsageScope(op) === usageScope),
+    [operators, usageScope],
+  );
+
   const counts = useMemo(() => ({
-    total: operators.length,
+    total: visibleOperators.length,
     builtin: operators.filter((op) => op.scope === 'BUILTIN').length,
     custom: operators.filter((op) => op.scope === 'CUSTOM').length,
     privateOps: operators.filter((op) => op.scope === 'TENANT_PRIVATE').length,
+    fieldProcessors: operators.filter((op) => operatorUsageScope(op) === 'FIELD_PROCESSOR').length,
     deprecated: operators.filter((op) => op.status === 'DEPRECATED').length,
-  }), [operators]);
+  }), [operators, visibleOperators.length]);
 
   const openDetail = (operator: Operator) => {
     setSelected(operator);
@@ -287,11 +323,11 @@ export default function OperatorMarket() {
         icon={<AppstoreOutlined />}
         title="算子市场"
         subtitle={<span className="ol-chip">编排 · L4</span>}
-        description="内置 / 自定义 / 租户私有三类算子，可在 DAG 画布中拖入使用"
+        description="按适用范围管理编排步骤、表级 Recipe、字段处理器和质量断言，避免字段级能力混入顶层 DAG"
         meta={[
           { label: '可见算子', value: counts.total },
           { label: '内置', value: counts.builtin },
-          { label: '自定义', value: counts.custom + counts.privateOps },
+          { label: '字段级', value: counts.fieldProcessors },
           { label: '已废弃', value: counts.deprecated },
         ]}
         actions={
@@ -326,6 +362,12 @@ export default function OperatorMarket() {
             onChange={setCategory}
             style={{ width: 148 }}
           />
+          <Select
+            value={usageScope}
+            options={USAGE_SCOPE_OPTIONS}
+            onChange={setUsageScope}
+            style={{ width: 168 }}
+          />
           <Button icon={<ReloadOutlined />} onClick={loadOperators}>刷新</Button>
         </Space>
       </SectionCard>
@@ -338,15 +380,16 @@ export default function OperatorMarket() {
         <SectionCard>
           <StateView state="error" title="算子市场加载失败" description={error} onRetry={loadOperators} />
         </SectionCard>
-      ) : operators.length === 0 ? (
+      ) : visibleOperators.length === 0 ? (
         <SectionCard>
           <StateView state="empty" title="暂无匹配算子" description="当前筛选条件下没有可见算子。" />
         </SectionCard>
       ) : (
         <Row gutter={[16, 16]}>
-          {operators.map((op) => {
+          {visibleOperators.map((op) => {
             const intent = CATEGORY_INTENT[op.category] || 'brand';
             const deprecated = op.status === 'DEPRECATED';
+            const usage = operatorUsageScope(op);
             return (
               <Col key={op.id} xs={24} sm={12} md={8} lg={6}>
                 <div
@@ -381,6 +424,9 @@ export default function OperatorMarket() {
                       <Tag style={{ margin: 0, fontSize: 11 }}>{op.latestVersion}</Tag>
                     </Space>
                   </div>
+                  <Tag style={{ width: 'fit-content', margin: '0 0 8px 0', fontSize: 11 }}>
+                    {USAGE_SCOPE_LABEL[usage]}
+                  </Tag>
                   <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 6, lineHeight: 1.35 }}>
                     {op.displayName}
                   </div>
@@ -442,6 +488,7 @@ export default function OperatorMarket() {
                 {CATEGORY_LABEL[selected.category] || selected.category}
               </IntentBadge>
               <span className="ol-chip">{SCOPE_LABEL[selected.scope] || selected.scope}</span>
+              <span className="ol-chip">{USAGE_SCOPE_LABEL[operatorUsageScope(selected)]}</span>
               <Tag style={{ margin: 0 }}>{selected.latestVersion}</Tag>
               <Tag color={selected.status === 'DEPRECATED' ? 'warning' : 'success'} style={{ margin: 0 }}>
                 {selected.status === 'DEPRECATED' ? '已废弃' : '可用'}
@@ -449,6 +496,13 @@ export default function OperatorMarket() {
               {detailLoading && <Text type="secondary" style={{ fontSize: 12 }}>加载详情中...</Text>}
             </div>
             <Text style={{ color: 'var(--ol-ink-2)', fontSize: 13 }}>{selected.description || selected.operatorRef}</Text>
+            <Alert
+              type="info"
+              showIcon
+              message={USAGE_SCOPE_LABEL[operatorUsageScope(selected)]}
+              description={USAGE_SCOPE_HINT[operatorUsageScope(selected)]}
+              style={{ padding: '8px 12px' }}
+            />
 
             <Divider style={{ margin: '4px 0' }} />
 
@@ -464,6 +518,9 @@ export default function OperatorMarket() {
               </Col>
               <Col xs={24} md={12}>
                 <DetailBlock title="模板类型" value={selected.manifest?.template?.kind || '未声明'} />
+              </Col>
+              <Col xs={24} md={12}>
+                <DetailBlock title="适用范围" value={USAGE_SCOPE_LABEL[operatorUsageScope(selected)]} />
               </Col>
             </Row>
 
@@ -535,15 +592,6 @@ export default function OperatorMarket() {
               )}
             />
           )}
-          {editorCompileTarget && editorCompileTarget !== 'SQL_DBT' && (
-            <Alert
-              type="warning"
-              showIcon
-              message={`${editorCompileTarget} 为扩展态`}
-              description="当前仅支持 Manifest 契约校验与版本管理；画布图级执行仍会阻断，直到对应 Dagster op 与部署契约落地。"
-            />
-          )}
-
           <Form form={form} layout="vertical" preserve={false}>
             <Row gutter={12}>
               <Col xs={24} md={12}>
@@ -707,9 +755,9 @@ function valuesFromManifest(manifest: OperatorManifest, version: string): Operat
     inputPorts: JSON.stringify(manifest.inputPorts || [], null, 2),
     outputSchema: JSON.stringify(manifest.outputSchema || { mode: 'ROW_MODIFY' }, null, 2),
     paramsSchema: JSON.stringify(manifest.paramsSchema || { type: 'object', properties: {} }, null, 2),
-    compileTarget: manifest.compileTarget || 'SQL_DBT',
+    compileTarget: manifest.compileTarget || 'SPARK',
     template: JSON.stringify(manifest.template || { kind: 'COLUMN_EXPR', sql: '' }, null, 2),
-    resourceHint: JSON.stringify(manifest.resourceHint || { defaultResourceGroup: 'default', engine: 'TRINO_DBT' }, null, 2),
+    resourceHint: JSON.stringify(manifest.resourceHint || { defaultResourceGroup: 'spark-default', engine: 'SPARK' }, null, 2),
     policyActionOnViolation: String(manifest.policy?.actionOnViolation || ''),
     changelog: '',
   };

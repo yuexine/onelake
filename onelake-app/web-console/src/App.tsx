@@ -275,6 +275,7 @@ export default function App() {
 
       <Layout style={{ flex: 1, minWidth: 0, flexDirection: 'column' }}>
         <Header
+          className="ol-app-header"
           style={{
             background: '#fff',
             padding: '0 20px',
@@ -283,9 +284,11 @@ export default function App() {
             boxShadow: '0 1px 0 rgba(15,23,42,.02)',
             position: 'sticky', top: 0, zIndex: 10,
             height: 56, lineHeight: '56px',
+            overflow: 'hidden',
+            minWidth: 0,
           }}
         >
-          <Space size={8}>
+          <Space size={8} className="ol-topbar-left" style={{ minWidth: 0 }}>
             <Button
               type="text"
               onClick={() => setCollapsed(!collapsed)}
@@ -301,15 +304,16 @@ export default function App() {
                   color: 'var(--ol-ink-3)', fontSize: 13, borderRadius: 6,
                   display: 'flex', alignItems: 'center', gap: 8,
                 }}
+                className="ol-global-search-trigger"
               >
                 <SearchOutlined />
-                <span>搜索资产 / 任务 / API…</span>
-                <span className="ol-kbd" style={{ marginLeft: 16 }}>⌘K</span>
+                <span className="ol-global-search-label">搜索资产 / 任务 / API…</span>
+                <span className="ol-kbd ol-global-search-kbd" style={{ marginLeft: 16 }}>⌘K</span>
               </Button>
             </Tooltip>
           </Space>
 
-          <Space size={14}>
+          <Space size={14} className="ol-topbar-actions" style={{ minWidth: 0, overflow: 'hidden' }}>
             <Dropdown
               menu={{
                 items: tenants.map((t) => ({
@@ -330,7 +334,7 @@ export default function App() {
                 <span className="ol-chip" style={{ background: 'var(--ol-brand-soft)', color: 'var(--ol-brand)', border: 'none' }}>
                   {tenant.code}
                 </span>
-                <span style={{ fontSize: 13, color: 'var(--ol-ink)' }}>{tenant.name}</span>
+                <span className="ol-tenant-name" style={{ fontSize: 13, color: 'var(--ol-ink)' }}>{tenant.name}</span>
                 <DownOutlined style={{ fontSize: 10, color: 'var(--ol-ink-3)' }} />
               </Space>
             </Dropdown>
@@ -380,12 +384,14 @@ export default function App() {
                   minWidth: 0,
                   lineHeight: 1,
                 }}
+                className="ol-user-menu-trigger"
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--ol-fill)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >
                 <Avatar size={32} icon={<UserOutlined />} style={{ background: 'var(--ol-brand-gradient)', flexShrink: 0 }} />
                 <div style={{ minWidth: 0, lineHeight: 1.1 }}>
                   <div
+                    className="ol-user-name"
                     style={{
                       maxWidth: 190,
                       overflow: 'hidden',
@@ -399,6 +405,7 @@ export default function App() {
                     {user.name}
                   </div>
                   <div
+                    className="ol-user-role-row"
                     style={{
                       display: 'flex',
                       alignItems: 'center',

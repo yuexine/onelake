@@ -118,7 +118,7 @@ export interface JobRun {
   dagsterJob?: string;
   dagsterRunId?: string;
   triggerType: 'CRON' | 'MANUAL' | 'EVENT' | string;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
   startedAt?: string;
   finishedAt?: string;
   triggeredBy?: UUID;
@@ -144,6 +144,144 @@ export interface DagEdge {
   valid?: boolean;
 }
 
+// ===== Pipeline v2 (P2 — Unified Pipeline Editor) =====
+// See docs/流水线模块重设计方案.md §6.1
+
+export type PipelineTaskType =
+  | 'QUALITY_GATE'
+  | 'SYNC_REF'
+  | 'SPARK_SQL'
+  | 'PYSPARK';
+
+export type TaskCompileStatus = 'DRAFT' | 'VALIDATED' | 'FAILED';
+export type EdgeLayer = 'PIPELINE' | 'CROSS_ENGINE';
+export type PipelineKind = 'BLANK' | 'ODS_DWD' | 'MULTI_LAYER';
+export type PipelineStatus = 'DRAFT' | 'VALIDATED' | 'PUBLISHED';
+export type TaskRunStatus =
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'UPSTREAM_FAILED'
+  | 'SKIPPED';
+
+export interface PipelineTask {
+  id: UUID;
+  dagId: UUID;
+  taskKey: string;
+  taskType: PipelineTaskType;
+  name: string;
+  engine: string;            // SPARK_SQL | PYSPARK
+  targetFqn?: string;
+  modelId?: UUID;            // deprecated; null for new Spark-only tasks
+  syncTaskId?: UUID;         // SYNC_REF only
+  config: Record<string, unknown>;
+  compileStatus: TaskCompileStatus;
+  compileError?: string;
+  executable: boolean;
+  positionX?: number;
+  positionY?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PipelineTaskEdge {
+  id: UUID;
+  dagId: UUID;
+  sourceKey: string;
+  targetKey: string;
+  edgeLayer: EdgeLayer;
+  sourcePort?: string;
+  targetPort?: string;
+  sourceOutput?: string;
+  targetInput?: string;
+  assetFqn?: string;
+  inputAlias?: string;
+  joinRole?: string;
+  triggerPolicy?: 'ALL_SUCCEEDED' | 'ALL_DONE' | 'ANY_SUCCEEDED' | string;
+  freshnessPolicy?: 'LATEST' | 'SAME_BATCH' | string;
+  auto: boolean;
+  createdAt: string;
+}
+
+export interface PipelineTaskRequest {
+  taskKey: string;
+  taskType: PipelineTaskType;
+  name?: string;
+  engine?: string;
+  targetFqn?: string;
+  modelId?: UUID;
+  syncTaskId?: UUID;
+  config?: Record<string, unknown>;
+  positionX?: number;
+  positionY?: number;
+}
+
+export interface PipelineTaskEdgeRequest {
+  sourceKey: string;
+  targetKey: string;
+  edgeLayer?: EdgeLayer;
+  sourcePort?: string;
+  targetPort?: string;
+  sourceOutput?: string;
+  targetInput?: string;
+  assetFqn?: string;
+  inputAlias?: string;
+  joinRole?: string;
+  triggerPolicy?: string;
+  freshnessPolicy?: string;
+  auto?: boolean;
+}
+
+export interface PipelineValidationResult {
+  pipelineId: UUID;
+  valid: boolean;
+  taskResults: Array<{
+    taskKey: string;
+    taskType: PipelineTaskType;
+    valid: boolean;
+    errorMessage?: string;
+    errorCode?: string;
+  }>;
+  graphErrors: Array<{
+    level: 'ERROR' | 'WARN';
+    code: string;
+    message: string;
+    taskKeys: string[];
+  }>;
+}
+
+export interface TaskRun {
+  id: UUID;
+  jobRunId: UUID;
+  taskKey: string;
+  status: TaskRunStatus;
+  rowsWritten?: number;
+  scanBytes?: number;
+  errorMsg?: string;
+  artifactPath?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface Pipeline {
+  id: UUID;
+  name: string;
+  dagsterJob: string;
+  definition?: Record<string, unknown>;
+  scheduleCron?: string;
+  enabled: boolean;
+  version: number;
+  createdAt: string;
+  pipelineKind?: PipelineKind;
+  status?: PipelineStatus;
+  engine?: string;
+  resourceGroup?: string;
+  computeProfile?: string;
+  lastRun?: JobRun;
+}
+
 export interface OperatorPort {
   name: string;
   cardinality: 'ONE' | 'MANY' | string;
@@ -162,7 +300,7 @@ export interface OperatorManifest {
   inputPorts?: OperatorPort[];
   outputSchema?: { mode?: string; modifies?: string[]; [key: string]: unknown };
   paramsSchema?: Record<string, unknown>;
-  compileTarget?: 'SQL_DBT' | 'SPARK' | 'PYTHON' | string;
+  compileTarget?: 'SPARK' | string;
   template?: { kind?: string; sql?: string; [key: string]: unknown };
   lineageRule?: Record<string, unknown>;
   securityRule?: Record<string, unknown>;
@@ -334,6 +472,28 @@ export interface AssetSubscriptionSummary {
 }
 
 export type BusinessTermStatus = 'DRAFT' | 'REVIEWING' | 'APPROVED' | 'REJECTED' | 'DEPRECATED' | 'ARCHIVED' | string;
+
+export interface CodebookEntry {
+  from: string;
+  to: string;
+  label?: string;
+}
+
+export interface Codebook {
+  id: UUID;
+  code: string;
+  name: string;
+  domain?: string;
+  description?: string;
+  status: 'DRAFT' | 'PUBLISHED' | 'DEPRECATED' | 'ARCHIVED' | string;
+  latestVersion?: string;
+  noMatchPolicy: 'KEEP' | 'NULL' | 'FAIL' | string;
+  entries: CodebookEntry[];
+  tags: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  publishedAt?: string;
+}
 
 export interface BusinessTerm {
   id: UUID;
@@ -510,6 +670,13 @@ export interface DwdModelDraftRequest {
   incrementalColumn?: string;
   partitionExpr?: string;
   columnMappings?: DwdModelColumnMappingRequest[];
+  pipelineMode?: string;
+  operatorGraphVersion?: number;
+  operatorGraph?: string;
+  resourceGroup?: string;
+  computeProfile?: string;
+  engine?: string;
+  costPolicy?: string;
 }
 
 export interface DwdModelColumnMappingRequest {
@@ -613,34 +780,6 @@ export interface DwdModelCompileResult {
   compiledSql: string;
   dependencies: string[];
   outputColumns: string[];
-}
-
-export interface DwdModelRun {
-  id: UUID;
-  modelId: UUID;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
-  triggerType: 'MANUAL' | 'ODS_EVENT' | 'BACKFILL' | string;
-  sourceIntegrationRunId?: UUID;
-  orchestrationDagId?: UUID;
-  dagsterRunId?: string;
-  engineRunId?: string;
-  trinoQueryId?: string;
-  resourceGroup?: string;
-  computeProfile?: string;
-  queuedAt?: string;
-  startedAt?: string;
-  finishedAt?: string;
-  errorMsg?: string;
-  rowsRead?: number;
-  rowsWritten?: number;
-  artifactsPath?: string;
-  estimatedScanBytes?: number;
-  actualScanBytes?: number;
-  costEstimate?: number;
-  queueReason?: string;
-  retryCount?: number;
-  createdAt?: string;
-  updatedAt?: string;
 }
 
 export interface ComputeProfile {

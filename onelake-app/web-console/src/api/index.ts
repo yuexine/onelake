@@ -20,6 +20,7 @@ import type {
   LineageGraphData,
   Notification,
   ComputeProfile,
+  Codebook,
   Operator,
   OperatorManifest,
   OperatorValidationResult,
@@ -34,7 +35,6 @@ import type {
   Dag,
   JobRun,
   DataModel,
-  DwdModelRun,
   DwdModelCompileResult,
   DwdModelDraftRequest,
   DwdModelValidation,
@@ -45,6 +45,16 @@ import type {
   SyncRun,
   SyncTask,
   TableCreateRequest,
+  Pipeline,
+  PipelineTask,
+  PipelineTaskEdge,
+  PipelineTaskRequest,
+  PipelineTaskEdgeRequest,
+  PipelineValidationResult,
+  PipelineKind,
+  PipelineStatus,
+  PipelineTaskType,
+  TaskRun,
 } from '../types';
 
 export interface PageResult<T> {
@@ -305,6 +315,76 @@ export const OrchestrationAPI = {
     unwrap<PageResult<JobRun>>(http.get(`/orchestration/dags/${id}/runs`, { params: { page, size } })),
 };
 
+/**
+ * Pipeline v2 API — used by the Unified Pipeline Editor (P2).
+ * See docs/流水线模块重设计方案.md §4 (IA) and §6.7 (validation contract).
+ *
+ * Convention: /api/v1/orchestration/pipelines/*
+ */
+export const PipelineAPI = {
+  // pipeline (dag) lifecycle
+  create: (payload: { name: string; pipelineKind?: PipelineKind }) =>
+    unwrap<Pipeline>(http.post('/orchestration/pipelines', payload)),
+  get: (id: string) =>
+    unwrap<Pipeline>(http.get(`/orchestration/pipelines/${id}`)),
+  updateStatus: (id: string, status: PipelineStatus) =>
+    unwrap<Pipeline>(http.put(`/orchestration/pipelines/${id}/status`, { status })),
+
+  // tasks
+  listTasks: (id: string) =>
+    unwrap<PipelineTask[]>(http.get(`/orchestration/pipelines/${id}/tasks`)),
+  createTask: (id: string, payload: PipelineTaskRequest) =>
+    unwrap<PipelineTask>(http.post(`/orchestration/pipelines/${id}/tasks`, payload)),
+  updateTask: (id: string, taskKey: string, payload: Partial<PipelineTaskRequest> & { taskType: PipelineTaskType }) =>
+    unwrap<PipelineTask>(http.put(`/orchestration/pipelines/${id}/tasks/${encodeURIComponent(taskKey)}`, payload)),
+  deleteTask: (id: string, taskKey: string) =>
+    unwrap<void>(http.delete(`/orchestration/pipelines/${id}/tasks/${encodeURIComponent(taskKey)}`)),
+
+  // edges
+  listEdges: (id: string) =>
+    unwrap<PipelineTaskEdge[]>(http.get(`/orchestration/pipelines/${id}/edges`)),
+  createEdge: (id: string, payload: PipelineTaskEdgeRequest) =>
+    unwrap<PipelineTaskEdge>(http.post(`/orchestration/pipelines/${id}/edges`, payload)),
+  deleteEdge: (id: string, sourceKey: string, targetKey: string) =>
+    unwrap<void>(http.delete(`/orchestration/pipelines/${id}/edges`, { params: { sourceKey, targetKey } })),
+
+  // L1+L2 validation (§6.7)
+  validate: (id: string) =>
+    unwrap<PipelineValidationResult>(http.post(`/orchestration/pipelines/${id}/validate`, null)),
+
+  // trigger (P1 triggerPipelineRun path)
+  trigger: (id: string, trigger = 'MANUAL') =>
+    unwrap<{ runId: string }>(http.post(`/orchestration/pipelines/${id}/trigger`, null, { params: { trigger } })),
+
+  // task runs
+  listTaskRuns: (id: string, runId: string) =>
+    unwrap<TaskRun[]>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks`)),
+
+  // C4 backfill (admin)
+  backfillDryRun: () =>
+    unwrap<{ dryRun: boolean; totalCandidates: number; plannedItems: unknown[]; errors: string[] }>(
+      http.get('/orchestration/pipelines/backfill')
+    ),
+  backfillExecute: (dryRun = false) =>
+    unwrap<{ dryRun: boolean; totalCandidates: number; createdPipelineIds: string[]; skippedModelIds: string[]; errors: string[] }>(
+      http.post('/orchestration/pipelines/backfill', null, { params: { dryRun } })
+    ),
+
+  // P3: ODS→DWD template
+  applyOdsDwdTemplate: (payload: {
+    pipelineName?: string;
+    modelId: string;
+    sourceFqn: string;
+    targetFqn: string;
+    dbtModelName?: string;
+    includeQualityGate?: boolean;
+    includeFieldGovernance?: boolean;
+  }) =>
+    unwrap<{ pipelineId: string; taskIds: string[]; edgeIds: string[]; warnings?: string }>(
+      http.post('/orchestration/pipelines/templates/ods-dwd', payload)
+    ),
+};
+
 export const OperatorAPI = {
   listOperators: (params?: { category?: string; scope?: string; keyword?: string }) =>
     unwrap<Operator[]>(http.get('/orchestration/operators', { params })),
@@ -458,18 +538,10 @@ export const ModelingAPI = {
     unwrap<DwdModelValidation>(http.post(`/modeling/models/${id}/validate`)),
   compileModel: (id: string) =>
     unwrap<DwdModelCompileResult>(http.post(`/modeling/models/${id}/compile`)),
-  runModel: (id: string, payload?: {
-    triggerType?: string;
-    sourceIntegrationRunId?: string;
-    fullRefresh?: boolean;
-    partitionStart?: string;
-    partitionEnd?: string;
-  }) =>
-    unwrap<DwdModelRun>(http.post(`/modeling/models/${id}/run`, payload || { triggerType: 'MANUAL' })),
-  listModelRuns: (id: string) =>
-    unwrap<DwdModelRun[]>(http.get(`/modeling/models/${id}/runs`)),
-  getModelRun: (runId: string) =>
-    unwrap<DwdModelRun>(http.get(`/modeling/model-runs/${runId}`)),
+  publishModel: (id: string, payload?: { comment?: string }) =>
+    unwrap<DataModel>(http.post(`/modeling/models/${id}/publish`, payload || {})),
+  listCodebooks: (params?: { keyword?: string; status?: string; domain?: string }) =>
+    unwrap<Codebook[]>(http.get('/modeling/codebooks', { params })),
 };
 
 export const GlossaryAPI = {

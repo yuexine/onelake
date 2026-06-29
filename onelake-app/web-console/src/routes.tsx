@@ -4,7 +4,7 @@
  * 这样 Sider/TopBar/全局任务条渲染一次，页面切换只替换 Outlet 部分。
  */
 import { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { Spin } from 'antd';
 import App from './App';
 
@@ -36,6 +36,7 @@ const OptimizeCenter = lazy(() => import('./pages/lakehouse/OptimizeCenter'));
 // 编排
 const PipelineList = lazy(() => import('./pages/orchestration/PipelineList'));
 const DagCanvas = lazy(() => import('./pages/orchestration/DagCanvas'));
+const UnifiedPipelineEditor = lazy(() => import('./pages/orchestration/unified-editor/UnifiedPipelineEditor'));
 const OperatorMarket = lazy(() => import('./pages/orchestration/OperatorMarket'));
 const RunInstances = lazy(() => import('./pages/orchestration/RunInstances'));
 
@@ -79,6 +80,23 @@ const Channels = lazy(() => import('./pages/system/Channels'));
 const AuthCallback = lazy(() => import('./pages/auth/AuthCallback'));
 const AuthLogin = lazy(() => import('./pages/auth/AuthCallback').then((module) => ({ default: module.AuthLogin })));
 
+function GovernanceFactoryRedirect() {
+  const search = new URLSearchParams(window.location.search);
+  search.set('template', 'ods-dwd');
+  return <Navigate to={`/orchestration/pipelines/new?${search.toString()}`} replace />;
+}
+
+/** Old DagCanvas route — redirect to the unified editor. */
+function DagCanvasRedirect() {
+  const { id } = useParams<{ id: string }>();
+  return <Navigate to={`/orchestration/pipelines/${id}`} replace />;
+}
+
+function PipelineCreateRoute() {
+  // All pipelines use the Unified Pipeline Editor.
+  return <UnifiedPipelineEditor />;
+}
+
 export function AppRoutes() {
   return (
     <Suspense fallback={<Fallback />}>
@@ -110,14 +128,18 @@ export function AppRoutes() {
           <Route path="/lakehouse/tables" element={<LakehouseTables />} />
           <Route path="/lakehouse/tables/new" element={<TableWizard />} />
           <Route path="/lakehouse/tables/:id" element={<TableDetail />} />
+          <Route path="/lakehouse/governance-factory" element={<GovernanceFactoryRedirect />} />
           <Route path="/lakehouse/sql" element={<SqlWorkbench />} />
           <Route path="/lakehouse/optimize" element={<OptimizeCenter />} />
 
           {/* 编排 */}
           <Route path="/orchestration" element={<Navigate to="/orchestration/pipelines" replace />} />
           <Route path="/orchestration/pipelines" element={<PipelineList />} />
-          <Route path="/orchestration/pipelines/new" element={<DagCanvas />} />
-          <Route path="/orchestration/pipelines/:id" element={<DagCanvas />} />
+          <Route path="/orchestration/pipelines/new" element={<PipelineCreateRoute />} />
+          <Route path="/orchestration/pipelines/:id" element={<UnifiedPipelineEditor />} />
+          {/* Historical graph route redirects to the unified editor. */}
+          <Route path="/orchestration/pipelines/:id/graph" element={<DagCanvasRedirect />} />
+          <Route path="/orchestration/pipelines/:pipelineId/editor" element={<UnifiedPipelineEditor />} />
           <Route path="/orchestration/operators" element={<OperatorMarket />} />
           <Route path="/orchestration/runs" element={<RunInstances />} />
 

@@ -91,6 +91,8 @@ export const taskStatusColorMap: Record<string, string> = {
   SUCCEEDED: 'success',
   SUCCESS: 'success',
   FAILED: 'error',
+  UPSTREAM_FAILED: 'warning',
+  SKIPPED: 'default',
   PENDING: 'default',
   APPROVED: 'success',
   REJECTED: 'error',

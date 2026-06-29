@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-流水线与算子市场阶段四行数门禁模型级 dbt test 落地（阶段 86 已完成）
+流水线模块重设计：Spark-only 统一编辑器 + 任务一等实体 + 数据流边契约闭环（阶段 110 已完成；后续扩展 Union/Lookup/Branch 与水位持久化）
 
 ## 各阶段
 
@@ -714,6 +714,171 @@
 - [x] 编排触发前识别 Spark/Python contract-only DAG，明确阻断且不创建 `job_run`
 - [x] 前端 API/type 层补齐运行契约契约，供后续画布启用/禁用运行入口
 - [x] 运行后端/dbt/前端测试、真实 API 冒烟、临时 DAG 清理和缺口复核
+- **状态：** complete
+
+### 阶段 93：治理表工厂迭代 1-4 最小建模闭环
+- [x] 新增 `治理表工厂` 页面，作为“操作一张 ODS 表并治理生成新 DWD 表”的产品化入口
+- [x] 支持源表选择、目标表名、业务域、物化方式、分区表达式和字段治理矩阵
+- [x] 支持字段级直通、表达式、字典映射、关联补充等高级算子配置
+- [x] 前端生成 DWD draft request 与 operator graph，后端保存治理图、编译 SQL/dbt 并保留高级算子节点
+- [x] 后端支持 lookup join 编译为 dbt `source` + `left join`，字典映射通过字段表达式编译为 `CASE`
+- [x] ODS 分层表管理新增 `治理成表` 入口跳转到治理表工厂
+- [x] 运行建模单测、dbt parse、前端类型检查和生产构建
+- **状态：** complete
+
+### 阶段 94：治理表工厂迭代 5-9 运行发布与契约可见闭环
+- [x] 治理表工厂新增本地异常预览：主键缺失、敏感字段直通、字典未配置、关联补充不完整
+- [x] 页面接入模型运行接口，展示最近运行状态并复用现有 DWD/Dagster 执行链路
+- [x] 后端新增模型发布接口，发布已校验模型并发出 `modeling.model.published` 事件
+- [x] 前端接入发布动作，展示 `DRAFT/VALIDATED/PUBLISHED` 状态
+- [x] 页面接入运行契约 API，展示 `SQL_DBT READY` 与 `SPARK/PYTHON` 未接入 Dagster job 的真实边界
+- [x] 后端允许 `VALIDATED` 模型继续编辑并回退 `DRAFT`，已发布模型仍要求新建版本
+- [x] 运行后端单测、整包编译、dbt parse、前端类型检查/构建、OpenAPI 冒烟和浏览器验证
+- **状态：** complete
+
+### 阶段 95：治理能力并入流水线最佳实践收敛
+- [x] 将治理表工厂改为支持嵌入模式，作为字段治理节点的配置编辑器复用
+- [x] 流水线画布新增 `ods-dwd` 模板，自动生成 ODS 输入、字段治理矩阵、DWD 输出三节点
+- [x] 字段治理节点右侧属性面板展示模型状态、目标表和“配置字段治理”入口
+- [x] 字段治理矩阵在流水线宽抽屉内完成源表、字段规则、高级算子、校验、编译、运行和发布
+- [x] 分层表管理“治理成表”入口改为打开流水线 DWD 治理模板
+- [x] 左侧菜单移除独立“治理表工厂”；旧路由兼容跳转到流水线模板
+- [x] 运行前端类型检查、前端构建、建模模块测试和浏览器验证
+- **状态：** complete
+
+### 阶段 96：流水线与治理设计器产品边界重构
+- [x] 将 `ods-dwd` 模板从三节点改为 `ODS 源表 -> DWD 治理模型 -> 治理质量门禁 -> DWD 治理表` 四节点编排
+- [x] 顶层画布左侧面板改为“编排算子”，隐藏字段处理器类算子，并提示字段级算子进入治理设计器维护
+- [x] DWD 治理模型属性面板改为模型契约表达，入口文案从“配置字段治理”改为“打开治理设计器”
+- [x] 治理设计器内部将“字段治理矩阵”收敛为“字段映射与处理 Recipe”，字段级算子列改为“字段处理”
+- [x] 算子市场新增前端推导的适用范围筛选：编排步骤、模型 Recipe、字段处理器、质量断言、复合模板
+- [x] 治理模型保存后将真实 `sourceFqn/targetFqn` 同步回写到 ODS 输入和 DWD 输出节点
+- [x] 运行前端类型检查、前端构建、图级校验浏览器实证和算子市场筛选浏览器实证
+- **状态：** complete
+
+### 阶段 97：DWD 治理流水线工作台主路径重构
+- [x] 新增 `dwd-workbench` 页面组，将 DWD 治理流水线主路径升级为阶段化工作台
+- [x] `/orchestration/pipelines/new?template=ods-dwd` 分流到 DWD 工作台，普通 `/orchestration/pipelines/new` 保持旧 DAG 画布
+- [x] 新增 `/orchestration/pipelines/:id/workbench` 主路径和 `/orchestration/pipelines/:id/graph` 技术 DAG 辅助路径
+- [x] 工作台串联源表与目标、治理模型、质量门禁、运行发布、监控血缘五阶段
+- [x] 工作台嵌入现有 `GovernanceFactory`，保留字段映射、字段处理、高级算子、保存校验、编译、运行和发布能力
+- [x] 流水线列表根据 DAG definition/operatorGraph 识别 DWD 治理流水线，打开文案从“画布”切换为“工作台”
+- [x] 工作台详情态接入 `OrchestrationAPI.getDag` 与 `ModelingAPI.getModel`，从 DAG definition/operatorGraph 恢复模型上下文
+- [x] `GovernanceFactory` 支持 `initialModel`，可按已有模型初始化目标表、字段映射、字段处理和模型状态
+- [x] 运行前端类型检查、前端构建、空白检查和浏览器路由实证
+- **状态：** complete
+
+### 阶段 98：DWD 工作台新建到详情态闭环
+- [x] 工作台新增统一 `handleModelChange`，模型保存/编译/发布后同步模型、DAG、source/target、dbt 和算力上下文
+- [x] 新建工作台在模型编译生成 `orchestrationDagId` 后自动切换到 `/orchestration/pipelines/{dagId}/workbench`
+- [x] 工作台顶部与运行发布阶段统一使用真实 `pipelineDagId` 打开技术 DAG
+- [x] 运行发布阶段将占位按钮改为真实导航：技术 DAG、运行实例、观测血缘
+- [x] 运行实例页支持 `?dagId=` 查询参数，进入后聚焦当前流水线并提供“查看全部”
+- [x] 运行前端类型检查、前端构建、空白检查和登录态浏览器实证
+- **状态：** complete
+
+### 阶段 99：DWD 工作台质量门禁可编辑
+- [x] 梳理后端 DWD `operatorGraph` 质量门禁契约，确认 `QUALITY_GATE` 与 `gate.*` 节点会编译为 dbt tests
+- [x] 工作台新增质量门禁草稿模型，支持从已有模型 operatorGraph 还原门禁配置
+- [x] 质量门禁阶段支持主键完整性、枚举值命中、数值范围、自定义 SQL 四类门禁配置
+- [x] 保存门禁时更新模型 operatorGraph，触发模型校验，并刷新工作台模型状态
+- [x] 运行前端类型检查、前端构建、空白检查和登录态浏览器质量阶段实证
+- **状态：** complete
+
+### 阶段 100：DWD 工作台监控血缘闭环
+- [x] 复用现有目录血缘能力，不在工作台重复实现大图渲染
+- [x] 监控血缘阶段新增字段级 lineage 摘要，按模型字段映射展示源字段、目标字段、转换表达式和治理标记
+- [x] 监控血缘阶段新增目录血缘、资产详情、运行实例三个操作入口
+- [x] 资产详情入口按目标表 FQN 查询 Catalog 资产，查不到时降级到目录血缘
+- [x] 运行前端类型检查、前端构建、空白检查和登录态浏览器观测阶段实证
+- **状态：** complete
+
+### 阶段 101：DWD 工作台资源与算力配置闭环
+- [x] 源表与目标阶段接入资源组注册表，展示资源组、计算画像和执行引擎
+- [x] 支持在工作台保存模型级 `resourceGroup/computeProfile/engine`，并同步到后续编译 payload
+- [x] 治理模型阶段将资源配置传入 `GovernanceFactory`，避免新保存模型退回硬编码默认算力
+- [x] 运行前端类型检查、前端构建、空白检查和登录态浏览器资源控件实证
+- **状态：** complete
+
+### 阶段 102：DWD 工作台字典治理预设与版本化配置
+- [x] 字典匹配字段处理支持选择标准字典预设，并自动填入映射内容
+- [x] 字典配置在 UI 中展示字典名、版本、映射数量和未命中策略
+- [x] `operatorGraph` 写入 `dictionaryRef/dictionaryName/dictionaryVersion/dictionarySource/pairs`，支持再次打开模型时回显
+- [x] 保持当前前端 CASE 编译路径，不伪装后端字典主数据已完成
+- [x] 运行前端类型检查、前端构建和登录态浏览器字典抽屉实证
+- **状态：** complete
+
+### 阶段 103：标准字典主数据事实源闭环
+- [x] 新增 `modeling.codebook` 与 `modeling.codebook_version`，支持字典集、字典项、发布版本快照
+- [x] 新增 Codebook 实体、仓储、DTO、服务、Controller 和领域事件常量
+- [x] 支持查询、创建、更新、发布版本、废弃和版本历史接口
+- [x] 前端 API/type 层接入已发布字典，DWD 治理设计器合并后端字典与内置预设
+- [x] 运行后端建模模块测试、bootstrap 聚合编译、前端类型检查/构建、真实 API 和浏览器验证
+- **状态：** complete
+
+### 阶段 104：DWD 运行资源上下文透传到 Dagster tags
+- [x] 核对 DWD 运行链路，确认 `resourceGroup/computeProfile` 已进入 Dagster op config 和运行记录
+- [x] 将 `resourceGroup/computeProfile` 补入 Dagster execution tags，支持跨系统按资源画像检索
+- [x] 补充单测捕获 launch tags，确认默认资源上下文进入 Dagster metadata
+- [x] 明确本轮不是运行时队列/配额调度器，只完成资源观测透传
+- **状态：** complete
+
+### 阶段 105：DWD 编排触发资源上下文一致性闭环
+- [x] 核对 Orchestration 触发 DWD DAG 链路，确认资源组和计算画像已进入 `run_config`
+- [x] 将 `onelake.resource_group` 与 `onelake.compute_profile` 同步补入编排触发的 Dagster tags
+- [x] 补充编排服务单测，同时断言 DWD DAG launch 的 op config 与 tags 资源上下文一致
+- [x] 运行 `module-orchestration` 测试，确认编排入口不再丢失资源观测标签
+- **状态：** complete
+
+### 阶段 106：流水线模块重设计方案定稿
+- [x] 通读流水线前后端实现（DagCanvas/DwdPipelineWorkbench/PipelineList + module-orchestration/modeling + Dagster）
+- [x] 完成问题诊断：产品形态分裂、画布不可执行、算子图与执行脱节、跨 schema 直写等
+- [x] 完成竞品调研（DataWorks/Databricks+DLT/Dagster/dbt Cloud/ADF·Fabric/Glue）
+- [x] 重定义功能目标：数据开发与治理编排中枢，统一编辑器，任务类型化
+- [x] 输出前端原型/交互、后端重构（任务一等实体表、引擎可插拔 SPI、含 Spark 扩展）设计
+- [x] 与用户确认方向决策：统一编辑器 / 可扩展 Spark / pipeline_task 表 / P1-P4 全闭环 / 落文档
+- [x] 写入 `docs/流水线模块重设计方案.md`
+- **状态：** complete
+
+### 阶段 107（P1）：流水线可执行底座
+- [x] 新增迁移 `orchestration/V4__pipeline_task.sql` 等：pipeline_task/pipeline_task_edge/task_run、dag 扩字段、统一 RunStatus
+- [x] 新增 Spark 主链路 `PipelineCompileService`，按边推导输入并生成 Spark 执行配置
+- [x] Dagster 新增 `onelake_pipeline_run`，运行 Spark SQL / PySpark 任务
+- [x] 后端统一 `triggerDag` 走 `onelake_pipeline_run`，节点级 task_run 回写
+- [x] 本地用多源 Join + 治理 + 质量 + DWD Sink 流水线触发跑通并验证
+- **状态：** complete（原 TRINO_DBT/dbt 子图方案已被阶段 109-110 Spark-only 决策替代）
+
+### 阶段 108：数据流 DAG 契约化与多输入/多输出计算闭环
+- [x] 将 `pipeline_task_edge` 从“先后依赖”升级为“数据流边”：明确 source output、target input、asset FQN、alias、join role、trigger policy 和 freshness policy
+- [x] 建立流水线主链路节点端口契约：按任务类型校验输入/输出端口、Join left/right 基数、悬空输入、缺失 asset FQN 与 fan-out 合法性
+- [x] 结构化 Join 最小节点契约：`SPARK_SQL` 通过 `dataflow.nodeKind=JOIN` 表达 left/right 输入、join type、condition 和 select
+- [x] 编译期按边推导 Spark 下游输入：`from_tables`、`dataflow_inputs`、别名和 Join SQL 不再依赖重复手填
+- [x] 画布展示节点输入/输出计数、依赖边端口与 alias，并提供“添加连线”表单维护数据流边契约
+- [x] 补齐运行时多源就绪屏障（控制面最小实现）：多个 `SYNC_REF` fan-in 默认记录 readiness，全部输入就绪后触发；持久化水位/批次窗口后续深化
+- [x] 扩展结构化 `DERIVE_COLUMN` 与 `SINK` 节点：支持按单入边生成 Spark 派生字段 SQL、脱敏表达式和 DWD 落表 SQL
+- [ ] 继续扩展结构化 Union/Lookup/Branch 节点，支持更多 fan-in/fan-out 计算形态
+- [x] 运行实例页展示真实数据流拓扑：节点输入、节点输出、行数、产物表、上游/下游链路和失败传播
+- [x] 补齐运行态失败语义：新增 `UPSTREAM_FAILED`/`SKIPPED`，终态刷新时沿 PIPELINE 边传播上游失败
+- [x] 创建 `task_run` 时按 DAG 拓扑初始化：`SYNC_REF` 作为已就绪观测节点，直接下游进入 `RUNNING`，未满足上游屏障的节点保持 `QUEUED`
+- [x] 右侧节点面板补齐数据流可观测：展示“输入来自”“输出给”、端口、别名、表 FQN、触发策略和新鲜度策略
+- [x] 使用“两 MySQL 源表 Join 生成 DWD 表 + 质量门禁”做真实数据面端到端验收
+- **状态：** in_progress
+
+### 阶段 109：流水线主链路 Spark-only 收敛
+- [x] 新建流水线默认使用 `SPARK / spark-default / spark-small`，任务默认使用 Spark 家族引擎
+- [x] 新建、模板、回填链路不再创建 `SQL_MODEL` / `FIELD_GOVERNANCE` / `TRINO_DBT` 主链路节点
+- [x] `onelake_pipeline_run` 运行配置只生成 Spark op config，`dbtSelect` 不再作为流水线主链路输入
+- [x] 运行契约接口只暴露 `SPARK -> onelake_pipeline_run`
+- [x] 前端统一编辑器移除 `SQL 模型` 和 `Trino + dbt` 新建入口，字段治理改为 Spark 结构化节点表达
+- [x] 旧 `SQL_MODEL` / `FIELD_GOVERNANCE` 不允许在新流水线主链路创建
+- **状态：** complete
+
+### 阶段 110：硬删历史枚举和旧 DWD/dbt 模型运行能力
+- [x] 删除流水线历史任务枚举 `SQL_MODEL`、`FIELD_GOVERNANCE` 与旧运行引擎枚举 `TRINO_DBT`
+- [x] 删除旧 DWD/dbt Dagster job/op、Dagster run config builder、建模侧 `POST /models/{id}/run` 和 DWD model run synchronizer
+- [x] 运行契约、算子市场、资源组、前端画布和运行实例测试全部收敛为 Spark-only
+- [x] 新增迁移清理已落库历史资源默认值：内置资源只保留 `spark-default`，DWD 模型默认资源改为 `spark-default/spark-small/SPARK`
+- [x] 删除未接入 Spark 主链路的旧 dbt 质量门禁编译器
 - **状态：** complete
 
 ## 关键问题

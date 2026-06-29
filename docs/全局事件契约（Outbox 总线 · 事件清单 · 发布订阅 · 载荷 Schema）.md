@@ -156,15 +156,26 @@ public class SyncRunEventHandler implements DomainEventHandler {
 
 ### ② orchestration（调度编排）
 
-| 事件 | 触发时机 | 订阅方（动作） | 状态 |
-| --- | --- | --- | --- |
-| orchestration.schedule.fired | Dagster schedule/sensor 命中 | integration（触发 sync,经 REST 命令） | 规划 |
-| orchestration.pipeline.finished | 一条编排管道整体完成 | quality、ops | 规划 |
+| 事件 | 触发时机 | 载荷要点 | 订阅方（动作） | 状态 |
+| --- | --- | --- | --- | --- |
+| orchestration.schedule.fired | Dagster schedule/sensor 命中 | dagId、cron、firedAt | integration（触发 sync,经 REST 命令） | 规划 |
+| orchestration.pipeline.finished | 一条编排管道整体完成 | dagId、runId、status、durationMs | quality、ops | 规划（v2 起，由 `pipeline.run.succeeded/failed` 替代） |
+| **pipeline.published** | 流水线状态 DRAFT→VALIDATED→PUBLISHED 完成 | pipelineId、version、publishedBy、publishedAt | catalog（资产登记）、security（密级绑定）、dataservice（API 资源准备）、quality（关联规则） | 🆕 P1 |
+| **pipeline.run.succeeded** | `onelake_pipeline_run` Dagster job 整体成功 | pipelineId、runId、durationMs、taskCount、artifactPath | catalog（血缘/新鲜度）、quality（质量分回写）、ops（成功通知） | 🆕 P1 |
+| **pipeline.run.failed** | `onelake_pipeline_run` 整体失败（任一 task 失败） | pipelineId、runId、failedTaskKey、errorMsg、partialSucceeded[]、artifactPath | catalog（部分血缘）、quality（失败告警）、ops（失败通知） | 🆕 P1 |
+| **pipeline.task.loaded** | 单个 task_run 进入 SUCCEEDED（数据已写入 Iceberg） | pipelineId、runId、taskKey、targetFqn、rowsWritten、scanBytes、artifactPath | modeling（更新 data_model 状态/血缘）、catalog（资产登记）、security（PII 扫描触发）、quality（关联规则触发） | 🆕 P1 |
 
 <aside>
 🔁
 
 orchestration 与数据面 Dagster 主要走 **REST 回调**(`/sync-runs/{id}/reconcile`),不是事件;它把「调度命中」转化为对 integration 的命令调用。
+
+</aside>
+
+<aside>
+🆕
+
+**流水线 v2 事件（pipeline.* 系列）**：替代历史跨 schema 直写路径。原 `OrchestrationService` 直接 `INSERT/UPDATE modeling.model_run` 的代码路径在 P5 删除，改为 orchestration 发出 `pipeline.task.loaded`，modeling 自身消费后更新 data_model 状态。这是流水线重设计方案 §6.3 / §6.5 / C4 的关键约束。
 
 </aside>
 
@@ -215,12 +226,19 @@ orchestration 与数据面 Dagster 主要走 **REST 回调**(`/sync-runs/{id}/re
 | 生产  消费 | integration | catalog | modeling | quality | security | dataservice | ops |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | integration | — | ✅ |  | 待接入 | ✅ | ✅ | ✅ |
-| orchestration | ✅ |  |  | ✅ |  |  | ✅ |
+| orchestration | ✅ | 🆕 ✅ | 🆕 ✅ | 🆕 ✅ | 🆕 ✅ | 🆕 ✅ | 🆕 ✅ |
 | catalog |  | — | ✅ | ✅ | ✅ | ✅ |  |
 | modeling |  | ✅ | — | ✅ |  | ✅ |  |
 | quality |  | ✅ |  | — |  | ✅ | ✅ |
 | security |  | ✅ |  |  | — | ✅ |  |
 | dataservice |  | ✅ |  |  |  | — | ✅ |
+
+<aside>
+🆕
+
+**orchestration 成为全模块生产者**（v2 起）：通过 `pipeline.published` / `pipeline.run.*` / `pipeline.task.loaded` 向所有下游模块广播流水线生命周期。这是消灭跨 schema 直写的关键替代路径——下游模块不再被 orchestration 直接 JDBC 写入，而是消费事件自主更新。
+
+</aside>
 
 <aside>
 🧭
@@ -298,6 +316,70 @@ flowchart TB
 
 // dataservice.api.published
 { "apiId": "api-330", "path": "/v1/orders", "boundAsset": "iceberg.dws.fct_orders", "auth": "oauth2" }
+
+// ===== orchestration.pipeline.* （流水线 v2 新增，见流水线模块重设计方案 §7 P0） =====
+
+// pipeline.published
+{
+  "pipelineId": "d3f0c1e2-...",
+  "tenantId": "t-001",
+  "version": 3,                        // 发布版本号，从 dag.version 取
+  "publishedBy": "user-42",            // UserId（from JWT sub）
+  "publishedAt": "2026-06-24T10:00:00Z",
+  "pipelineKind": "ODS_DWD",           // BLANK | ODS_DWD | MULTI_LAYER
+  "taskCount": 5,
+  "targetFqns": ["iceberg.dwd.trade_orders"]  // 流水线产出的所有表级 FQN
+}
+
+// pipeline.run.succeeded
+{
+  "pipelineId": "d3f0c1e2-...",
+  "tenantId": "t-001",
+  "runId": "r-9012",                   // orchestration.job_run.id
+  "dagsterRunId": "dag-run-abc",
+  "durationMs": 124500,
+  "taskCount": 5,
+  "succeededTaskCount": 5,
+  "triggerType": "MANUAL",             // MANUAL | CRON | EVENT
+  "artifactPath": "s3://onelake-artifacts/pipelines/t-001/r-9012/",  // 见流水线方案 §12
+  "startedAt": "2026-06-24T10:00:00Z",
+  "finishedAt": "2026-06-24T10:02:04.500Z"
+}
+
+// pipeline.run.failed
+{
+  "pipelineId": "d3f0c1e2-...",
+  "tenantId": "t-001",
+  "runId": "r-9012",
+  "dagsterRunId": "dag-run-abc",
+  "failedTaskKey": "dwd_trade_orders",    // 首个失败任务的 task_key
+  "failedTaskType": "SPARK_SQL",          // SYNC_REF|SPARK_SQL|PYSPARK|QUALITY_GATE
+  "errorMsg": "Spark SQL failed: Reference 'ods_orders' not found",
+  "errorCode": "SPARK_SQL_FAILED",
+  "partialSucceeded": [                   // 在失败前已成功的任务
+    { "taskKey": "sync_ref_ods", "targetFqn": "iceberg.ods.crm.orders", "rowsWritten": 10523 }
+  ],
+  "triggerType": "MANUAL",
+  "artifactPath": "s3://onelake-artifacts/pipelines/t-001/r-9012/",
+  "startedAt": "2026-06-24T10:00:00Z",
+  "finishedAt": "2026-06-24T10:01:32Z"
+}
+
+// pipeline.task.loaded（最细粒度，每个 task 成功都发；用于下游模块增量更新血缘/状态）
+{
+  "pipelineId": "d3f0c1e2-...",
+  "tenantId": "t-001",
+  "runId": "r-9012",
+  "taskKey": "dwd_trade_orders",          // pipeline_task.task_key
+  "taskType": "SPARK_SQL",                // SYNC_REF|SPARK_SQL|PYSPARK|QUALITY_GATE
+  "engine": "SPARK_SQL",                  // SPARK_SQL|PYSPARK
+  "targetFqn": "iceberg.dwd.trade_orders",
+  "pipelineTaskId": "task-uuid",
+  "rowsWritten": 10523,
+  "scanBytes": 83886080,
+  "artifactPath": "s3://onelake-artifacts/pipelines/t-001/r-9012/dbt/run_results.json",
+  "finishedAt": "2026-06-24T10:01:15Z"
+}
 ```
 
 ## 八、落地清单（DoD）

@@ -2011,14 +2011,311 @@
   - 真实 API：创建临时 `codex_stage92_spark_contract` DAG 后触发返回 `code=40012`，message 为 `SPARK 仍处于 Manifest 契约态，尚未接入 Dagster Spark op、依赖隔离和部署契约`。
   - DB 实证：该临时 Spark DAG 触发后 `orchestration.job_run` 为 0 行，说明阻断发生在创建 run 之前；临时 DAG 已清理，剩余 0 条。
 
+### 阶段 93：治理表工厂迭代 1-4 最小建模闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 新增 `/lakehouse/governance-factory` 治理表工厂页面，面向“选择一张 ODS 表，配置多个字段治理规则，生成一张 DWD 表”的工作流。
+  - 页面提供源表与目标配置、字段治理矩阵、高级算子配置、SQL/dbt 预览和保存校验/编译入口。
+  - 支持字段直通、表达式、字典映射和关联补充；字典映射生成 `CASE` 表达式，关联补充生成 `join.lookup_enrich` operator graph 节点。
+  - `DwdModelDraftRequest` 扩展 `pipelineMode/operatorGraph/resourceGroup/computeProfile/engine/costPolicy` 等字段，保留旧构造器兼容既有测试。
+  - `DwdModelService` 保存治理图与执行资源信息，编译时从 operatorGraph 读取 lookup join，并将 lookup source 写入 `sources.yml`。
+  - 分层表管理 ODS 行新增 `治理成表` 动作，直达治理表工厂并携带 `sourceAssetId`。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - `uvx --from dbt-trino dbt parse --profiles-dir .` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+
+### 阶段 94：治理表工厂迭代 5-9 运行发布与契约可见闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 页面新增本地异常预览，覆盖主键缺失、敏感字段直通、字典配置缺失、lookup 配置不完整等常见治理问题。
+  - 页面接入 `ModelingAPI.runModel`，展示最近运行状态；接入 `OperatorAPI.listRuntimeContracts`，展示 SQL_DBT/Spark/Python 运行契约。
+  - 后端新增 `POST /api/v1/modeling/models/{id}/publish`，要求模型已校验或已发布、存在 dbt artifact 和 orchestration DAG，并发布 `modeling.model.published` outbox 事件。
+  - 页面接入发布按钮和 `DRAFT/VALIDATED/PUBLISHED` 状态展示。
+  - 修复模型状态流转：`VALIDATED` 允许再次编辑并回退 `DRAFT`，`PUBLISHED` 仍提示新建版本。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过，覆盖 lookup join 编译、发布事件和已校验模型回草稿编辑。
+  - `mvn -q install -DskipTests -Djacoco.skip=true` 通过。
+  - `uvx --from dbt-trino dbt parse --profiles-dir .` 通过，仅有 uvx/dbt-trino 可执行提示和 Trino keyring info。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - 重启后端为 `onelake-backend-governance`，screen `16458.onelake-backend-governance`，PID `16848`，`/actuator/health` 为 `UP`。
+  - OpenAPI 实证：`/api/v1/modeling/models/{id}/publish` 存在，operationId 为 `publishModel`。
+  - 浏览器实证：登录后访问 `/lakehouse/governance-factory`，核心面板、字段矩阵、高级算子入口、保存校验、编译 dbt、运行、发布、`SQL_DBT READY` 均可见；控制台无 error，仅有既有 React Router future warnings。
+
+### 阶段 95：治理能力并入流水线最佳实践收敛
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 将 `GovernanceFactory` 扩展为可嵌入组件：`embedded/initialSourceAssetId/onModelChange` 支持从流水线节点属性抽屉复用字段治理矩阵。
+  - `DagCanvas` 新增 `ods-dwd` 模板识别：访问 `/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=...` 时自动生成 ODS 输入、字段治理矩阵、DWD 治理表三节点。
+  - 字段治理节点右侧属性面板新增“配置字段治理”入口，宽抽屉内承载源表、目标表、字段矩阵、高级算子、校验、编译、运行和发布。
+  - 字段治理模型保存/编译/发布后，将 `modelId/modelStatus/sourceFqn/targetFqn` 回写到流水线节点配置，保持 DAG 与 DWD 模型引用关系。
+  - 分层表管理“治理成表”入口改为进入流水线 DWD 治理模板。
+  - 左侧菜单移除独立“治理表工厂”，旧 `/lakehouse/governance-factory` 路由兼容跳转到流水线模板。
+  - 修复字段治理矩阵内高级算子配置抽屉遮罩阻断问题；行内源字段、输出字段、算子与主键控件获得焦点/变更时同步切换当前配置字段。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+  - 浏览器实证：流水线模板打开后显示 `dwd_field_governance_pipeline`，画布包含 `ODS 源表`、`字段治理矩阵`、`DWD 治理表`，字段治理矩阵在流水线内打开，保存校验/编译 dbt/运行/发布动作可见。
+  - 浏览器实证：菜单中不存在独立“治理表工厂”；旧 `/lakehouse/governance-factory?sourceAssetId=...` 路由跳转为 `/orchestration/pipelines/new?sourceAssetId=...&template=ods-dwd`。
+  - 用户反馈 Web 上找不到入口后，新增流水线列表顶部 `新建 DWD 治理流水线` 显式入口；浏览器实证 `/orchestration/pipelines` 顶部可见该按钮，仍保留普通 `新建流水线`。
+  - 浏览器实证：字段治理矩阵内打开 `id 高级算子配置` 后，未新增高级抽屉遮罩；直接点击 `customer_no` 行“算子”控件，右侧抽屉切换为 `customer_no 高级算子配置`。
+
+### 阶段 96：流水线与治理设计器产品边界重构
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 将 `ods-dwd` 流水线模板从 `ODS 源表 -> 字段治理矩阵 -> DWD 治理表` 调整为 `ODS 源表 -> DWD 治理模型 -> 治理质量门禁 -> DWD 治理表`，让顶层 DAG 表达资产流转、模型运行、质量门禁和发布边界。
+  - 顶层画布左侧面板改为“编排算子”，仅展示输入、转换、治理、关联、聚合、质量门禁、输出等顶层/表级能力；字段级标准化、脱敏、加密算子通过提示引导到治理设计器内部维护。
+  - DWD 治理模型属性面板从“算子引用/字段治理矩阵”改为“模型契约/DWD 治理模型”，入口改为“打开治理设计器”。
+  - `GovernanceFactory` 可见文案从治理表工厂/字段治理矩阵收敛为 `DWD 治理设计器`、`字段映射与处理 Recipe`、`字段处理配置`。
+  - 算子市场新增前端推导的适用范围分层与筛选：编排步骤、模型 Recipe、字段处理器、质量断言、复合模板；算子卡片和详情弹窗展示适用范围说明。
+  - DWD 治理模型保存/编译/发布后，真实 `sourceFqn/targetFqn` 会同步回写到顶层 ODS 输入节点和 DWD 输出节点。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：`/orchestration/pipelines/new?template=ods-dwd` 显示 `dwd_table_governance_pipeline`，画布包含 `ODS 源表`、`DWD 治理模型`、`治理质量门禁`、`DWD 治理表`，宽抽屉标题为 `DWD 治理设计器`，页面不再出现顶层 `字段治理矩阵` 标题。
+  - 浏览器实证：点击流水线 `校 验` 后返回 `4 节点通过`，无缺必填参数错误，无 resourceGroup warning，仅剩未保存治理模型前的 sourceColumns/outputColumns schema 闭合提示。
+  - 浏览器实证：`/orchestration/operators` 展示适用范围筛选与卡片标签；选择 `字段处理器` 后列表收敛到 19 个字段级处理器。
+
+### 阶段 97：DWD 治理流水线工作台主路径重构
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 新增 `onelake-app/web-console/src/pages/orchestration/dwd-workbench/DwdPipelineWorkbench.tsx`，将 DWD 治理流水线主路径重构为阶段化工作台。
+  - 新增 `DwdPipelineCreate.tsx`，作为 DWD 模板创建入口的轻量包装。
+  - `routes.tsx` 新增 `PipelineCreateRoute`：`template=ods-dwd` 进入 DWD 工作台，普通新建流水线继续进入旧 DAG 画布；新增详情工作台 `/orchestration/pipelines/:id/workbench` 与技术 DAG `/orchestration/pipelines/:id/graph`。
+  - 工作台提供 `源表与目标 -> 治理模型 -> 质量门禁 -> 运行发布 -> 监控血缘` 五阶段导航，并在页面中展示 `ODS 源表 -> DWD 治理模型 -> 质量门禁 -> DWD 治理表` 资产流。
+  - 工作台在治理模型阶段嵌入现有 `GovernanceFactory`，复用字段映射与处理 Recipe、高级算子、保存校验、编译 dbt、运行和发布能力。
+  - `PipelineList` 根据 DAG definition/operatorGraph 识别 DWD 治理流水线，DWD 行点击进入工作台，普通 DAG 仍进入画布；操作文案随类型显示“打开工作台/打开画布”。
+  - 工作台详情态接入 `OrchestrationAPI.getDag` 和 `ModelingAPI.getModel`，兼容从 DAG definition 顶层 `modelId/sourceFqn/targetFqn` 与治理节点 config 恢复上下文。
+  - `GovernanceFactory` 新增 `initialModel` 初始化能力，可按已有模型还原目标表、物化方式、分区表达式、字段映射、字段处理和模型状态，用于工作台详情态编辑。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：`/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=test-source` 展示 `DWD 治理流水线`、`治理闭环`、`治理资产流`、`字段映射与处理 Recipe`、`质量门禁`、`监控血缘`，且不出现旧 `流水线 order_pipeline` 画布标题；控制台无 error。
+  - 浏览器实证：`/orchestration/pipelines/new` 仍展示旧画布，页面包含 `流水线 / order_pipeline / 校 验 / 试运行 / 发布 / 编排算子` 等画布内容，未进入 DWD 工作台。
+  - 详情态真实 API 直连未做终端实证：`curl http://localhost:8080/api/v1/orchestration/dags` 返回 401 Bearer，说明需要登录态 token；本轮不伪造 API 成功，只完成前端真实接口接入、类型/构建和创建路径浏览器实证。
+
+### 阶段 98：DWD 工作台新建到详情态闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - `DwdPipelineWorkbench` 新增统一 `handleModelChange`：治理模型保存、编译或发布回调后，将 `modelId/modelStatus/sourceFqn/targetFqn/dbtModelName/engine/resourceGroup/computeProfile/compiledSql` 写回工作台上下文。
+  - 工作台新增 `pipelineDagId` 上下文，修正之前用 `modelId` 代表 DAG 的混淆；产物面板、技术 DAG 按钮、运行发布阶段都使用真实 DAG id。
+  - 新建态在模型编译生成 `orchestrationDagId` 后自动 `replace` 到 `/orchestration/pipelines/{dagId}/workbench`，保证保存后的工作台可回访。
+  - 运行发布阶段将原占位按钮调整为真实入口：技术 DAG、运行实例、观测血缘。
+  - `RunInstances` 支持 `?dagId=` 查询参数，进入后客户端聚焦当前流水线运行记录，并提供“查看全部”返回全量列表。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：使用本地开发账号 `dev` 登录后，`/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=test-source` 展示 `DWD 治理流水线`、`治理资产流`、`字段映射与处理 Recipe`、`质量门禁`、`监控血缘`。
+  - 浏览器实证：`/orchestration/runs?dagId=codex-test-dag` 展示 `运行实例`、`当前流水线` 和 `查看全部`，控制台无 error。
+
+### 阶段 99：DWD 工作台质量门禁可编辑
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 对照 `DwdModelService`，确认后端已支持 `QUALITY_GATE` / `gate.*` 节点，并将 `not_null`、`unique`、`accepted_values`、`range`、`custom_sql` 编译为 dbt tests。
+  - `DwdPipelineWorkbench` 新增质量门禁草稿模型，支持从 `DataModel.operatorGraph` 还原主键完整性、枚举值、范围、自定义 SQL 门禁。
+  - 质量门禁阶段新增可编辑控件：启停开关、字段多选、允许值、范围上下限、自定义 SQL、失败策略。
+  - 保存门禁时用现有模型字段映射构造 `DwdModelDraftRequest`，更新 `operatorGraph` 后调用模型校验并刷新模型详情。
+  - 工作台保留未保存模型的空态：新建页未保存模型时显示门禁阶段但禁用保存，避免制造“门禁已落库”的错觉。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：登录态访问 `/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=test-source`，切换到 `质量门禁` 阶段后显示 `保存门禁`，未保存模型时保持空态；控制台无 error。
+
+### 阶段 100：DWD 工作台监控血缘闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 对照现有 `/catalog/lineage`，确认目录血缘图已有字段级列、方向、深度、影响分析和 `fqn` URL 参数，DWD 工作台无需重复实现大图。
+  - `DwdPipelineWorkbench` 的监控血缘阶段新增 `FieldLineagePanel`，从 `DataModel.columnMappings` 生成字段级 lineage 摘要。
+  - 监控血缘阶段新增 `目录血缘`、`资产详情`、`运行实例` 三个入口，分别跳转到目录血缘、Catalog 资产详情和当前 DAG 运行实例。
+  - 资产详情入口先按目标表 FQN 调用 `CatalogAPI.listAssets({ keyword })` 匹配资产 id；未投影到 Catalog 时降级打开目录血缘。
+  - 未保存模型时继续显示空态，不伪装已有血缘。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：登录态访问 `/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=test-source`，切换到 `监控血缘` 阶段后显示空态 `发布后生成资产、血缘与运行观测`，工作台与资产流仍可见；控制台无 error。
+
+### 阶段 101：DWD 工作台资源与算力配置闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - `DwdPipelineWorkbench` 在源表与目标阶段接入 `OperatorAPI.listResourceGroups()`，展示可用资源组、组内计算画像和执行引擎。
+  - 工作台新增 `resourceConfig` 状态，支持从已加载模型或 DAG definition 恢复 `resourceGroup/computeProfile/engine`。
+  - 新增“保存算力配置”动作：用完整 `DwdModelDraftRequest` 更新模型，避免只保存局部配置导致字段映射或 operatorGraph 丢失。
+  - `GovernanceFactory` 新增 `initialResourceGroup/initialComputeProfile/initialEngine`，新建或编辑治理模型时使用工作台当前算力配置，不再退回硬编码默认值。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 浏览器实证：登录态访问 `/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=test-source`，源表与目标阶段可见 `资源组`、`计算画像`、`执行引擎` 和 `保存算力配置`，控制台无 error。
+
+### 阶段 102：DWD 工作台字典治理预设与版本化配置
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - `GovernanceFactory` 新增 4 个产品化字典预设：性别标准、是否标识、订单状态、会员等级，均带 `code/name/version/domain/pairs/noMatchPolicy`。
+  - 字典匹配抽屉新增“字典集”选择器，选择预设后自动填入映射内容，展示字典名、版本和映射数量，同时仍允许用户编辑映射文本。
+  - `buildOperatorGraph` 将 `dictionaryRef/dictionaryName/dictionaryVersion/dictionarySource/pairs/noMatchPolicy` 写入 `standard.codebook_mapping` 节点，并在 `fieldRules` 摘要中保留字典元信息。
+  - `fieldRulesFromModel` 改为解析完整 `operatorGraph`，从字典节点恢复字典引用、版本、映射内容和未命中策略，支持已保存模型再次打开后回显。
+  - 保持当前 `CASE WHEN` 字段表达式编译路径，明确本轮不伪装后端字典主数据、审批或发布服务已完成。
+- 验证：
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - 浏览器实证：登录态访问真实 ODS 源表 `ods.ods_customers_100k` 的 DWD 工作台，切换 `gender` 字段为 `字典匹配` 后，字段处理抽屉可见 `字典集`、版本标签、映射数量和 CASE SQL 预览。
+  - 浏览器实证：选择字典预设后，映射文本域写入 `Y=是/N=否/1=是/0=否/true=是/false=否`，SQL 预览生成 `case when src.gender ... else src.gender end`；控制台无 error，仅保留既有 React Router future warnings。
+
+### 阶段 103：标准字典主数据事实源闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 新增 `modeling/V7__codebook_registry.sql`，提供 `modeling.codebook` 与 `modeling.codebook_version`，保存字典集草稿、当前 entries、未命中策略、最新发布版本和版本快照。
+  - 新增 `Codebook/CodebookVersion` 实体、仓储、DTO、`CodebookService` 与 `CodebookController`，接口覆盖列表、详情、创建、更新、发布、废弃和版本历史。
+  - `DomainEvents` 新增 `modeling.codebook.created/updated/published/deprecated`，让字典主数据变化进入现有 outbox 事件边界。
+  - 前端 `types` 与 `ModelingAPI` 新增 `Codebook` 契约；`GovernanceFactory` 将已发布后端字典转换为字典预设，并与内置字典合并展示。
+  - 为避免旧后端导致页面加载时 404，本轮进程级重启后端为 `onelake-backend-stage103`，并手工执行幂等 V7 迁移。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过，新增 `CodebookServiceTest` 覆盖创建、发布版本快照和重复字典项拦截。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - 数据库实证：执行 V7 迁移后 `modeling.codebook` 可查询；临时 codebook API 创建/发布返回 `code=0`、`status=PUBLISHED`、`latestVersion=2026.06-codex`。
+  - 浏览器实证：工作台自动请求 `/api/v1/modeling/codebooks?status=PUBLISHED` 返回 200；字典集下拉同时显示临时后端已发布字典和内置预设，且控制台无 error，仅保留既有 React Router future warnings。
+  - 临时验证数据已清理：`modeling.codebook where code like 'codex.stage103.%'` 剩余 0 条。
+  - `git diff --check` 通过。
+
+### 阶段 104：DWD 运行资源上下文透传到 Dagster tags
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 核对 `DwdModelService.run`、`DwdModelDagsterClient.launchDwdModelRun` 和 `dagster/definitions.py`，确认资源组和计算画像已经写入模型运行记录，并传入 Dagster op config。
+  - 将 `onelake.resource_group` 与 `onelake.compute_profile` 补入 Dagster execution tags，便于 Dagster run、OneLake run 与后续资源观测按算力画像关联。
+  - 更新 `DwdModelServiceTest.runValidatedModelLaunchesDagsterAndStoresRun`，捕获 tags 并断言默认 `default/trino-small` 被传入 Dagster launch metadata。
+  - 明确本轮只做资源上下文透传，不声明已完成调度队列、并发槽位或 quota 分配。
+- 验证：
+  - `mvn -q -pl module-modeling -am test -Djacoco.skip=true` 通过。
+
+### 阶段 105：DWD 编排触发资源上下文一致性闭环
+- **状态：** complete
+- **开始时间：** 2026-06-24 CST
+- 执行的操作：
+  - 核对 `OrchestrationService.createDwdModelRun`，确认编排触发 DWD DAG 时已经把 `resource_group/compute_profile` 写入 `model_run` 与 Dagster `run_config`。
+  - 将 `onelake.resource_group` 与 `onelake.compute_profile` 补入编排触发的 Dagster execution tags，避免同一 DWD 模型通过“工作台运行”和“流水线触发”时观测标签不一致。
+  - 更新 `OrchestrationServiceTest.triggerDwdModelDagCreatesModelRunAndLaunchesDagsterWithRunConfig`，同时捕获 op config 和 tags，断言 `default/trino-small` 两端一致。
+  - 明确本轮仍只做资源上下文一致性，不声明已完成 Dagster/Trino 队列分配、并发槽位或 quota 调度。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过。
+
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 流水线与算子市场阶段 79、80、81、82、83、84、85、86、87、88、89、90、91、92 已完成；业务术语阶段 76、77 的进度记录已存在但不属于本轮流水线方向 |
-| 我要去哪里？ | 当前流水线方向阶段四后端校验、DWD 编译产物对齐、可执行 dbt generic tests、source manifest 一致性、freshness source 产物、custom_sql 只读断言、dbt 校验噪声清理、资源组/计算画像注册表、Spark/Python 运行契约就绪边界已完成；后续若继续扩展，应进入真实 Spark/Python Dagster op、资源调度分配或资源管理 UI，而不是伪装已有运行态 |
+| 我在哪里？ | 流水线与算子市场阶段 79、80、81、82、83、84、85、86、87、88、89、90、91、92 已完成；治理表工厂迭代 1-9 对应阶段 93、94 已完成；治理能力并入流水线阶段 95 已完成；流水线与治理设计器产品边界重构阶段 96 已完成；DWD 治理流水线工作台主路径阶段 97 已完成；DWD 工作台新建到详情态闭环阶段 98 已完成；DWD 工作台质量门禁可编辑阶段 99 已完成；DWD 工作台监控血缘闭环阶段 100 已完成；DWD 工作台资源与算力配置阶段 101 已完成；DWD 工作台字典治理预设与版本化配置阶段 102 已完成；标准字典主数据事实源阶段 103 已完成；DWD 运行资源上下文透传阶段 104 已完成；DWD 编排触发资源上下文一致性阶段 105 已完成；业务术语阶段 76、77 的进度记录已存在但不属于本轮流水线方向 |
+| 我要去哪里？ | 当前流水线方向阶段四后端校验、DWD 编译产物对齐、可执行 dbt generic tests、source manifest 一致性、freshness source 产物、custom_sql 只读断言、dbt 校验噪声清理、资源组/计算画像注册表、Spark/Python 运行契约就绪边界、治理表工厂字段级治理闭环、流水线融合、产品边界重构、DWD 工作台主路径、新建到详情态闭环、质量门禁可编辑、监控血缘闭环、资源算力配置闭环、字典治理预设闭环、标准字典主数据事实源、直接运行资源 tags 和编排触发资源 tags 已完成；后续若继续扩展，应进入字典运行期 join/缓存策略、资源调度分配或真实 Spark/Python Dagster op，而不是伪装已有运行态 |
 | 目标是什么？ | 继续把流水线与算子市场从可浏览/可注册/可添加推进到完整算子工程化 |
 | 我学到了什么？ | 见 `findings.md` |
 | 我做了什么？ | 见上方记录 |
+
+### 阶段 108：数据流 DAG 契约化与多输入/多输出计算闭环
+- **状态：** in_progress
+- **开始时间：** 2026-06-25 CST
+- 执行的操作：
+  - 结合用户提出的 fan-in/fan-out、上游输出作为下游输入、双数据源 Join 生成 DWD 等场景，重新审视当前流水线语义。
+  - 调研 Dagster、Airflow、dbt、Databricks Jobs、Azure Mapping Data Flow、AWS Glue Studio 的官方文档，提炼“任务依赖、资产依赖、结构化转换节点、数据就绪触发”四类设计模式。
+  - 在 `task_plan.md` 追加阶段 108，明确边契约化、节点端口、自动输入推导、多源就绪屏障、结构化 Join/Union/Lookup 和运行实例观测的实施范围。
+  - 在 `findings.md` 记录调研结论和 OneLake 当前架构缺口。
+  - `pipeline_task_edge` 新增 `sourceOutput/targetInput/assetFqn/inputAlias/joinRole/triggerPolicy/freshnessPolicy`，并补充 V6 幂等迁移。
+  - 后端 `PipelineCompileService` 在编译期按入边为 Spark 节点推导 `from_tables` 与 `dataflow_inputs`；`dataflow.nodeKind=JOIN` 且左右输入齐全时自动生成 Spark SQL。
+  - 前端统一编辑器新增“关联 Join”节点入口、“添加连线”弹窗、节点输入/输出计数、依赖边端口/alias 图例和 Spark Join 结构化配置面板。
+  - 修复本地浏览器登录阻塞：OIDC 默认 authority 改走同源 `/auth/realms/onelake`，Vite `/auth` 代理去掉前缀后转发到 Keycloak。
+  - 构造 `spark_join_dataflow_join_e2e_201235` 测试流水线：`ods_user` 与 `ods_user_profile` 两个 ODS 输入，经 `left/right` 数据流边进入 `spark_user_join`，产出 `iceberg.dwd.user_enriched_join_e2e`。
+  - 运行实例页改为服务端按 DAG 查询运行历史，避免 `?dagId=` 时先取全局第一页再本地过滤导致“当前流水线 0 条”的假空。
+  - 运行实例展开区改为以流水线任务定义绘制完整拓扑，`task_run` 只作为状态覆盖；即使部分节点没有 task_run，也能展示未开始/已阻断状态、输入输出数量、端口 alias、行数和产物表。
+  - 新增 `PipelineNodePortRegistry` 作为流水线主链路节点端口契约，编译校验覆盖 source output、target input、Join left/right 必填且单入、asset FQN 解析、端口基数和 fan-out 合法性。
+  - `PipelineSyncRefTriggerHandler` 接入数据流边，多个 `SYNC_REF` 输入指向同一目标节点时先记录 readiness；默认等待全部输入到齐后才触发流水线。
+  - `TaskRunStatus` 新增 `UPSTREAM_FAILED`、`SKIPPED`，终态失败刷新时 `OrchestrationService` 沿 PIPELINE 边把下游 `QUEUED` 节点标记为 `UPSTREAM_FAILED`。
+  - 前端运行实例状态文案、状态色和统一编辑器 freshness 策略选项同步支持 `UPSTREAM_FAILED/SKIPPED` 与 `SAME_FRESHNESS_WINDOW`。
+  - `OrchestrationService.triggerPipelineRun` 创建 `task_run` 时按 PIPELINE DAG 初始化状态：`SYNC_REF` 观测节点写入 `SUCCEEDED` 和产物表，所有直接上游已满足的节点写入 `RUNNING`，汇聚节点在上游未完成前保持 `QUEUED`。
+  - 统一编辑器右侧面板新增通用“数据流关系”，对任意节点展示输入来自哪个上游任务、输出到哪个下游任务，以及端口、别名、asset FQN、触发策略和新鲜度策略。
+  - 发现并处理本地运行态未加载新代码的问题：旧 `spring-boot:run` JVM 于 21:03 启动，module-orchestration SNAPSHOT jar 于 21:14 更新，DevTools 不会替换依赖 jar；已强制结束 PID 81922/父 Maven 81492，并重启为 screen `onelake-backend` PID 27445。
+  - `PipelineNodePortRegistry` 与 `PipelineCompileService` 新增结构化 `DERIVE_COLUMN`/`SINK` 支持：单输入端口 `in`、输出 `out`，按入边生成派生字段 Spark SQL 与 DWD 写入 SQL。
+  - 统一编辑器左侧新增“派生字段”“落 DWD 表”节点入口；Spark 节点右侧面板新增“派生字段”和“DWD 出口”配置区，可配置源别名、保留源字段、字段表达式、写入方式和输出字段。
+  - `SqlAssetSecurityService` 修复 SQL 工作台资产校验 FQN 归一化：`iceberg/onelake/hive.schema.table` 会匹配 Catalog 中的 `schema.table`，避免流水线自动登记的 Spark 产物被误判未登记。
+  - 构造 P6 验收数据：MySQL `user/user_profile` 各 100 行，Iceberg ODS `ods.mysql_user/ods.mysql_user_profile` 各 100 行；流水线 `p6_mysql_user_join_dwd_20260625140602` 以两个 `SYNC_REF` fan-in 进入 Spark Join，再接 `DERIVE_COLUMN`、`SINK(DWD)`、`QUALITY_GATE`。
+- 验证：
+  - `mvn -q -pl module-orchestration -am test -Djacoco.skip=true` 通过，覆盖 110 个编排模块测试。
+  - `mvn -q -pl module-orchestration -Dtest=PipelineSparkCompileTest,PipelineCompileServiceTest,PipelineSyncRefTriggerHandlerTest,OrchestrationPipelineTriggerTest,OrchestrationServiceTest,PipelineEndToEndTest test -Djacoco.skip=true` 通过，覆盖边端口契约、Spark Join 输入推导、多源 readiness 屏障和上游失败传播。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - `pnpm --dir onelake-app/web-console build` 通过，仅保留 Vite chunk-size warning。
+  - `git diff --check` 通过。
+  - 数据库实证：因本地 V4 migration checksum 与已应用记录不一致，未执行 Flyway repair；仅手工执行 V6 幂等 ALTER，`pipeline_task_edge` 已具备 7 个新增数据流字段。
+  - API 实证：测试流水线 validate 返回 `valid=true`；Spark 节点配置被写入 `from_tables=["iceberg.ods.user","iceberg.ods.user_profile"]`、`dataflow_inputs(left/right)` 与自动生成的 `CREATE OR REPLACE TABLE ... LEFT JOIN ...` SQL。
+  - 浏览器实证：登录后打开 `/orchestration/pipelines/0699f001-567a-4a8d-84e9-99a41c1ba117`，页面展示 3 个节点、2 条依赖边、层级 1→2；右侧 Spark 面板展示左右输入、Join 条件、输出字段和自动 SQL；点击“校验”显示“校验通过”，控制台无 error。
+  - 浏览器实证：构造只含 `spark_user_join` 一个 task_run 的运行实例 `codex-partial-topology-run`，打开 `/orchestration/runs?dagId=0699f001-567a-4a8d-84e9-99a41c1ba117` 并展开后，仍展示 3 个节点、2 条依赖边、`left/right` 边标签、两个 ODS 节点“未开始”和 Spark 节点“成功”；控制台无 error/warn。
+  - API 实证：临时流水线 `codex_edge_contract_bad_210134` 故意把 Join 右输入接到 `inputs`，新后端返回 `valid=false`，错误包含 `target port 'inputs' is not declared` 和缺失 `right`；`codex_edge_contract_good_210134` 使用 `left/right` 后返回 `valid=true`，Spark config 自动生成 `from_tables`、`dataflow_inputs` 和 `CREATE OR REPLACE TABLE ... LEFT JOIN ...`。
+  - 浏览器实证：打开 `/orchestration/pipelines/a378c80c-13ac-41fa-8cd7-f1fe018e183c`，页面展示层级 1 两个 SYNC_REF、层级 2 `spark_join`、2 条依赖边 `left as u/right as p`；点击 `spark_join` 后右侧展示输入表、Join 类型、条件和自动 SQL；点击“校验”后返回 200 并显示“校验通过”。新标签重开同一路由控制台为 0 error，仅保留 React Router 开发态 warning。
+  - API 实证：重启后端后新建 `codex_p4_topology_691089`，触发前 validate 返回 `valid=true`；触发后即时查询 `task_run`，`sync_user=SUCCEEDED(table:ods.user)`、`spark_a=RUNNING`、`spark_b=RUNNING`、`quality_gate=QUEUED`，证明初始运行态不再全量扁平化为 QUEUED。
+  - 浏览器实证：打开 `/orchestration/pipelines/7ef45218-af0c-4ecb-b295-2dac11791f11`，画布展示 3 个层级、4 个节点、4 条依赖边和节点输入/输出计数；点击“用户清洗 A”后右侧可见“数据流关系 / 输入来自 / 输出给”，含 `sync_user -> spark_a`、`spark_a -> quality_gate`、端口、别名、表 FQN 与触发策略；控制台 0 error。
+  - 浏览器实证：打开 `/orchestration/runs` 展开最新 `codex_p4_topology_691089` 运行实例，可见完整节点拓扑、4 条带端口/表名的连线、任务明细表；任务级展示层级、类型、状态、输入/输出、目标表和产物，控制台 0 error，交互无明显卡顿。
+  - `mvn -q -pl module-catalog -Dtest=SqlAssetSecurityServiceTest,SqlWorkbenchServiceTest test -Djacoco.skip=true` 通过，覆盖 SQL 资产 FQN 归一化与工作台执行边界。
+  - API 实证：`p6_mysql_user_join_dwd_20260625140602` validate 返回 `valid=true`；触发运行 `993824e4-9bf3-4de6-bfa8-737a569dcb48` 后，`sync_user/sync_profile/join_user_profile/govern_user_fields/sink_dwd_user/quality_gate` 六个 task_run 全部 `SUCCEEDED`。
+  - 数据面实证：`iceberg.dwd.user_governed` 行数 100、UUID 100 个、手机号脱敏 100 行、身份证脱敏 100 行、描述去空格 100 行；样例行形如 `138****0001`、`110101********0001`。
+  - Catalog 实证：pipeline.task.loaded 事件自动登记 `tmp.user_joined`、`tmp.user_governed`、`dwd.user_governed`，其中 DWD 资产 `row_count=100`。
+  - 浏览器实证：打开 `/orchestration/pipelines/10cb6a51-2245-438f-ac84-3d0844ddd490`，画布展示 5 个层级、6 个任务、5 条依赖边；左侧可见“关联 Join/派生字段/落 DWD 表”，派生节点右侧展示上游 `join_user_profile`、`onelake.tmp.user_joined`、`用户 UUID` 和脱敏表达式，Sink 节点展示 `onelake.dwd.user_governed` 与覆盖写入。
+  - 浏览器实证：打开 `/orchestration/runs` 并展开最新成功运行，页面展示完整多节点拓扑、`left as u/right as p/in as src/in as s/in as q` 连线标签、六个节点成功状态和 Spark 节点 100 行产出。
+  - 浏览器实证：SQL 工作台运行 DWD 校验查询，结果区显示 `total_rows/uuid_count/masked_mobile_rows/masked_id_rows/trimmed_desc_rows = 100/100/100/100/100`，不再出现 `Catalog 资产未登记`。
+
+### 阶段 109：流水线主链路 Spark-only 收敛
+- **状态：** complete
+- **开始时间：** 2026-06-25 CST
+- 执行的操作：
+  - 将流水线 `Dag` 默认引擎、资源组和计算画像收敛为 `SPARK / spark-default / spark-small`。
+  - 将 `pipeline_task` 默认任务引擎收敛为 `SPARK_SQL`；`SQL_MODEL`、`FIELD_GOVERNANCE` 和 `TRINO_DBT` 仅作为历史兼容类型保留。
+  - 更新 `PipelineService`：新建任务只允许 `SYNC_REF`、`SPARK_SQL`、`PYSPARK`、`QUALITY_GATE`，ODS->DWD 模板改为 `SYNC_REF -> Spark 字段治理 -> Spark DWD Sink -> Quality Gate`。
+  - 更新 `PipelineBackfillService`：由模型回填流水线时生成 Spark Sink，而不是 dbt/SQL_MODEL 节点。
+  - 更新 `PipelineCompileService` 与 `OrchestrationService`：流水线编译和触发只生成 Spark 运行配置，不再为主链路构建 dbt selector/run config。
+  - 更新 Dagster `onelake_pipeline_run`：主链路直接运行 `run_spark_task_op`；dbt op 保留为历史能力，不再接入统一流水线 job。
+  - 更新前端统一编辑器：移除 `SQL 模型` 新建入口和 `Trino + dbt` 引擎选择；字段治理和质量门禁文案改为 Spark 表产物语义。
+- 验证：
+  - `mvn -q -pl module-orchestration -Dtest=PipelineCompileServiceTest,PipelineSparkCompileTest,PipelineEndToEndTest,OrchestrationPipelineTriggerTest,RuntimeContractServiceTest test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl module-orchestration test -Djacoco.skip=true` 通过。
+  - `mvn -q -pl bootstrap -am install -DskipTests -Djacoco.skip=true` 通过。
+  - `pnpm --dir onelake-app/web-console exec tsc --noEmit --pretty false` 通过。
+  - API 实证：`/api/v1/orchestration/runtime-contracts` 仅返回 `compileTarget=SPARK, engine=SPARK, dagsterJob=onelake_pipeline_run`。
+  - API 实证：新建流水线默认返回 `engine=SPARK, resourceGroup=spark-default, computeProfile=spark-small`。
+  - API 实证：尝试创建 `SQL_MODEL/TRINO_DBT` 流水线任务返回 400，文案为“流水线已收敛为 Spark 引擎，请使用 Spark SQL/PySpark 或结构化 Spark 节点”。
+  - API 实证：创建 `SPARK_SQL` 节点成功，返回 `engine=SPARK_SQL`。
+
+### 阶段 110：硬删历史枚举和旧 DWD/dbt 模型运行能力
+- **状态：** complete
+- **开始时间：** 2026-06-25 CST
+- 执行的操作：
+  - 删除 `TaskType.SQL_MODEL`、`TaskType.FIELD_GOVERNANCE`、`EngineType.TRINO_DBT`、`CompileTarget.SQL_DBT/PYTHON` 等旧主链路枚举。
+  - 删除旧 DWD/dbt 运行入口：Dagster `onelake_dbt_model_run` / `run_dwd_model`、`TrinoDbtRunConfigBuilder`、建模 `DwdModelDagsterClient`、`DwdRunArtifactReader`、`DwdModelRunRequest`、`DwdModelRunSynchronizer` 和 `POST /api/v1/modeling/models/{id}/run`。
+  - `OrchestrationService.triggerDag` 不再为 DWD 模型构造 dbt runConfig 或跨 schema 写 `modeling.model_run`；非注册 Dagster job 由运行契约阻断。
+  - 算子市场 Manifest、资源组注册表和运行契约全部改为 `SPARK`；默认内置资源只保留 `spark-default/spark-small|medium|large`。
+  - 前端画布、算子市场、运行实例、治理表工厂和表详情页清掉旧 SQL/dbt 运行入口与文案，统一展示 Spark 治理/编排能力。
+  - 新增迁移 `orchestration/V7__spark_only_runtime_resources.sql` 与 `modeling/V8__spark_only_dwd_defaults.sql`，用于清理已落库历史默认资源和值。
+  - 删除未接入 Spark 主链路的旧 `QualityGateCompiler` 及测试。
+- 验证：
+  - `mvn -q -pl module-orchestration,module-modeling,module-common -am clean test-compile` 通过。
+  - `mvn -q -pl module-orchestration,module-modeling,module-common -am -Dtest=PipelineCompileServiceTest,PipelineSparkCompileTest,OrchestrationPipelineTriggerTest,PipelineStatusMachineTest,PipelineEndToEndTest,OrchestrationServiceTest,RuntimeContractServiceTest,OperatorServiceTest,ResourceGroupServiceTest,DwdModelServiceTest,RunningTaskServiceTest -Dsurefire.failIfNoSpecifiedTests=false test` 通过。
+  - `pnpm build` 于 `onelake-app/web-console` 通过，仅保留既有 Vite chunk-size warning。
+  - 搜索生产路径确认旧枚举/旧 job 只剩迁移清理条件：`modeling/V8__spark_only_dwd_defaults.sql` 中用于把 `FIELD_GOVERNANCE/TRINO_DBT` 数据改写为 Spark。
 
 ---
 *每个阶段完成后或遇到错误时更新此文件*

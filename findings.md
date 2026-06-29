@@ -618,6 +618,77 @@
 - `spring-boot:run` 的 devtools 热重启不会可靠替换本地 Maven 仓库模块 jar；本轮旧孤儿 Java 进程继续占用 8080，导致 API 一直跑旧实现。必须确认 `lsof -iTCP:8080` 的 PID，再进程级重启。
 - DWD 建模向导从 `ods.ods_customers_100k` 自动推导表名时带数字，现有命名正则不允许 business 段含数字；浏览器验证需手动修正为合法表名，后续可把推导逻辑统一去除数字或调整命名规范。
 
+## 2026-06-24 治理表工厂迭代 1-9 发现
+- 用户的真实需求不是单节点串联流水线，而是“以一张 ODS 表为输入，对多个字段并行配置治理规则，最终生成一张 DWD 治理表”；产品入口应从 DAG 画布补充一个字段矩阵式的治理工作台。
+- 治理表工厂当前把基础字段转换、字典映射、关联补充统一落为 DWD draft request + operator graph，执行侧仍复用 `module-modeling` 的 dbt/SQL 编译链路，而不是为每个字段治理算子创建独立 Dagster op。
+- `join.lookup_enrich` 已支持最小可执行编译：operatorGraph 中声明 `lookupFqn/alias/leftKey/rightKey/fields`，dbt SQL 输出 `left join {{ source(...) }}`，并将 lookup 表写入共享 `sources.yml`。
+- 字典值匹配当前由前端将映射表编译为字段表达式 `case when ... then ... else ... end`，同时保留 `standard.codebook_mapping` 节点用于治理图可追溯；后续若接入字典主数据，应替换为字典 ID/版本引用。
+- 发布动作当前定义为“已校验模型进入可消费状态并发布建模事件”，要求存在 dbt artifact 与 orchestration DAG；真实物理产表仍依赖运行动作和 Dagster/dbt 执行结果，不能把发布等同于数据已落表。
+- 已校验模型需要允许继续编辑并回退草稿，否则用户在保存校验后修改高级算子会被状态机挡住；已发布模型仍应通过新建版本演进。
+- 治理表工厂页面已展示运行契约真实边界：`SQL_DBT` 可运行，`SPARK/PYTHON` 因缺少 Dagster job 仍处于 contract-only，不应在页面上开放为可运行高级算力。
+- 浏览器验证表明治理表工厂可从登录后的 `/lakehouse/governance-factory` 进入，核心面板、字段矩阵、高级算子入口、保存/编译/运行/发布控件可见；控制台无新增错误，仅有既有 React Router v7 future warnings。
+
+## 2026-06-24 治理能力并入流水线发现
+- 最佳产品形态不是继续保留独立“治理表工厂”一级菜单，而是在流水线中提供 DWD 治理模板：表级 DAG 表达输入、治理、输出，字段级治理矩阵作为治理节点的深层配置。
+- 字段级治理不能平铺为几十个画布节点，否则字段多时画布不可读；当前实现保留一个“字段治理矩阵”节点，并在宽抽屉中承载字段矩阵、高级算子、校验、编译、运行和发布。
+- 分层表管理的“治理成表”已改为进入 `/orchestration/pipelines/new?template=ods-dwd&sourceAssetId=...`，用户从表资产进入后直接落到流水线编辑器，而不是跳到湖仓下的独立页面。
+- 旧 `/lakehouse/governance-factory` 路由保留为兼容跳转，自动改写到流水线 `ods-dwd` 模板；左侧菜单已移除独立入口，避免 IA 重叠。
+- `GovernanceFactory` 现在是可嵌入组件：独立页壳可隐藏，嵌入模式由 `DagCanvas` 的字段治理节点打开，并通过 `onModelChange` 回写 `modelId/modelStatus/sourceFqn/targetFqn` 到 DAG 节点配置。
+- 浏览器验证：流水线模板会生成 `ODS 源表 -> 字段治理矩阵 -> DWD 治理表` 三节点；字段治理矩阵在流水线内打开；保存校验、编译 dbt、运行、发布动作在嵌入式矩阵中可见；菜单中没有独立“治理表工厂”。
+
+## 2026-06-24 DWD 治理流水线工作台重构发现
+- 继续在旧 DAG 画布里叠加字段治理、抽屉和门禁配置会让用户故事断裂；DWD 治理应以“源表到目标表”的业务工作台为主路径，技术 DAG 作为高级视图保留。
+- `/orchestration/pipelines/new?template=ods-dwd` 应进入 DWD 工作台，而不是默认画布；普通 `/orchestration/pipelines/new` 仍保留旧画布，避免破坏通用编排能力。
+- DWD 工作台的稳定闭环阶段是 `源表与目标 -> 治理模型 -> 质量门禁 -> 运行发布 -> 监控血缘`；字段级 Recipe 只占“治理模型”阶段，不应让左侧画布算子列表承担字段处理入口。
+- 第一轮实现已复用 `GovernanceFactory`，所以字段映射、字典匹配、关联查询、保存校验、编译 dbt、运行和发布能力没有丢失；下一轮应把工作台详情态和后端模型/DAG 关系加载打通，避免只依赖新建态本地状态。
+- 流水线列表需要按 DAG definition/operatorGraph 识别 DWD 治理流水线并进入工作台；否则用户从列表回到详情时仍会落回技术画布，产品主路径会再次割裂。
+- 详情态恢复必须同时兼容两类 DAG：前端模板保存的治理节点 config，以及后端 DWD 编译生成的 `DWD_MODEL_DAG` 顶层 definition；只读其中一处会漏掉已有模型。
+- `GovernanceFactory` 如果只支持新建态，会让“打开工作台”看起来成功但实际不能继续编辑已有模型；它需要接收 `initialModel` 并重建字段 Recipe。
+- 工作台上下文中 `modelId` 和 `pipelineDagId` 必须分离：前者用于加载/编辑治理模型，后者用于打开技术 DAG 与运行实例；混用会让页面看似有 DAG，实际跳转失败。
+- 从 DWD 工作台进入运行实例时应带 `dagId` 聚焦当前流水线，否则用户会被全量运行历史打断闭环；运行实例页需要提供“查看全部”作为返回全量视图的显式动作。
+- 后端 DWD 编译链路已经支持从 `operatorGraph` 的 `QUALITY_GATE` / `gate.*` 节点生成 dbt tests，因此质量门禁阶段不应停留在静态状态展示；前端可以直接编辑并保存 `not_null/unique/accepted_values/range/custom_sql` 门禁。
+- 质量门禁保存必须复用完整 `DwdModelDraftRequest`，只 PATCH operatorGraph 会丢失字段映射和模型上下文；当前前端通过已有 `DataModel.columnMappings` 重建请求，保持模型契约完整。
+- DWD 工作台的“监控血缘”不应复制 Catalog 血缘大图；工作台适合展示字段级 lineage 摘要和强入口，完整血缘、影响分析和下游追踪继续交给 `/catalog/lineage?fqn=...`。
+- 资产详情入口需要容忍 DWD 目标表尚未投影到 Catalog 的时间差；按 FQN 查不到资产时降级到目录血缘，比显示死链更符合真实运行边界。
+- 资源组和计算画像已经有后端注册表与图级校验事实源，DWD 工作台应允许用户选择并保存到模型；但它仍不是运行时调度器，不能把 `resourceGroup/computeProfile` 文案包装成 Dagster/Trino 已按 quota 分配资源。
+- 字典匹配的产品化应先让用户在字段 Recipe 内选择“字典集 + 版本”，并把字典引用、版本和 pairs 写入 `operatorGraph`；当前仍沿用 CASE 表达式编译，完整后端字典主数据、审定、发布和运行期字典表 join 应作为后续阶段，而不是在前端预设里伪装完成。
+- 标准字典现在有 `modeling.codebook/codebook_version` 后端事实源，DWD 治理设计器可消费已发布字典并与内置预设合并；但当前执行仍把字典 pairs 编译进 CASE，尚未做运行期字典维表 join、缓存刷新、灰度发布或审批流。
+- DWD 运行的 `resourceGroup/computeProfile` 已经落库、进入 Dagster op config，并补充进入 execution tags；直接从模型工作台运行和从流水线编排触发两条入口都已对齐资源标签。这满足跨系统观测和检索，但仍不是资源调度器，真正的 quota、并发槽位和队列分配还需要独立调度策略。
+
+## 2026-06-24 流水线模块重设计方案发现
+- 流水线现状两个入口：通用画布 `DagCanvas`（能存不能跑，dagsterJob 硬编码 `sql_workbench_draft` 永不可触发，试运行/版本/发布均为写死假数据）；DWD 工作台 `DwdPipelineWorkbench`（能跑但僵化，仅单 ODS→单 DWD）。核心矛盾：灵活的跑不了、能跑的不灵活。
+- 算子市场 65 个内置算子仅作 Manifest/校验/可视化；真正生成 SQL 的是 `DwdModelService.generateModelSql`（字段映射+lookup join+增量），算子 template.sql 从未逐节点编译，“图即程序”是空壳。
+- 唯一真实可执行数据面是 dbt-on-Trino（Dagster 仅 `onelake_dbt_model_run` + 一个 log stub）；SPARK/PYTHON 全 contract-only，scheduleCron 无调度器。
+- 架构债：`ensureDwdDag` 直写 orchestration.dag、`createDwdModelRun` 直写 modeling.model_run（跨 schema 直写违规）；`integration.table.loaded` 被 modeling 与 orchestration 双重消费且匹配规则不一致；编排模块零 Outbox 生产；`JobRun.SUCCESS` 与 `model_run.SUCCEEDED` 枚举不一致；`run_dwd_model` op 忽略资源画像。
+- 用户决策：①统一编辑器（合并画布与 DWD 工作台，一条流水线混放多类任务）；②执行引擎要可扩展 Spark（Spark 为真实路径，非契约态）；③任务用新建 `orchestration.pipeline_task` 一等实体表持久化；④本轮做 P1→P4 完整闭环；⑤先落 `docs/流水线模块重设计方案.md` 再开工。
+- 重设计核心：流水线=Tasks 的 DAG，运行=Dagster `onelake_pipeline_run` 按引擎分派 executor；TRINO_DBT 子图用 dbt `ref()` + `tag:pipeline_<id>` 选择器执行，跨引擎(含 Spark)依赖走共享 Iceberg/Hive Metastore 表级闭合 + Dagster 顺序。执行层做成引擎可插拔 TaskExecutor SPI。
+
+## 2026-06-25 数据流 DAG 与多输入/多输出调研发现
+- 成熟产品都把“任务依赖”和“数据依赖”分层：Airflow DAG 负责任务执行顺序，Asset/TaskFlow 负责数据输入输出；dbt 用 `ref()`/`source()` 让 SQL 里的引用成为依赖图；Dagster 以 asset 为一等对象，资产定义同时声明计算和上游资产；Databricks Jobs 用 DAG 边表达任务依赖与 Run if 条件。
+- 可视化 ETL 产品把 Join/Union/Sink 设计成结构化转换节点：Azure Mapping Data Flow 的 Join 节点明确左右输入流、join type 和 join condition；AWS Glue Studio 的 Join transform 要求两个父节点输入，并处理字段冲突。这说明 OneLake 不应只暴露手写 Spark SQL，而应提供结构化 Join/Union/Lookup 节点生成 SQL/Spark 执行物。
+- OneLake 当前 `pipeline_task_edge` 可表示 fan-in/fan-out，但语义偏“先后依赖”；要支撑“上游输出即下游输入”，边需要携带 source output、target input、asset FQN、alias 和触发策略，并在编译期自动推导下游 `from_tables`/SQL source。
+- 双输入源场景需要多源就绪屏障：同一节点有多个输入时，默认条件应为 `ALL_SUCCEEDED + SAME_FRESHNESS_WINDOW`，避免任意一个 `SYNC_REF` 完成就触发 Join。
+- 推荐下一阶段不是新增更多散点任务类型，而是先建立统一节点端口契约，再把 `SYNC_REF`、`SQL_MODEL`、`FIELD_GOVERNANCE`、`SPARK_SQL/PYSPARK`、`QUALITY_GATE` 和结构化 `JOIN/UNION/LOOKUP/BRANCH/SINK` 映射到同一套输入输出模型。
+
+## 2026-06-25 数据流 DAG 契约化实施发现
+- Stage 108 已完成第一条生产化纵切：数据流边持久化、Spark Join 输入推导、画布边端口展示、结构化 Join 面板和浏览器校验闭环；这证明当前统一流水线架构可以支撑“两输入到一计算节点”的基本 fan-in。
+- `PipelineCompileService` 现在把边上的 `assetFqn/inputAlias/targetInput` 作为 Spark 节点输入事实源，校验后回写 `from_tables` 与 `dataflow_inputs`，再按 `dataflow.nodeKind=JOIN` 生成 Spark SQL。用户不再需要在 Spark 节点里重复填写上游表。
+- fan-out 已具备持久化表达能力：同一 source task 可以创建多条 edge 指向不同 target；本轮 UI 会展示输出计数和依赖边图例。但运行时失败传播、下游触发策略和运行实例拓扑还未深化。
+- 运行实例页现在以流水线定义为拓扑事实源，`task_run` 只负责状态/指标覆盖；这解决了“只有一个 task_run 时画布只剩一个层级”的观测问题。按 DAG 过滤也已改为调用后端 DAG 运行接口，避免全局第一页本地过滤造成假空。
+- `PipelineNodePortRegistry` 已把节点端口契约收敛到流水线主链路，编译校验会拒绝 Join 非 `left/right` 端口、单输入端口重复连入、缺失必填输入、悬空任务和无法解析 asset FQN；fan-out 从一个上游输出到多个下游仍被视为合法。
+- 多源就绪屏障已从纯字段契约推进到控制面最小实现：`integration.table.loaded` 到达后按 DAG 记录 SYNC_REF readiness，多个 SYNC_REF 输入指向同一目标时等全部输入就绪再触发流水线。但 readiness 仍是进程内内存态，尚未持久化 batch/window，不适合作为跨重启水位一致性承诺。
+- 运行态失败传播已具备节点级语义：失败终态刷新时沿 PIPELINE 边把下游待执行节点标记为 `UPSTREAM_FAILED`，并在前端显示“上游失败”；但真正按 DAG 节点逐个调度仍依赖后续 scheduler/Dagster op 拆分。
+- P4 已补齐控制面拓扑初始化：创建运行实例时不再把所有节点扁平写成 `QUEUED`，而是把 `SYNC_REF` 视为已就绪观测节点，直接下游进入 `RUNNING`，fan-in 汇聚节点等待上游成功后再推进。这个能力解决了用户观测层面的“流水线运行只有一个层级/节点关系不可见”，但底层仍是 Dagster aggregate job，尚未拆成每个 pipeline task 一个独立可调度 op。
+- P5 画布观测已从“节点配置面板”补齐为“数据流关系面板”：用户点击任一节点，都能看到输入来自哪里、输出给谁、端口、别名、表 FQN、触发策略和新鲜度策略。运行实例展开区也能显示完整拓扑、连线标签和任务明细表。
+- 本地 Flyway 因 `orchestration/V4__pipeline_task.sql` 已应用后又发生本地改动，执行 V6 时触发 checksum mismatch。本轮没有 repair 历史，只手工执行 V6 幂等 ALTER 做浏览器验证；后续合并前应整理迁移链，避免 V4 checksum 漂移。
+- 本地 `spring-boot:run` 加载多模块 SNAPSHOT jar 时，DevTools 热重启不会替换已加载依赖 jar；如果先启动后端再 `mvn install` 子模块，API 会继续跑旧实现。验证新后端能力前必须用 `lsof -iTCP:8080` 确认 PID 启动时间，并做进程级重启。
+- 浏览器登录阻塞来自 OIDC 默认直连 Keycloak；把默认 authority 改为同源 `/auth/realms/onelake` 后，必须在 Vite `/auth` proxy 上 rewrite 去掉前缀，否则 Keycloak 会收到 `/auth/realms/...` 并返回 Page not found。
+- 当前结构化节点已从 Join 扩展到 `DERIVE_COLUMN` 与 `SINK`：Join 可表达双输入关联，Derive 可用单输入边生成 UUID、脱敏和字段重算，Sink 可将上游 Spark 结果写入 DWD 表。Union、Lookup、Branch 仍未实现结构化节点契约。
+- P6 浏览器验收已跑通：两个 MySQL 源表 `user/user_profile` 各 100 行，对应 ODS Iceberg 表进入 `JOIN -> DERIVE_COLUMN -> SINK(DWD) -> QUALITY_GATE`，运行实例 6 个节点均成功，DWD 表 `dwd.user_governed` 产出 100 行。
+- SQL 工作台执行流水线产物查询时暴露出 FQN 归一化缺口：Pipeline Catalog 事件登记的是 `dwd.user_governed`，用户 SQL 常写 `iceberg.dwd.user_governed`；`SqlAssetSecurityService` 已补齐 `iceberg/onelake/hive` catalog 前缀归一匹配，避免已登记资产被误报“未登记到 Catalog”。
+- DWD 数据面验证显示手机号、身份证、描述去空格和 UUID 均正确，但 Hive/Trino 对字段标识会展示为小写，物理列 `用户 UUID` 在 Trino `DESCRIBE` 中显示为 `用户 uuid`；后续若要求展示名严格保留大小写，应增加字段 displayName/业务标签，而不是依赖物理列名大小写。
+- 2026-06-25 Stage 110 已按“硬删”要求完成主链路旧枚举和旧 DWD/dbt 运行能力删除：新代码不再暴露 `SQL_MODEL`、`FIELD_GOVERNANCE`、`TRINO_DBT`、`SQL_DBT`、`onelake_dbt_model_run` 或 `run_dwd_model` 运行入口；历史值仅在新迁移中作为清理条件出现。建模编译器中仍有 dbt 命名字段/产物路径，这是“模型编译产物”遗留，不再具备独立 DWD/dbt 运行入口。
+
 ## 技术决策
 | 决策 | 理由 |
 |------|------|
@@ -625,6 +696,9 @@
 | Airbyte/Dagster 本轮推进到真实数据面实证 | Airbyte 已通过 abctl 运行，Dagster 本地 compose 可用，Postgres 源表到目标库的真实同步已完成 |
 | Airbyte 不再放入 `docker-compose.yml` | 官方本地部署已转向 `abctl`，保留无效 compose 服务会持续制造误导和启动失败 |
 | 全局任务条先做统一任务投影而不是前端多源拼接 | OneLake 的长任务跨采集、SQL、编排、质量和数据服务，统一投影能保证状态语义、权限、跳转和后续通知联动一致 |
+| 流水线合并为统一编辑器 + 任务一等实体表 | 消除“灵活的跑不了/能跑的不灵活”分裂，任务类型化(SQL模型/字段治理/质量门禁/同步引用/Spark)支持数据开发与治理同图 |
+| 执行层做成引擎可插拔 SPI，dbt-on-Trino 为基线、Spark 为并列真实路径 | 用户要求扩展 Spark；复用唯一真实数据面 dbt-on-Trino 的同时不把 Spark 做成契约态摆设，跨引擎依赖经共享 Iceberg 表级闭合 |
+| 流水线运行 = dbt tag 选择器 + Dagster 单 job 分派 | 让 dbt 负责 Trino 子图 DAG/增量/依赖解析，避免自造执行引擎；Dagster 负责调度、跨引擎顺序与观测 |
 
 ## 遇到的问题
 | 问题 | 解决方案 |
@@ -640,7 +714,9 @@
 - `docs/采集任务创建流程闭环迭代实施计划.md`
 
 ## 视觉/浏览器发现
-- 本次任务暂不涉及浏览器视觉验证。
+- Stage 108 浏览器验证打开 `/orchestration/pipelines/0699f001-567a-4a8d-84e9-99a41c1ba117`，可见层级 1 两个 ODS 输入、层级 2 一个 Spark Join，底部图例展示 `ods_user -> spark_user_join / left as u` 与 `ods_user_profile -> spark_user_join / right as p`。
+- 点击 Spark 节点后右侧面板展示“输入表（由数据流连线推导）”、`left/right` 输入标签、Join 类型、左右别名、关联条件、输出字段和自动生成的 `CREATE OR REPLACE TABLE ... LEFT JOIN ...` SQL；点击页面“校验”后出现“校验通过”，控制台无 error。
+- Stage 108 运行实例验证打开 `/orchestration/runs?dagId=0699f001-567a-4a8d-84e9-99a41c1ba117`，展开 `codex-partial-topology-run` 后可见完整 3 节点拓扑、2 条依赖边、`left/right` 边标签、输入输出数量、Spark 行数和产物表；该测试故意只写入 Spark 节点 task_run，用于验证缺失节点级运行记录时仍可观测完整流水线。
 
 ---
 *每执行2次查看/浏览器/搜索操作后更新此文件*

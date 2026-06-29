@@ -12,8 +12,46 @@ public record DwdModelDraftRequest(
     String uniqueKey,
     String incrementalColumn,
     String partitionExpr,
-    List<ColumnMappingRequest> columnMappings
+    List<ColumnMappingRequest> columnMappings,
+    String pipelineMode,
+    Integer operatorGraphVersion,
+    String operatorGraph,
+    String resourceGroup,
+    String computeProfile,
+    String engine,
+    String costPolicy
 ) {
+    public DwdModelDraftRequest(
+        String name,
+        String domain,
+        String sourceFqn,
+        String targetFqn,
+        String materialization,
+        String uniqueKey,
+        String incrementalColumn,
+        String partitionExpr,
+        List<ColumnMappingRequest> columnMappings
+    ) {
+        this(
+            name,
+            domain,
+            sourceFqn,
+            targetFqn,
+            materialization,
+            uniqueKey,
+            incrementalColumn,
+            partitionExpr,
+            columnMappings,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        );
+    }
+
     public record ColumnMappingRequest(
         String source,
         String target,

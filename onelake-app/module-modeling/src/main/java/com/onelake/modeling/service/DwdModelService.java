@@ -3,24 +3,19 @@ package com.onelake.modeling.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
-import com.onelake.common.modeling.DwdModelRunSynchronizer;
 import com.onelake.common.sql.ReadOnlySqlValidator;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.modeling.domain.entity.DataModel;
 import com.onelake.modeling.domain.entity.DataModelColumnMapping;
-import com.onelake.modeling.domain.entity.DataModelRun;
 import com.onelake.modeling.domain.entity.DataModelSource;
 import com.onelake.modeling.dto.DataModelDTO;
 import com.onelake.modeling.dto.DwdModelCompileDTO;
 import com.onelake.modeling.dto.DwdModelDraftRequest;
-import com.onelake.modeling.dto.DwdModelRunDTO;
-import com.onelake.modeling.dto.DwdModelRunRequest;
 import com.onelake.modeling.dto.DwdModelValidationDTO;
 import com.onelake.modeling.repository.DataModelColumnMappingRepository;
 import com.onelake.modeling.repository.DataModelRepository;
-import com.onelake.modeling.repository.DataModelRunRepository;
 import com.onelake.modeling.repository.DataModelSourceRepository;
 import lombok.RequiredArgsConstructor;
 import net.sf.jsqlparser.statement.Statement;
@@ -48,12 +43,13 @@ import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
-public class DwdModelService implements DwdModelRunSynchronizer {
+public class DwdModelService {
 
     private static final Pattern TABLE_NAME =
         Pattern.compile("^(ods|dwd|dws|ads)_([a-z]+)_([a-z_]+)_(df|di|dms|d|w|m|y|app)$");
     private static final String OP_INPUT_ODS_TABLE = "input.ods_table";
     private static final String OP_TRANSFORM_RENAME_COLUMNS = "transform.rename_columns";
+    private static final String OP_TRANSFORM_SPARK_SQL = "transform.spark_sql";
     private static final String OP_GOVERN_DROP_REQUIRED_MISSING = "govern.drop_required_missing";
     private static final String OP_MASK_PARTIAL = "mask.partial";
     private static final String OP_GATE_NOT_NULL = "gate.not_null";
@@ -61,14 +57,11 @@ public class DwdModelService implements DwdModelRunSynchronizer {
     private static final String OP_OUTPUT_VIEW = "output.view";
     private static final String OP_OUTPUT_INCREMENTAL_MERGE = "output.incremental_merge";
     private static final Pattern FRESHNESS_DELAY = Pattern.compile("^([0-9]+)\\s*([a-zA-Z]+)$");
-    private static final String CUSTOM_SQL_MODEL_PLACEHOLDER = "__ONELAKE_MODEL__";
+    private static final String CUSTOM_SQL_TEMPLATE_PLACEHOLDER = "__ONELAKE_TEMPLATE__";
 
     private final DataModelRepository modelRepo;
     private final DataModelSourceRepository sourceRepo;
     private final DataModelColumnMappingRepository mappingRepo;
-    private final DataModelRunRepository runRepo;
-    private final DwdModelDagsterClient dagsterClient;
-    private final DwdRunArtifactReader artifactReader;
     private final OutboxPublisher outboxPublisher;
     private final JdbcTemplate jdbc;
 
@@ -103,15 +96,16 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         model.setIncrementalColumn(blankToNull(request.incrementalColumn()));
         model.setPartitionExpr(blankToNull(request.partitionExpr()));
         model.setDbtModelName(name);
-        model.setDagsterJob("onelake_dbt_model_run");
+        model.setDagsterJob("onelake_pipeline_run");
         model.setPipelineMode("SYSTEM_GENERATED");
         model.setOperatorGraphVersion(1);
-        model.setResourceGroup("default");
-        model.setComputeProfile("trino-small");
-        model.setEngine("TRINO_DBT");
+        model.setResourceGroup("spark-default");
+        model.setComputeProfile("spark-small");
+        model.setEngine("SPARK");
         model.setCostPolicy(defaultCostPolicyJson());
+        applyDraftExecutionRequest(model, request);
         assignCurrentOwnerIfMissing(model);
-        String compiledSql = compileSql(source.fqn(), mappings);
+        String compiledSql = compileSql(source.fqn(), mappings, operatorGraphMap(model.getOperatorGraph()));
         model.setSqlText(compiledSql);
         model.setCompiledSql(compiledSql);
         model.setCreatedAt(Instant.now());
@@ -151,8 +145,11 @@ public class DwdModelService implements DwdModelRunSynchronizer {
     @Transactional
     public DataModelDTO update(UUID id, DwdModelDraftRequest request) {
         DataModel model = loadModel(id);
-        if (!"DRAFT".equalsIgnoreCase(model.getStatus())) {
-            throw new BizException(40042, "只有草稿模型可以编辑");
+        if ("PUBLISHED".equalsIgnoreCase(model.getStatus())) {
+            throw new BizException(40042, "已发布模型不可直接编辑，请新建版本");
+        }
+        if (!"DRAFT".equalsIgnoreCase(model.getStatus()) && !"VALIDATED".equalsIgnoreCase(model.getStatus())) {
+            throw new BizException(40042, "只有草稿或已校验模型可以编辑");
         }
         UUID tenantId = requireTenant();
         CatalogAsset source = loadCatalogAsset(tenantId, text(request.sourceFqn(), "sourceFqn"));
@@ -175,13 +172,15 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         model.setDomain(StringUtils.hasText(request.domain()) ? request.domain().trim() : source.domain());
         model.setSourceFqn(source.fqn());
         model.setTargetFqn(targetFqn);
+        model.setStatus("DRAFT");
         model.setMaterialization(normalizeMaterialization(request.materialization()));
         model.setUniqueKey(blankToNull(request.uniqueKey()));
         model.setIncrementalColumn(blankToNull(request.incrementalColumn()));
         model.setPartitionExpr(blankToNull(request.partitionExpr()));
         model.setDbtModelName(name);
         applyExecutionDefaults(model);
-        String compiledSql = compileSql(source.fqn(), mappings);
+        applyDraftExecutionRequest(model, request);
+        String compiledSql = compileSql(source.fqn(), mappings, operatorGraphMap(model.getOperatorGraph()));
         model.setSqlText(compiledSql);
         model.setCompiledSql(compiledSql);
         model.setUpdatedAt(Instant.now());
@@ -231,7 +230,11 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             warnings.add("存在敏感字段直接透传，后续迭代需确认脱敏/加密策略");
         }
 
-        String compiledSql = compileSql(model.getSourceFqn(), mappings.stream().map(this::toDraft).toList());
+        String compiledSql = compileSql(
+            model.getSourceFqn(),
+            mappings.stream().map(this::toDraft).toList(),
+            operatorGraphMap(model.getOperatorGraph())
+        );
         return new DwdModelValidationDTO(
             errors.isEmpty(),
             errors,
@@ -266,11 +269,13 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         String sourcePath = "models/generated/sources.yml";
         String sqlPath = "models/intermediate/" + dbtModelName + ".sql";
         String schemaPath = "models/intermediate/" + dbtModelName + ".yml";
+        Map<String, Object> storedGraph = operatorGraphMap(model.getOperatorGraph());
         Map<String, Object> operatorGraph = operatorGraphDefinition(model, mappings, validation.outputColumns(), operators);
-        operatorGraph = mergeStoredQualityGateNodes(operatorGraph, operatorGraphMap(model.getOperatorGraph()));
+        operatorGraph = mergeStoredGovernanceNodes(operatorGraph, storedGraph);
+        operatorGraph = mergeStoredQualityGateNodes(operatorGraph, storedGraph);
 
         writeFile(dbtRoot.resolve(sourcePath), generateSourceYaml(model, source, operatorGraph));
-        writeFile(dbtRoot.resolve(sqlPath), generateModelSql(model, mappings, sourceSchema, sourceTable));
+        writeFile(dbtRoot.resolve(sqlPath), generateModelSql(model, mappings, sourceSchema, sourceTable, operatorGraph));
         writeFile(dbtRoot.resolve(schemaPath), generateSchemaYaml(model, mappings, dbtModelName, operatorGraph));
 
         model.setOperatorGraph(JsonUtil.toJson(operatorGraph));
@@ -310,244 +315,34 @@ public class DwdModelService implements DwdModelRunSynchronizer {
     }
 
     @Transactional
-    public DwdModelRunDTO run(UUID id, DwdModelRunRequest request) {
+    public DataModelDTO publish(UUID id, String comment) {
         DataModel model = loadModel(id);
-        if (!"VALIDATED".equalsIgnoreCase(model.getStatus())) {
-            throw new BizException(40055, "DWD 模型必须先完成 compile/validate 后才能运行");
+        if (!"VALIDATED".equalsIgnoreCase(model.getStatus()) && !"PUBLISHED".equalsIgnoreCase(model.getStatus())) {
+            throw new BizException(40062, "DWD 模型必须先完成编译校验后才能发布");
         }
-        if (!StringUtils.hasText(model.getDbtModelName())) {
-            throw new BizException(40056, "DWD 模型缺少 dbtModelName");
-        }
-        if (!StringUtils.hasText(model.getArtifactPath())) {
-            throw new BizException(40057, "DWD 模型缺少 dbt 产物路径，请先重新 compile");
+        if (!StringUtils.hasText(model.getArtifactPath()) || model.getOrchestrationDagId() == null) {
+            throw new BizException(40063, "DWD 模型缺少编译产物或编排 DAG，请先重新编译");
         }
         assignCurrentOwnerIfMissing(model);
-
-        Instant now = Instant.now();
-        String triggerType = normalizeTriggerType(request == null ? null : request.triggerType());
-        DataModelRun run = new DataModelRun();
-        run.setTenantId(model.getTenantId());
-        run.setModelId(model.getId());
-        run.setStatus("QUEUED");
-        run.setTriggerType(triggerType);
-        run.setSourceIntegrationRunId(request == null ? null : request.sourceIntegrationRunId());
-        run.setOrchestrationDagId(model.getOrchestrationDagId());
-        run.setResourceGroup(model.getResourceGroup());
-        run.setComputeProfile(model.getComputeProfile());
-        run.setArtifactsPath(model.getArtifactPath());
-        if ("BACKFILL".equals(triggerType)) {
-            run.setQueueReason(backfillSummary(request));
-        }
-        run.setQueuedAt(now);
-        run.setCreatedAt(now);
-        run.setUpdatedAt(now);
-        runRepo.save(run);
-
-        model.setLastRunId(run.getId());
-        model.setUpdatedAt(now);
+        model.setStatus("PUBLISHED");
+        model.setUpdatedAt(Instant.now());
         modelRepo.save(model);
 
-        try {
-            DwdModelDagsterClient.LaunchResult launch = dagsterClient.launchDwdModelRun(
-                dagsterJob(model),
-                dwdRunConfig(model, run, request),
-                dwdRunTags(model, run)
-            );
-            run.setDagsterRunId(launch.runId());
-            run.setStatus(mapDagsterStatus(launch.status()));
-            if (run.getStartedAt() == null && !"QUEUED".equals(run.getStatus())) {
-                run.setStartedAt(Instant.now());
-            }
-        } catch (RuntimeException e) {
-            run.setStatus("FAILED");
-            run.setStartedAt(now);
-            run.setFinishedAt(Instant.now());
-            run.setErrorMsg(truncate(e.getMessage(), 2000));
-        }
-        applyTerminalArtifactsAndPublish(model, run, "QUEUED");
-        run.setUpdatedAt(Instant.now());
-        runRepo.save(run);
-        return toRunDTO(run);
-    }
-
-    @Transactional(readOnly = true)
-    public List<DwdModelRunDTO> runs(UUID modelId) {
-        DataModel model = loadModel(modelId);
-        return runRepo.findByModelIdAndTenantIdOrderByQueuedAtDesc(model.getId(), model.getTenantId())
-            .stream()
-            .map(this::toRunDTO)
-            .toList();
-    }
-
-    @Transactional
-    public DwdModelRunDTO getRun(UUID runId) {
-        DataModelRun run = runRepo.findByIdAndTenantId(runId, requireTenant())
-            .orElseThrow(() -> new BizException(40442, "DWD 模型运行不存在"));
-        refreshRunStatus(run);
-        return toRunDTO(run);
-    }
-
-    @Override
-    @Transactional
-    public boolean refreshByDagsterRunId(String dagsterRunId) {
-        if (!StringUtils.hasText(dagsterRunId)) {
-            return false;
-        }
-        List<DataModelRun> runs = runRepo.findByDagsterRunIdAndTenantId(dagsterRunId, requireTenant());
-        for (DataModelRun run : runs) {
-            refreshRunStatus(run);
-        }
-        return !runs.isEmpty();
-    }
-
-    private void refreshRunStatus(DataModelRun run) {
-        if (!StringUtils.hasText(run.getDagsterRunId()) || isTerminal(run.getStatus())) {
-            return;
-        }
-        String previousStatus = run.getStatus();
-        try {
-            DwdModelDagsterClient.RunStatus status = dagsterClient.getRunStatus(run.getDagsterRunId());
-            String mapped = mapDagsterStatus(status.status());
-            run.setStatus(mapped);
-            if (status.startedAt() != null) {
-                run.setStartedAt(status.startedAt());
-            }
-            if (status.finishedAt() != null) {
-                run.setFinishedAt(status.finishedAt());
-            }
-            if (isTerminal(mapped) && run.getFinishedAt() == null) {
-                run.setFinishedAt(Instant.now());
-            }
-            applyTerminalArtifactsAndPublish(loadModel(run.getModelId()), run, previousStatus);
-            run.setUpdatedAt(Instant.now());
-            runRepo.save(run);
-        } catch (RuntimeException e) {
-            run.setQueueReason(truncate("Dagster 状态刷新失败: " + e.getMessage(), 256));
-            run.setUpdatedAt(Instant.now());
-            runRepo.save(run);
-        }
-    }
-
-    private void applyTerminalArtifactsAndPublish(DataModel model, DataModelRun run, String previousStatus) {
-        if (!isTerminal(run.getStatus())) {
-            return;
-        }
-        DwdRunArtifactReader.DbtRunArtifacts artifacts = null;
-        if (StringUtils.hasText(run.getDagsterRunId())) {
-            artifacts = artifactReader.read(model.getDbtModelName());
-            if (artifacts.found()) {
-                if (StringUtils.hasText(artifacts.artifactsPath())) {
-                    run.setArtifactsPath(artifacts.artifactsPath());
-                }
-                if (artifacts.rowsAffected() != null) {
-                    run.setRowsWritten(artifacts.rowsAffected());
-                    run.setRowsRead(artifacts.rowsAffected());
-                }
-                if (!"SUCCEEDED".equals(run.getStatus()) && StringUtils.hasText(artifacts.errorMessage())) {
-                    run.setErrorMsg(truncate(artifacts.errorMessage(), 2000));
-                }
-            } else if (!"SUCCEEDED".equals(run.getStatus()) && StringUtils.hasText(artifacts.errorMessage())) {
-                run.setErrorMsg(truncate(firstText(run.getErrorMsg(), artifacts.errorMessage()), 2000));
-            }
-        }
-        if (!isTerminal(previousStatus)) {
-            publishModelRunEvent(model, run, artifacts);
-        }
-    }
-
-    private void publishModelRunEvent(DataModel model, DataModelRun run, DwdRunArtifactReader.DbtRunArtifacts artifacts) {
-        String eventType = "SUCCEEDED".equals(run.getStatus())
-            ? DomainEvents.MODELING_MODEL_LOADED
-            : DomainEvents.MODELING_MODEL_FAILED;
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("tenantId", model.getTenantId().toString());
         payload.put("modelId", model.getId().toString());
-        payload.put("runId", run.getId().toString());
-        payload.put("status", run.getStatus());
-        payload.put("triggerType", run.getTriggerType());
-        payload.put("sourceIntegrationRunId", run.getSourceIntegrationRunId() == null ? "" : run.getSourceIntegrationRunId().toString());
-        payload.put("orchestrationDagId", run.getOrchestrationDagId() == null ? "" : run.getOrchestrationDagId().toString());
-        payload.put("dagsterRunId", nullToEmpty(run.getDagsterRunId()));
-        payload.put("dbtModelName", nullToEmpty(model.getDbtModelName()));
         payload.put("sourceFqn", model.getSourceFqn());
         payload.put("targetFqn", model.getTargetFqn());
+        payload.put("dbtModelName", nullToEmpty(model.getDbtModelName()));
+        payload.put("orchestrationDagId", model.getOrchestrationDagId().toString());
+        payload.put("resourceGroup", nullToEmpty(model.getResourceGroup()));
+        payload.put("computeProfile", nullToEmpty(model.getComputeProfile()));
         payload.put("ownerId", model.getOwnerId() == null ? "" : model.getOwnerId().toString());
         payload.put("ownerName", nullToEmpty(model.getOwnerName()));
-        payload.put("resourceGroup", nullToEmpty(run.getResourceGroup()));
-        payload.put("computeProfile", nullToEmpty(run.getComputeProfile()));
-        payload.put("rowsRead", run.getRowsRead() == null ? 0L : run.getRowsRead());
-        payload.put("rowsWritten", run.getRowsWritten() == null ? 0L : run.getRowsWritten());
-        payload.put("artifactsPath", nullToEmpty(run.getArtifactsPath()));
-        payload.put("errorMsg", nullToEmpty(run.getErrorMsg()));
+        payload.put("comment", nullToEmpty(comment));
         payload.put("fieldMapping", fieldMappingPayload(model.getId()));
-        payload.put("qualityChecks", qualityChecksPayload(artifacts));
-        outboxPublisher.publish(eventType, run.getId().toString(), payload);
-    }
-
-    private DwdModelRunDTO toRunDTO(DataModelRun run) {
-        return new DwdModelRunDTO(
-            run.getId(),
-            run.getModelId(),
-            run.getStatus(),
-            run.getTriggerType(),
-            run.getSourceIntegrationRunId(),
-            run.getOrchestrationDagId(),
-            run.getDagsterRunId(),
-            run.getEngineRunId(),
-            run.getTrinoQueryId(),
-            run.getResourceGroup(),
-            run.getComputeProfile(),
-            run.getQueuedAt(),
-            run.getStartedAt(),
-            run.getFinishedAt(),
-            run.getErrorMsg(),
-            run.getRowsRead(),
-            run.getRowsWritten(),
-            run.getArtifactsPath(),
-            run.getEstimatedScanBytes(),
-            run.getActualScanBytes(),
-            run.getCostEstimate(),
-            run.getQueueReason(),
-            run.getRetryCount(),
-            run.getCreatedAt(),
-            run.getUpdatedAt()
-        );
-    }
-
-    private Map<String, Object> dwdRunConfig(DataModel model, DataModelRun run, DwdModelRunRequest request) {
-        return Map.of(
-            "ops", Map.of(
-                "run_dwd_model", Map.of(
-                    "config", dwdRunConfigPayload(model, run, request)
-                )
-            )
-        );
-    }
-
-    private Map<String, Object> dwdRunConfigPayload(DataModel model, DataModelRun run, DwdModelRunRequest request) {
-        Map<String, Object> config = new LinkedHashMap<>();
-        config.put("model_name", model.getDbtModelName());
-        config.put("model_id", model.getId().toString());
-        config.put("run_id", run.getId().toString());
-        config.put("tenant_id", model.getTenantId().toString());
-        config.put("trigger_type", run.getTriggerType());
-        config.put("source_fqn", model.getSourceFqn());
-        config.put("target_fqn", model.getTargetFqn());
-        config.put("artifact_path", nullToEmpty(model.getArtifactPath()));
-        config.put("resource_group", nullToEmpty(model.getResourceGroup()));
-        config.put("compute_profile", nullToEmpty(model.getComputeProfile()));
-        config.put("backfill", backfillConfig(request));
-        return config;
-    }
-
-    private List<Map<String, String>> dwdRunTags(DataModel model, DataModelRun run) {
-        return List.of(
-            Map.of("key", "onelake.model_id", "value", model.getId().toString()),
-            Map.of("key", "onelake.model_run_id", "value", run.getId().toString()),
-            Map.of("key", "onelake.tenant_id", "value", model.getTenantId().toString()),
-            Map.of("key", "onelake.trigger_type", "value", run.getTriggerType()),
-            Map.of("key", "onelake.dbt_model", "value", model.getDbtModelName())
-        );
+        outboxPublisher.publish(DomainEvents.MODELING_MODEL_PUBLISHED, model.getId().toString(), payload);
+        return toDTO(model);
     }
 
     private List<Map<String, Object>> fieldMappingPayload(UUID modelId) {
@@ -567,98 +362,6 @@ public class DwdModelService implements DwdModelRunSynchronizer {
                 return item;
             })
             .toList();
-    }
-
-    private List<Map<String, Object>> qualityChecksPayload(DwdRunArtifactReader.DbtRunArtifacts artifacts) {
-        if (artifacts == null || artifacts.checks() == null || artifacts.checks().isEmpty()) {
-            return List.of();
-        }
-        return artifacts.checks().stream()
-            .map(check -> {
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("uniqueId", nullToEmpty(check.uniqueId()));
-                item.put("name", nullToEmpty(check.name()));
-                item.put("status", nullToEmpty(check.status()));
-                item.put("failures", check.failures() == null ? 0L : check.failures());
-                item.put("message", nullToEmpty(check.message()));
-                return item;
-            })
-            .toList();
-    }
-
-    private String normalizeTriggerType(String triggerType) {
-        if (!StringUtils.hasText(triggerType)) {
-            return "MANUAL";
-        }
-        String normalized = triggerType.trim().toUpperCase(Locale.ROOT);
-        if (!List.of("MANUAL", "ODS_EVENT", "BACKFILL", "RETRY").contains(normalized)) {
-            throw new BizException(40058, "不支持的 DWD 运行触发类型: " + triggerType);
-        }
-        return normalized;
-    }
-
-    private Map<String, Object> backfillConfig(DwdModelRunRequest request) {
-        if (request == null || !"BACKFILL".equalsIgnoreCase(nullToEmpty(request.triggerType()))) {
-            return Map.of(
-                "enabled", false,
-                "fullRefresh", false,
-                "partitionStart", "",
-                "partitionEnd", "",
-                "sourceIntegrationRunId", ""
-            );
-        }
-        return Map.of(
-            "enabled", true,
-            "fullRefresh", Boolean.TRUE.equals(request.fullRefresh()),
-            "partitionStart", nullToEmpty(request.partitionStart()),
-            "partitionEnd", nullToEmpty(request.partitionEnd()),
-            "sourceIntegrationRunId", request.sourceIntegrationRunId() == null ? "" : request.sourceIntegrationRunId().toString()
-        );
-    }
-
-    private String backfillSummary(DwdModelRunRequest request) {
-        if (request == null) {
-            return "BACKFILL";
-        }
-        List<String> parts = new ArrayList<>();
-        if (Boolean.TRUE.equals(request.fullRefresh())) {
-            parts.add("fullRefresh=true");
-        }
-        if (StringUtils.hasText(request.partitionStart()) || StringUtils.hasText(request.partitionEnd())) {
-            parts.add("range=" + nullToEmpty(request.partitionStart()) + ".." + nullToEmpty(request.partitionEnd()));
-        }
-        if (request.sourceIntegrationRunId() != null) {
-            parts.add("sourceIntegrationRunId=" + request.sourceIntegrationRunId());
-        }
-        return parts.isEmpty() ? "BACKFILL" : "BACKFILL " + String.join(" ", parts);
-    }
-
-    private String dagsterJob(DataModel model) {
-        return StringUtils.hasText(model.getDagsterJob()) ? model.getDagsterJob() : "onelake_dbt_model_run";
-    }
-
-    private String mapDagsterStatus(String status) {
-        if (!StringUtils.hasText(status)) {
-            return "RUNNING";
-        }
-        return switch (status.trim().toUpperCase(Locale.ROOT)) {
-            case "SUCCESS", "SUCCEEDED" -> "SUCCEEDED";
-            case "FAILURE", "FAILED" -> "FAILED";
-            case "CANCELED", "CANCELLED" -> "CANCELLED";
-            case "QUEUED", "NOT_STARTED" -> "QUEUED";
-            default -> "RUNNING";
-        };
-    }
-
-    private boolean isTerminal(String status) {
-        return List.of("SUCCEEDED", "FAILED", "CANCELLED").contains(status);
-    }
-
-    private String truncate(String value, int maxLength) {
-        if (value == null || value.length() <= maxLength) {
-            return value;
-        }
-        return value.substring(0, maxLength);
     }
 
     private String nullToEmpty(String value) {
@@ -1002,20 +705,31 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         }
     }
 
-    private String compileSql(String sourceFqn, List<ColumnDraft> mappings) {
+    private String compileSql(String sourceFqn, List<ColumnDraft> mappings, Map<String, Object> operatorGraph) {
+        List<LookupJoinSpec> joins = lookupJoinSpecs(operatorGraph);
+        Map<String, String> dictionaryExpressions = dictionaryExpressions(requireTenant(), operatorGraph);
         StringBuilder sql = new StringBuilder("select\n");
         for (int i = 0; i < mappings.size(); i++) {
             ColumnDraft mapping = mappings.get(i);
-            String expression = StringUtils.hasText(mapping.expression())
+            String expression = StringUtils.hasText(dictionaryExpressions.get(mapping.target()))
+                ? dictionaryExpressions.get(mapping.target())
+                : StringUtils.hasText(mapping.expression())
                 ? mapping.expression()
-                : quote(mapping.source());
+                : qualify("src", mapping.source());
             sql.append("  ").append(expression).append(" as ").append(quote(mapping.target()));
             if (i < mappings.size() - 1) {
                 sql.append(",");
             }
             sql.append("\n");
         }
-        sql.append("from ").append(sourceFqn);
+        sql.append("from ").append(sourceFqn).append(" as src");
+        for (LookupJoinSpec join : joins) {
+            sql.append("\nleft join ")
+                .append(join.lookupFqn())
+                .append(" as ").append(join.alias())
+                .append(" on ").append(qualify("src", join.leftKey()))
+                .append(" = ").append(qualify(join.alias(), join.rightKey()));
+        }
         return sql.toString();
     }
 
@@ -1023,8 +737,11 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         DataModel model,
         List<DataModelColumnMapping> mappings,
         String sourceSchema,
-        String sourceTable
+        String sourceTable,
+        Map<String, Object> operatorGraph
     ) {
+        List<LookupJoinSpec> joins = lookupJoinSpecs(operatorGraph);
+        Map<String, String> dictionaryExpressions = dictionaryExpressions(model.getTenantId(), operatorGraph);
         StringBuilder sql = new StringBuilder();
         sql.append("{{ config(materialized='")
             .append(dbtMaterialization(model.getMaterialization()))
@@ -1038,9 +755,11 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         sql.append("select\n");
         for (int i = 0; i < mappings.size(); i++) {
             DataModelColumnMapping mapping = mappings.get(i);
-            String expression = StringUtils.hasText(mapping.getExpression())
+            String expression = StringUtils.hasText(dictionaryExpressions.get(mapping.getTargetColumn()))
+                ? dictionaryExpressions.get(mapping.getTargetColumn())
+                : StringUtils.hasText(mapping.getExpression())
                 ? mapping.getExpression()
-                : quote(mapping.getSourceColumn());
+                : qualify("src", mapping.getSourceColumn());
             sql.append("  ").append(expression).append(" as ").append(quote(mapping.getTargetColumn()));
             if (i < mappings.size() - 1) {
                 sql.append(",");
@@ -1051,13 +770,24 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             .append(sourceSchema)
             .append("', '")
             .append(sourceTable)
-            .append("') }}\n");
+            .append("') }} as src\n");
+        for (LookupJoinSpec join : joins) {
+            sql.append("left join {{ source('")
+                .append(sourceSchemaName(join.lookupFqn()))
+                .append("', '")
+                .append(sourceTableName(join.lookupFqn()))
+                .append("') }} as ").append(join.alias())
+                .append(" on ").append(qualify("src", join.leftKey()))
+                .append(" = ").append(qualify(join.alias(), join.rightKey()))
+                .append("\n");
+        }
         if ("INCREMENTAL".equalsIgnoreCase(model.getMaterialization())
             && StringUtils.hasText(model.getIncrementalColumn())) {
-            String watermark = quote(model.getIncrementalColumn());
+            String sourceWatermark = qualify("src", model.getIncrementalColumn());
+            String targetWatermark = quote(model.getIncrementalColumn());
             sql.append("{% if is_incremental() %}\n")
-                .append("where ").append(watermark)
-                .append(" > (select coalesce(max(").append(watermark)
+                .append("where ").append(sourceWatermark)
+                .append(" > (select coalesce(max(").append(targetWatermark)
                 .append("), timestamp '1970-01-01 00:00:00') from {{ this }})\n")
                 .append("{% endif %}\n");
         }
@@ -1075,6 +805,12 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         SourceFreshnessSpec currentFreshness = sourceFreshnessSpec(operatorGraph, currentSource.fqn());
         if (currentFreshness != null) {
             freshnessByFqn.put(currentSource.fqn(), currentFreshness);
+        }
+
+        for (LookupJoinSpec join : lookupJoinSpecs(operatorGraph)) {
+            if (!sourcesByFqn.containsKey(join.lookupFqn())) {
+                sourcesByFqn.put(join.lookupFqn(), loadCatalogAsset(model.getTenantId(), join.lookupFqn()));
+            }
         }
 
         for (DataModel existing : modelRepo.findByTenantIdOrderByCreatedAtDesc(model.getTenantId())) {
@@ -1125,6 +861,167 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             return Map.of();
         }
         return Map.of();
+    }
+
+    private Map<String, String> dictionaryExpressions(UUID tenantId, Map<String, Object> operatorGraph) {
+        Object nodesValue = operatorGraph == null ? null : operatorGraph.get("nodes");
+        if (!(nodesValue instanceof List<?> nodes)) {
+            return Map.of();
+        }
+        Map<String, String> expressions = new LinkedHashMap<>();
+        for (Object nodeValue : nodes) {
+            if (!(nodeValue instanceof Map<?, ?> node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            Map<?, ?> config = configValue instanceof Map<?, ?> map ? map : Map.of();
+            if (!isDictionaryMappingNode(node, config)) {
+                continue;
+            }
+            String sourceColumn = firstText(
+                config.get("column"),
+                config.get("sourceColumn"),
+                config.get("source"),
+                config.get("field")
+            );
+            String targetColumn = firstText(
+                config.get("outputColumn"),
+                config.get("targetColumn"),
+                config.get("target"),
+                config.get("field")
+            );
+            if (!StringUtils.hasText(sourceColumn) || !StringUtils.hasText(targetColumn)) {
+                throw new BizException(40062, "字典匹配算子必须配置 column 和 outputColumn");
+            }
+            String dictionaryRef = firstText(
+                config.get("dictionaryRef"),
+                config.get("dictionaryCode"),
+                config.get("codebookCode"),
+                config.get("codebook")
+            );
+            String dictionaryVersion = firstText(config.get("dictionaryVersion"), config.get("version"));
+            List<DictionaryPair> pairs = publishedCodebookPairs(tenantId, dictionaryRef, dictionaryVersion);
+            if (pairs.isEmpty()) {
+                pairs = dictionaryPairs(config.get("pairs"));
+            }
+            if (pairs.isEmpty()) {
+                String suffix = StringUtils.hasText(dictionaryRef) ? " " + dictionaryRef : "";
+                throw new BizException(40062, "字典匹配算子缺少已发布字典或字典项:" + suffix);
+            }
+            expressions.put(targetColumn, dictionaryCaseExpression(sourceColumn, pairs, firstText(config.get("noMatchPolicy"))));
+        }
+        return expressions;
+    }
+
+    private List<DictionaryPair> publishedCodebookPairs(UUID tenantId, String code, String version) {
+        if (tenantId == null || !StringUtils.hasText(code)) {
+            return List.of();
+        }
+        if (StringUtils.hasText(version)) {
+            try {
+                String entries = jdbc.queryForObject("""
+                    SELECT cv.entries::text
+                    FROM modeling.codebook cb
+                    JOIN modeling.codebook_version cv
+                      ON cv.tenant_id = cb.tenant_id AND cv.codebook_id = cb.id
+                    WHERE cb.tenant_id = ?
+                      AND lower(cb.code) = lower(?)
+                      AND cb.status = 'PUBLISHED'
+                      AND lower(cv.version) = lower(?)
+                    """, String.class, tenantId, code.trim(), version.trim());
+                List<DictionaryPair> pairs = dictionaryPairs(entries);
+                if (!pairs.isEmpty()) {
+                    return pairs;
+                }
+            } catch (EmptyResultDataAccessException ignored) {
+                // Fall back to the current published snapshot or inline pairs for older drafts.
+            }
+        }
+        try {
+            String entries = jdbc.queryForObject("""
+                SELECT entries::text
+                FROM modeling.codebook
+                WHERE tenant_id = ?
+                  AND lower(code) = lower(?)
+                  AND status = 'PUBLISHED'
+                """, String.class, tenantId, code.trim());
+            return dictionaryPairs(entries);
+        } catch (EmptyResultDataAccessException ignored) {
+            return List.of();
+        }
+    }
+
+    private List<DictionaryPair> dictionaryPairs(Object raw) {
+        if (raw instanceof String text) {
+            if (!StringUtils.hasText(text)) {
+                return List.of();
+            }
+            try {
+                return dictionaryPairs(JsonUtil.parse(text));
+            } catch (RuntimeException ignored) {
+                return List.of();
+            }
+        }
+        if (raw instanceof JsonNode node) {
+            if (!node.isArray()) {
+                return List.of();
+            }
+            List<DictionaryPair> pairs = new ArrayList<>();
+            for (JsonNode item : node) {
+                DictionaryPair pair = dictionaryPair(
+                    item.path("from").asText(null),
+                    item.path("to").asText(null)
+                );
+                if (pair != null) {
+                    pairs.add(pair);
+                }
+            }
+            return pairs;
+        }
+        if (!(raw instanceof List<?> list)) {
+            return List.of();
+        }
+        List<DictionaryPair> pairs = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) {
+                continue;
+            }
+            DictionaryPair pair = dictionaryPair(
+                firstText(map.get("from"), map.get("source"), map.get("value"), map.get("code")),
+                firstText(map.get("to"), map.get("target"), map.get("label"), map.get("name"))
+            );
+            if (pair != null) {
+                pairs.add(pair);
+            }
+        }
+        return pairs;
+    }
+
+    private DictionaryPair dictionaryPair(String from, String to) {
+        if (!StringUtils.hasText(from) || !StringUtils.hasText(to)) {
+            return null;
+        }
+        return new DictionaryPair(from.trim(), to.trim());
+    }
+
+    private String dictionaryCaseExpression(String sourceColumn, List<DictionaryPair> pairs, String noMatchPolicy) {
+        String sourceExpression = qualify("src", sourceColumn);
+        String elseExpression = "NULL".equalsIgnoreCase(noMatchPolicy) ? "null" : sourceExpression;
+        StringBuilder expression = new StringBuilder("case");
+        for (DictionaryPair pair : pairs) {
+            expression.append(" when ")
+                .append(sourceExpression)
+                .append(" = ")
+                .append(sqlString(pair.from()))
+                .append(" then ")
+                .append(sqlString(pair.to()));
+        }
+        expression.append(" else ").append(elseExpression).append(" end");
+        return expression.toString();
+    }
+
+    private String sqlString(String value) {
+        return "'" + (value == null ? "" : value.replace("'", "''")) + "'";
     }
 
     private SourceFreshnessSpec sourceFreshnessSpec(Map<String, Object> operatorGraph, String sourceFqn) {
@@ -1208,6 +1105,100 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         }
         generatedGraph.put("nodes", mergedNodes);
         return generatedGraph;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mergeStoredGovernanceNodes(
+        Map<String, Object> generatedGraph,
+        Map<String, Object> storedGraph
+    ) {
+        Object generatedNodesValue = generatedGraph.get("nodes");
+        Object storedNodesValue = storedGraph == null ? null : storedGraph.get("nodes");
+        if (!(generatedNodesValue instanceof List<?> generatedNodes)
+            || !(storedNodesValue instanceof List<?> storedNodes)) {
+            return generatedGraph;
+        }
+
+        List<Object> mergedNodes = new ArrayList<>(generatedNodes);
+        Set<String> nodeIds = new java.util.LinkedHashSet<>();
+        for (Object nodeValue : generatedNodes) {
+            if (nodeValue instanceof Map<?, ?> node) {
+                String id = stringValue(node.get("id"));
+                if (StringUtils.hasText(id)) {
+                    nodeIds.add(id);
+                }
+            }
+        }
+        for (Object nodeValue : storedNodes) {
+            if (!(nodeValue instanceof Map<?, ?> node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            Map<?, ?> config = configValue instanceof Map<?, ?> map ? map : Map.of();
+            if (!isAdvancedGovernanceNode(node, config)) {
+                continue;
+            }
+            String id = stringValue(node.get("id"));
+            if (!StringUtils.hasText(id) || nodeIds.contains(id)) {
+                continue;
+            }
+            mergedNodes.add((Map<String, Object>) node);
+            nodeIds.add(id);
+        }
+        generatedGraph.put("nodes", mergedNodes);
+
+        Object generatedEdgesValue = generatedGraph.get("edges");
+        Object storedEdgesValue = storedGraph.get("edges");
+        if (generatedEdgesValue instanceof List<?> generatedEdges
+            && storedEdgesValue instanceof List<?> storedEdges) {
+            List<Object> mergedEdges = new ArrayList<>(generatedEdges);
+            Set<String> edgeKeys = new java.util.LinkedHashSet<>();
+            for (Object edgeValue : generatedEdges) {
+                if (edgeValue instanceof Map<?, ?> edge) {
+                    edgeKeys.add(stringValue(edge.get("source")) + "->" + stringValue(edge.get("target")));
+                }
+            }
+            for (Object edgeValue : storedEdges) {
+                if (!(edgeValue instanceof Map<?, ?> edge)) {
+                    continue;
+                }
+                String source = stringValue(edge.get("source"));
+                String target = stringValue(edge.get("target"));
+                String key = source + "->" + target;
+                if (nodeIds.contains(source) && nodeIds.contains(target) && !edgeKeys.contains(key)) {
+                    mergedEdges.add((Map<String, Object>) edge);
+                    edgeKeys.add(key);
+                }
+            }
+            generatedGraph.put("edges", mergedEdges);
+        }
+        return generatedGraph;
+    }
+
+    private boolean isAdvancedGovernanceNode(Map<?, ?> node, Map<?, ?> config) {
+        return isDictionaryMappingNode(node, config) || isLookupJoinNode(node, config);
+    }
+
+    private boolean isDictionaryMappingNode(Map<?, ?> node, Map<?, ?> config) {
+        String ref = nodeRef(node, config);
+        return ref.contains("codebook")
+            || ref.contains("dictionary")
+            || ref.contains("dict_mapping")
+            || ref.contains("standard.codebook_mapping");
+    }
+
+    private boolean isLookupJoinNode(Map<?, ?> node, Map<?, ?> config) {
+        String ref = nodeRef(node, config);
+        return ref.contains("lookup")
+            || ref.contains("reference_join")
+            || ref.contains("join.lookup")
+            || "lookup_join".equals(ref);
+    }
+
+    private String nodeRef(Map<?, ?> node, Map<?, ?> config) {
+        return stringValue(firstText(node.get("operatorRef"), config.get("operatorRef"), config.get("type"), node.get("type")))
+            .toLowerCase(Locale.ROOT)
+            .replace('-', '_');
     }
 
     private boolean isPreservedQualityGateNode(Map<?, ?> node) {
@@ -1594,13 +1585,13 @@ public class DwdModelService implements DwdModelRunSynchronizer {
 
     private String normalizeCustomAssertionSql(String assertionSql) {
         String normalized = assertionSql
-            .replace("{{ model }}", CUSTOM_SQL_MODEL_PLACEHOLDER)
-            .replace("{{model}}", CUSTOM_SQL_MODEL_PLACEHOLDER)
+            .replace("{{ model }}", CUSTOM_SQL_TEMPLATE_PLACEHOLDER)
+            .replace("{{model}}", CUSTOM_SQL_TEMPLATE_PLACEHOLDER)
             .trim();
-        if (!normalized.contains(CUSTOM_SQL_MODEL_PLACEHOLDER)) {
+        if (!normalized.contains(CUSTOM_SQL_TEMPLATE_PLACEHOLDER)) {
             throw new BizException(40056, "自定义 SQL 门禁必须使用 {{ model }} 占位符引用当前模型");
         }
-        String parseSql = normalized.replace(CUSTOM_SQL_MODEL_PLACEHOLDER, "onelake_model_under_test");
+        String parseSql = normalized.replace(CUSTOM_SQL_TEMPLATE_PLACEHOLDER, "onelake_model_under_test");
         Statement statement = ReadOnlySqlValidator.requireSingleReadOnlyStatement(
             parseSql,
             40056,
@@ -1701,7 +1692,7 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         List<String> outputColumns,
         Map<String, Object> operatorGraph
     ) {
-        String dagsterJob = StringUtils.hasText(model.getDagsterJob()) ? model.getDagsterJob() : "onelake_dbt_model_run";
+        String dagsterJob = StringUtils.hasText(model.getDagsterJob()) ? model.getDagsterJob() : "onelake_pipeline_run";
         String dagName = "DWD " + model.getName();
         String definition = JsonUtil.toJson(dagDefinition(model, sqlPath, schemaPath, sourcePath, outputColumns, operatorGraph));
         if (model.getOrchestrationDagId() != null) {
@@ -1739,7 +1730,7 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         Map<String, Object> operatorGraph
     ) {
         Map<String, Object> definition = new LinkedHashMap<>();
-        definition.put("kind", "DWD_MODEL_DAG");
+        definition.put("kind", "SPARK_GOVERNANCE_DAG");
         definition.put("version", 1);
         definition.put("modelId", model.getId().toString());
         definition.put("sourceFqn", model.getSourceFqn());
@@ -1825,13 +1816,16 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             operators.get("quality_gate")
         ));
         nodes.add(node(
-            "dbt_model", "DBT_MODEL", model.getDbtModelName(),
+            "spark_sql", "TRANSFORM", "Spark SQL 编译执行",
             Map.of(
-                "dbtModelName", model.getDbtModelName(),
+                "sql", model.getCompiledSql() == null ? "" : model.getCompiledSql(),
+                "modelName", model.getDbtModelName(),
+                "targetFqn", model.getTargetFqn(),
                 "engine", model.getEngine(),
                 "resourceGroup", model.getResourceGroup(),
                 "computeProfile", model.getComputeProfile()
-            )
+            ),
+            operators.get("spark_sql")
         ));
         nodes.add(node(
             "output_dwd", "OUTPUT", model.getTargetFqn(),
@@ -1848,8 +1842,8 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             previous = "mask_sensitive";
         }
         edges.add(Map.of("source", previous, "target", "quality_gate"));
-        edges.add(Map.of("source", "quality_gate", "target", "dbt_model"));
-        edges.add(Map.of("source", "dbt_model", "target", "output_dwd"));
+        edges.add(Map.of("source", "quality_gate", "target", "spark_sql"));
+        edges.add(Map.of("source", "spark_sql", "target", "output_dwd"));
 
         Map<String, Object> graph = new LinkedHashMap<>();
         graph.put("version", 1);
@@ -1892,7 +1886,7 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             }
         }
         node.put("config", config);
-        node.put("resourceProfile", Map.of("resourceGroup", "default", "computeProfile", "trino-small"));
+        node.put("resourceProfile", Map.of("resourceGroup", "spark-default", "computeProfile", "spark-small"));
         return node;
     }
 
@@ -1910,6 +1904,7 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             specs.add(new DefaultOperatorSpec("mask_sensitive", OP_MASK_PARTIAL, "MASK"));
         }
         specs.add(new DefaultOperatorSpec("quality_gate", OP_GATE_NOT_NULL, "QUALITY_GATE"));
+        specs.add(new DefaultOperatorSpec("spark_sql", OP_TRANSFORM_SPARK_SQL, "TRANSFORM"));
         specs.add(new DefaultOperatorSpec("output_dwd", outputOperatorRef(model), "OUTPUT"));
 
         Map<String, ResolvedOperator> operators = new LinkedHashMap<>();
@@ -1969,8 +1964,8 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         if (!spec.category().equalsIgnoreCase(manifestCategory)) {
             errors.add("category 不匹配");
         }
-        if (!"SQL_DBT".equalsIgnoreCase(compileTarget)) {
-            errors.add("compileTarget 必须为 SQL_DBT");
+        if (!"SPARK".equalsIgnoreCase(compileTarget)) {
+            errors.add("compileTarget 必须为 SPARK");
         }
         if (!manifest.path("template").isObject()) {
             errors.add("template 缺失");
@@ -2028,17 +2023,106 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             model.setOperatorGraphVersion(1);
         }
         if (!StringUtils.hasText(model.getResourceGroup())) {
-            model.setResourceGroup("default");
+            model.setResourceGroup("spark-default");
         }
         if (!StringUtils.hasText(model.getComputeProfile())) {
-            model.setComputeProfile("trino-small");
+            model.setComputeProfile("spark-small");
         }
         if (!StringUtils.hasText(model.getEngine())) {
-            model.setEngine("TRINO_DBT");
+            model.setEngine("SPARK");
         }
         if (!StringUtils.hasText(model.getCostPolicy()) || "{}".equals(model.getCostPolicy())) {
             model.setCostPolicy(defaultCostPolicyJson());
         }
+    }
+
+    private void applyDraftExecutionRequest(DataModel model, DwdModelDraftRequest request) {
+        if (request == null) {
+            return;
+        }
+        if (StringUtils.hasText(request.pipelineMode())) {
+            model.setPipelineMode(request.pipelineMode().trim());
+        }
+        if (request.operatorGraphVersion() != null) {
+            model.setOperatorGraphVersion(request.operatorGraphVersion());
+        }
+        if (StringUtils.hasText(request.resourceGroup())) {
+            model.setResourceGroup(request.resourceGroup().trim());
+        }
+        if (StringUtils.hasText(request.computeProfile())) {
+            model.setComputeProfile(request.computeProfile().trim());
+        }
+        if (StringUtils.hasText(request.engine())) {
+            model.setEngine(request.engine().trim());
+        }
+        if (StringUtils.hasText(request.costPolicy())) {
+            parseJsonObject(request.costPolicy(), "costPolicy");
+            model.setCostPolicy(request.costPolicy().trim());
+        }
+        if (StringUtils.hasText(request.operatorGraph())) {
+            parseJsonObject(request.operatorGraph(), "operatorGraph");
+            model.setOperatorGraph(request.operatorGraph().trim());
+            if (!StringUtils.hasText(request.pipelineMode()) || "SYSTEM_GENERATED".equalsIgnoreCase(model.getPipelineMode())) {
+                model.setPipelineMode("SPARK_GOVERNANCE");
+            }
+        }
+    }
+
+    private JsonNode parseJsonObject(String json, String field) {
+        try {
+            JsonNode node = JsonUtil.parse(json);
+            if (!node.isObject()) {
+                throw new BizException(40060, field + " 必须是 JSON object");
+            }
+            return node;
+        } catch (BizException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new BizException(40060, field + " JSON 非法: " + e.getMessage());
+        }
+    }
+
+    private List<LookupJoinSpec> lookupJoinSpecs(Map<String, Object> operatorGraph) {
+        Object nodesValue = operatorGraph == null ? null : operatorGraph.get("nodes");
+        if (!(nodesValue instanceof List<?> nodes)) {
+            return List.of();
+        }
+        List<LookupJoinSpec> specs = new ArrayList<>();
+        int index = 0;
+        for (Object nodeValue : nodes) {
+            if (!(nodeValue instanceof Map<?, ?> node)) {
+                continue;
+            }
+            Object configValue = node.get("config");
+            Map<?, ?> config = configValue instanceof Map<?, ?> map ? map : Map.of();
+            if (!isLookupJoinNode(node, config)) {
+                continue;
+            }
+            String lookupFqn = firstText(config.get("lookupFqn"), config.get("referenceFqn"), config.get("assetFqn"));
+            String leftKey = firstText(config.get("leftKey"), config.get("sourceKey"), config.get("joinLeftKey"));
+            String rightKey = firstText(config.get("rightKey"), config.get("lookupKey"), config.get("joinRightKey"));
+            if (!StringUtils.hasText(lookupFqn)
+                || !StringUtils.hasText(leftKey)
+                || !StringUtils.hasText(rightKey)) {
+                throw new BizException(40061, "关联查询算子必须配置 lookupFqn、leftKey 和 rightKey");
+            }
+            String alias = normalizeSqlAlias(firstText(config.get("alias"), node.get("id")), index);
+            specs.add(new LookupJoinSpec(lookupFqn, alias, leftKey, rightKey));
+            index++;
+        }
+        return specs;
+    }
+
+    private String normalizeSqlAlias(String preferred, int index) {
+        String text = StringUtils.hasText(preferred) ? preferred.trim().toLowerCase(Locale.ROOT) : "lk_" + index;
+        text = text.replaceAll("[^a-z0-9_]", "_");
+        if (!StringUtils.hasText(text)) {
+            text = "lk_" + index;
+        }
+        if (Character.isDigit(text.charAt(0))) {
+            text = "lk_" + text;
+        }
+        return text;
     }
 
     private String defaultCostPolicyJson() {
@@ -2055,7 +2139,7 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             Files.createDirectories(path.getParent());
             Files.writeString(path, content, StandardCharsets.UTF_8);
         } catch (IOException e) {
-            throw new BizException(50050, "DWD dbt 产物写入失败: " + e.getMessage());
+            throw new BizException(50050, "DWD Spark 编译产物写入失败: " + e.getMessage());
         }
     }
 
@@ -2125,6 +2209,13 @@ public class DwdModelService implements DwdModelRunSynchronizer {
             return name;
         }
         return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+
+    private String qualify(String alias, String column) {
+        if (!StringUtils.hasText(alias)) {
+            return quote(column);
+        }
+        return alias + "." + quote(column);
     }
 
     private boolean isSensitive(String level) {
@@ -2231,6 +2322,15 @@ public class DwdModelService implements DwdModelRunSynchronizer {
         String compileTarget,
         JsonNode manifest
     ) {}
+
+    private record LookupJoinSpec(
+        String lookupFqn,
+        String alias,
+        String leftKey,
+        String rightKey
+    ) {}
+
+    private record DictionaryPair(String from, String to) {}
 
     private record DbtTestSpec(String name, Map<String, Object> arguments) {}
 

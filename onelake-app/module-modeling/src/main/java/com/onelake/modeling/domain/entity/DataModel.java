@@ -67,9 +67,9 @@ public class DataModel {
     @ColumnTransformer(write = "?::jsonb")
     private String operatorGraph = "{}";
 
-    private String resourceGroup = "default";
-    private String computeProfile = "trino-small";
-    private String engine = "TRINO_DBT";
+    private String resourceGroup = "spark-default";
+    private String computeProfile = "spark-small";
+    private String engine = "SPARK";
 
     @Column(columnDefinition = "jsonb")
     @ColumnTransformer(write = "?::jsonb")

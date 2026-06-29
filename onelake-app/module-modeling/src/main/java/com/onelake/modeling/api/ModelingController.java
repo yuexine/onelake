@@ -7,8 +7,6 @@ import com.onelake.modeling.domain.entity.SubjectDomain;
 import com.onelake.modeling.dto.DwdModelCompileDTO;
 import com.onelake.modeling.dto.DataModelDTO;
 import com.onelake.modeling.dto.DwdModelDraftRequest;
-import com.onelake.modeling.dto.DwdModelRunDTO;
-import com.onelake.modeling.dto.DwdModelRunRequest;
 import com.onelake.modeling.dto.DwdModelValidationDTO;
 import com.onelake.modeling.service.DwdModelService;
 import com.onelake.modeling.service.ModelingService;
@@ -25,7 +23,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1/modeling")
 @RequiredArgsConstructor
-@Tag(name = "数据建模", description = "主题域、指标和 DWD 模型草稿、校验、编译、运行接口。")
+@Tag(name = "数据建模", description = "主题域、指标和 DWD 治理模型草稿、校验、编译接口。运行由流水线模块统一承载。")
 public class ModelingController {
 
     private final ModelingService service;
@@ -136,7 +134,7 @@ public class ModelingController {
 
     @Operation(
         summary = "编译数据模型产物",
-        description = "用途：生成 dbt/Dagster 等模型运行产物。前端对接：ModelingAPI.compileModel，由 TableDetail 模型动作调用。"
+        description = "用途：生成 Spark 治理模型编译产物，并关联到统一流水线。前端对接：ModelingAPI.compileModel，由表详情和治理表工厂调用。"
     )
     @PostMapping("/models/{id}/compile")
     @PreAuthorize("hasRole('DE')")
@@ -145,31 +143,14 @@ public class ModelingController {
     }
 
     @Operation(
-        summary = "运行数据模型",
-        description = "用途：触发 DWD 模型运行并记录运行实例。前端对接：ModelingAPI.runModel，由 TableDetail 模型动作调用。"
+        summary = "发布数据模型",
+        description = "用途：将已编译校验的治理表模型发布为可消费状态，并发出建模发布事件。前端对接：ModelingAPI.publishModel，由治理表工厂发布动作调用。"
     )
-    @PostMapping("/models/{id}/run")
+    @PostMapping("/models/{id}/publish")
     @PreAuthorize("hasRole('DE')")
-    public ApiResponse<DwdModelRunDTO> runModel(@PathVariable UUID id,
-                                                @RequestBody(required = false) DwdModelRunRequest request) {
-        return ApiResponse.ok(dwdModelService.run(id, request));
-    }
-
-    @Operation(
-        summary = "查询模型运行历史",
-        description = "用途：返回指定模型的运行实例列表。前端对接：ModelingAPI.listModelRuns，由 TableDetail 加载模型运行历史。"
-    )
-    @GetMapping("/models/{id}/runs")
-    public ApiResponse<List<DwdModelRunDTO>> modelRuns(@PathVariable UUID id) {
-        return ApiResponse.ok(dwdModelService.runs(id));
-    }
-
-    @Operation(
-        summary = "获取模型运行详情",
-        description = "用途：读取单次模型运行状态、日志和产物信息。前端对接：ModelingAPI.getModelRun，由 TableDetail 轮询运行状态。"
-    )
-    @GetMapping("/model-runs/{runId}")
-    public ApiResponse<DwdModelRunDTO> modelRun(@PathVariable UUID runId) {
-        return ApiResponse.ok(dwdModelService.getRun(runId));
+    public ApiResponse<DataModelDTO> publishModel(@PathVariable UUID id,
+                                                  @RequestBody(required = false) Map<String, Object> body) {
+        String comment = body == null || body.get("comment") == null ? null : body.get("comment").toString();
+        return ApiResponse.ok(dwdModelService.publish(id, comment));
     }
 }

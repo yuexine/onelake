@@ -7,16 +7,12 @@ import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.modeling.domain.entity.DataModel;
 import com.onelake.modeling.domain.entity.DataModelColumnMapping;
-import com.onelake.modeling.domain.entity.DataModelRun;
 import com.onelake.modeling.domain.entity.DataModelSource;
 import com.onelake.modeling.dto.DataModelDTO;
 import com.onelake.modeling.dto.DwdModelCompileDTO;
 import com.onelake.modeling.dto.DwdModelDraftRequest;
-import com.onelake.modeling.dto.DwdModelRunDTO;
-import com.onelake.modeling.dto.DwdModelRunRequest;
 import com.onelake.modeling.repository.DataModelColumnMappingRepository;
 import com.onelake.modeling.repository.DataModelRepository;
-import com.onelake.modeling.repository.DataModelRunRepository;
 import com.onelake.modeling.repository.DataModelSourceRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,13 +38,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -58,21 +51,16 @@ class DwdModelServiceTest {
     private static final UUID TENANT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID USER_ID = UUID.fromString("d0e42034-2349-474a-ba4e-bc6d2127343d");
     private static final UUID MODEL_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
-    private static final UUID RUN_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
 
     private DataModelRepository modelRepo;
     private DataModelSourceRepository sourceRepo;
     private DataModelColumnMappingRepository mappingRepo;
-    private DataModelRunRepository runRepo;
-    private DwdModelDagsterClient dagsterClient;
-    private DwdRunArtifactReader artifactReader;
     private OutboxPublisher outboxPublisher;
     private JdbcTemplate jdbc;
     private DwdModelService service;
     private final List<DataModelSource> savedSources = new ArrayList<>();
     private final List<DataModelColumnMapping> savedMappings = new ArrayList<>();
     private DataModel savedModel;
-    private DataModelRun savedRun;
 
     @BeforeEach
     void setUp() {
@@ -82,18 +70,12 @@ class DwdModelServiceTest {
         modelRepo = mock(DataModelRepository.class);
         sourceRepo = mock(DataModelSourceRepository.class);
         mappingRepo = mock(DataModelColumnMappingRepository.class);
-        runRepo = mock(DataModelRunRepository.class);
-        dagsterClient = mock(DwdModelDagsterClient.class);
-        artifactReader = new DwdRunArtifactReader();
         outboxPublisher = mock(OutboxPublisher.class);
         jdbc = mock(JdbcTemplate.class);
         service = new DwdModelService(
             modelRepo,
             sourceRepo,
             mappingRepo,
-            runRepo,
-            dagsterClient,
-            artifactReader,
             outboxPublisher,
             jdbc
         );
@@ -118,17 +100,6 @@ class DwdModelServiceTest {
             savedMappings.add(mapping);
             return mapping;
         }).when(mappingRepo).save(any(DataModelColumnMapping.class));
-        doAnswer(invocation -> {
-            DataModelRun run = invocation.getArgument(0);
-            if (run.getId() == null) {
-                run.setId(RUN_ID);
-            }
-            savedRun = run;
-            return run;
-        }).when(runRepo).save(any(DataModelRun.class));
-        when(runRepo.findByIdAndTenantId(eq(RUN_ID), eq(TENANT_ID))).thenAnswer(invocation -> Optional.ofNullable(savedRun));
-        when(runRepo.findByModelIdAndTenantIdOrderByQueuedAtDesc(eq(MODEL_ID), eq(TENANT_ID)))
-            .thenAnswer(invocation -> savedRun == null ? List.of() : List.of(savedRun));
         when(sourceRepo.findByModelIdOrderBySortNoAsc(MODEL_ID)).thenAnswer(invocation -> List.copyOf(savedSources));
         when(mappingRepo.findByModelIdOrderBySortNoAsc(MODEL_ID)).thenAnswer(invocation -> List.copyOf(savedMappings));
     }
@@ -213,7 +184,7 @@ class DwdModelServiceTest {
             eq(UUID.class),
             eq(TENANT_ID),
             eq("DWD dwd_trade_order_df"),
-            eq("onelake_dbt_model_run"),
+            eq("onelake_pipeline_run"),
             anyString()
         )).thenReturn(dagId);
         mockDwdOperatorManifests("output.iceberg_table");
@@ -241,18 +212,19 @@ class DwdModelServiceTest {
 
             assertThat(compiled.orchestrationDagId()).isEqualTo(dagId);
             assertThat(compiled.sqlPath()).isEqualTo("models/intermediate/dwd_trade_order_df.sql");
-            assertThat(compiled.engine()).isEqualTo("TRINO_DBT");
-            assertThat(compiled.resourceGroup()).isEqualTo("default");
-            assertThat(compiled.computeProfile()).isEqualTo("trino-small");
-            assertThat(compiled.operatorGraph()).contains("GOVERN", "QUALITY_GATE", "DBT_MODEL");
+            assertThat(compiled.engine()).isEqualTo("SPARK");
+            assertThat(compiled.resourceGroup()).isEqualTo("spark-default");
+            assertThat(compiled.computeProfile()).isEqualTo("spark-small");
+            assertThat(compiled.operatorGraph()).contains("GOVERN", "QUALITY_GATE", "transform.spark_sql");
             assertThat(compiled.operatorGraph())
                 .contains("\"operatorRef\":\"input.ods_table\"")
                 .contains("\"operatorRef\":\"transform.rename_columns\"")
                 .contains("\"operatorRef\":\"gate.not_null\"")
+                .contains("\"operatorRef\":\"transform.spark_sql\"")
                 .contains("\"operatorRef\":\"output.iceberg_table\"")
                 .contains("\"tests\":[\"not_null\",\"unique\"]")
                 .contains("\"manifest\"")
-                .contains("\"compileTarget\":\"SQL_DBT\"");
+                .contains("\"compileTarget\":\"SPARK\"");
             assertThat(savedModel.getStatus()).isEqualTo("VALIDATED");
             assertThat(savedModel.getArtifactPath()).isEqualTo("models/intermediate/dwd_trade_order_df.sql");
             assertThat(savedModel.getOrchestrationDagId()).isEqualTo(dagId);
@@ -279,6 +251,232 @@ class DwdModelServiceTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void compileArtifactsRendersGovernanceLookupJoin(@TempDir Path tempDir) throws Exception {
+        mockCatalogAsset("ods.ods_codex_orders", "ODS", "交易", List.of(
+            Map.of("name", "order_id", "type", "BIGINT"),
+            Map.of("name", "customer_id", "type", "BIGINT")
+        ));
+        mockCatalogAsset("ods.dim_customer", "ODS", "客户", List.of(
+            Map.of("name", "customer_id", "type", "BIGINT"),
+            Map.of("name", "customer_name", "type", "VARCHAR")
+        ));
+        when(jdbc.queryForObject(
+            contains("INSERT INTO orchestration.dag"),
+            eq(UUID.class),
+            eq(TENANT_ID),
+            eq("DWD dwd_trade_order_customer_df"),
+            eq("onelake_pipeline_run"),
+            anyString()
+        )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
+        mockDwdOperatorManifests("output.iceberg_table");
+
+        String operatorGraph = JsonUtil.toJson(Map.of(
+            "version", 1,
+            "pipelineMode", "SPARK_GOVERNANCE",
+            "nodes", List.of(Map.of(
+                "id", "lookup_customer",
+                "type", "TRANSFORM",
+                "nodeType", "TRANSFORM",
+                "operatorRef", "join.lookup_enrich",
+                "config", Map.of(
+                    "type", "LOOKUP_JOIN",
+                    "lookupFqn", "ods.dim_customer",
+                    "alias", "lk_customer",
+                    "leftKey", "customer_id",
+                    "rightKey", "customer_id",
+                    "fields", List.of(Map.of("source", "customer_name", "target", "customer_name"))
+                )
+            )),
+            "edges", List.of(Map.of("source", "transform_mapping", "target", "lookup_customer"))
+        ));
+
+        service.createDraft(new DwdModelDraftRequest(
+            "dwd_trade_order_customer_df",
+            "交易",
+            "ods.ods_codex_orders",
+            "dwd.dwd_trade_order_customer_df",
+            "TABLE",
+            "order_id",
+            null,
+            null,
+            List.of(
+                new DwdModelDraftRequest.ColumnMappingRequest("order_id", "order_id", null, null, null, true, null, null, null, null, null, null),
+                new DwdModelDraftRequest.ColumnMappingRequest("customer_id", "customer_id", null, null, null, false, null, null, null, null, null, null),
+                new DwdModelDraftRequest.ColumnMappingRequest("customer_id", "customer_name", "BIGINT", "VARCHAR", "lk_customer.customer_name", false, null, null, null, null, null, null)
+            ),
+            "SPARK_GOVERNANCE",
+            1,
+            operatorGraph,
+            "spark-default",
+            "spark-small",
+            "SPARK",
+            null
+        ));
+
+        String previous = System.getProperty("onelake.dbt.projectDir");
+        System.setProperty("onelake.dbt.projectDir", tempDir.toString());
+        try {
+            DwdModelCompileDTO compiled = service.compileArtifacts(MODEL_ID);
+            String modelSql = Files.readString(tempDir.resolve(compiled.sqlPath()));
+            String sourceYaml = Files.readString(tempDir.resolve(compiled.sourcePath()));
+
+            assertThat(modelSql)
+                .contains("lk_customer.customer_name as customer_name")
+                .contains("left join {{ source('ods', 'dim_customer') }} as lk_customer")
+                .contains("src.customer_id = lk_customer.customer_id");
+            assertThat(sourceYaml).contains("name: dim_customer");
+            assertThat(compiled.operatorGraph()).contains("join.lookup_enrich", "lookup_customer");
+        } finally {
+            if (previous == null) {
+                System.clearProperty("onelake.dbt.projectDir");
+            } else {
+                System.setProperty("onelake.dbt.projectDir", previous);
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void compileArtifactsRendersPublishedCodebookMapping(@TempDir Path tempDir) throws Exception {
+        mockCatalogAsset("ods.ods_codex_orders", "ODS", "交易", List.of(
+            Map.of("name", "order_id", "type", "BIGINT"),
+            Map.of("name", "gender", "type", "VARCHAR")
+        ));
+        when(jdbc.queryForObject(
+            contains("FROM modeling.codebook cb"),
+            eq(String.class),
+            eq(TENANT_ID),
+            eq("core.gender"),
+            eq("2026.06")
+        )).thenReturn("""
+            [
+              {"from": "M", "to": "男", "label": "男性"},
+              {"from": "F", "to": "女", "label": "女性"}
+            ]
+            """);
+        when(jdbc.queryForObject(
+            contains("INSERT INTO orchestration.dag"),
+            eq(UUID.class),
+            eq(TENANT_ID),
+            eq("DWD dwd_trade_order_gender_df"),
+            eq("onelake_pipeline_run"),
+            anyString()
+        )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
+        mockDwdOperatorManifests("output.iceberg_table");
+
+        String operatorGraph = JsonUtil.toJson(Map.of(
+            "version", 1,
+            "pipelineMode", "SPARK_GOVERNANCE",
+            "nodes", List.of(Map.of(
+                "id", "dict_gender",
+                "type", "GOVERN",
+                "nodeType", "GOVERN",
+                "operatorRef", "standard.codebook_mapping",
+                "config", Map.of(
+                    "type", "DICTIONARY_MAPPING",
+                    "column", "gender",
+                    "outputColumn", "gender_name",
+                    "dictionaryRef", "core.gender",
+                    "dictionaryVersion", "2026.06",
+                    "dictionarySource", "CODEBOOK",
+                    "noMatchPolicy", "NULL"
+                )
+            )),
+            "edges", List.of(Map.of("source", "transform_mapping", "target", "dict_gender"))
+        ));
+
+        DataModelDTO draft = service.createDraft(new DwdModelDraftRequest(
+            "dwd_trade_order_gender_df",
+            "交易",
+            "ods.ods_codex_orders",
+            "dwd.dwd_trade_order_gender_df",
+            "TABLE",
+            "order_id",
+            null,
+            null,
+            List.of(
+                new DwdModelDraftRequest.ColumnMappingRequest("order_id", "order_id", null, null, null, true, null, null, null, null, null, null),
+                new DwdModelDraftRequest.ColumnMappingRequest("gender", "gender_name", "VARCHAR", "VARCHAR", null, false, null, null, null, null, null, null)
+            ),
+            "SPARK_GOVERNANCE",
+            1,
+            operatorGraph,
+            "spark-default",
+            "spark-small",
+            "SPARK",
+            null
+        ));
+
+        assertThat(draft.compiledSql())
+            .contains("case when src.gender = 'M' then '男' when src.gender = 'F' then '女' else null end as gender_name");
+
+        String previous = System.getProperty("onelake.dbt.projectDir");
+        System.setProperty("onelake.dbt.projectDir", tempDir.toString());
+        try {
+            DwdModelCompileDTO compiled = service.compileArtifacts(MODEL_ID);
+            String modelSql = Files.readString(tempDir.resolve(compiled.sqlPath()));
+
+            assertThat(modelSql)
+                .contains("case when src.gender = 'M' then '男' when src.gender = 'F' then '女' else null end as gender_name");
+            assertThat(compiled.operatorGraph()).contains("standard.codebook_mapping", "core.gender", "2026.06");
+        } finally {
+            if (previous == null) {
+                System.clearProperty("onelake.dbt.projectDir");
+            } else {
+                System.setProperty("onelake.dbt.projectDir", previous);
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void publishValidatedModelEmitsPublishedEvent() {
+        savedModel = validatedModel();
+
+        DataModelDTO dto = service.publish(MODEL_ID, "发布治理表工厂模型");
+
+        assertThat(dto.status()).isEqualTo("PUBLISHED");
+        assertThat(savedModel.getStatus()).isEqualTo("PUBLISHED");
+        verify(outboxPublisher).publish(
+            eq(DomainEvents.MODELING_MODEL_PUBLISHED),
+            eq(MODEL_ID.toString()),
+            any(Map.class)
+        );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void updateValidatedModelReturnsToDraftForRecompile() throws Exception {
+        savedModel = validatedModel();
+        mockCatalogAsset("ods.ods_codex_orders", "ODS", "交易", List.of(
+            Map.of("name", "order_id", "type", "BIGINT"),
+            Map.of("name", "status", "type", "VARCHAR")
+        ));
+
+        DataModelDTO dto = service.update(MODEL_ID, new DwdModelDraftRequest(
+            "dwd_trade_order_df",
+            "交易",
+            "ods.ods_codex_orders",
+            "dwd.dwd_trade_order_df",
+            "TABLE",
+            "order_id",
+            null,
+            null,
+            List.of(
+                new DwdModelDraftRequest.ColumnMappingRequest("order_id", "order_id", null, null, null, true, null, null, null, null, null, null),
+                new DwdModelDraftRequest.ColumnMappingRequest("status", "order_status", null, null, null, false, null, null, null, null, null, null)
+            )
+        ));
+
+        assertThat(dto.status()).isEqualTo("DRAFT");
+        assertThat(savedModel.getStatus()).isEqualTo("DRAFT");
+        assertThat(savedMappings)
+            .extracting(DataModelColumnMapping::getTargetColumn)
+            .containsExactly("order_id", "order_status");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void compileArtifactsAggregatesSourcesForExistingCompiledDwdModels(@TempDir Path tempDir) throws Exception {
         mockCatalogAsset("ods.ods_codex_orders", "ODS", "交易", List.of(
             Map.of("name", "order_id", "type", "BIGINT"),
@@ -293,7 +491,7 @@ class DwdModelServiceTest {
             eq(UUID.class),
             eq(TENANT_ID),
             eq("DWD dwd_customer_profile_df"),
-            eq("onelake_dbt_model_run"),
+            eq("onelake_pipeline_run"),
             anyString()
         )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
         mockDwdOperatorManifests("output.iceberg_table");
@@ -417,7 +615,7 @@ class DwdModelServiceTest {
             .contains("            min_value: 1")
             .contains("            max_value: 100000")
             .contains("      - onelake_custom_sql:")
-            .contains("            assertion_sql: \"select * from __ONELAKE_MODEL__ where amount < 0\"")
+            .contains("            assertion_sql: \"select * from __ONELAKE_TEMPLATE__ where amount < 0\"")
             .contains("      - name: status")
             .contains("          - accepted_values:")
             .contains("              arguments:")
@@ -453,7 +651,7 @@ class DwdModelServiceTest {
             eq(UUID.class),
             eq(TENANT_ID),
             eq("DWD dwd_customer_freshness_df"),
-            eq("onelake_dbt_model_run"),
+            eq("onelake_pipeline_run"),
             anyString()
         )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
         mockDwdOperatorManifests("output.iceberg_table");
@@ -521,7 +719,7 @@ class DwdModelServiceTest {
             eq(UUID.class),
             eq(TENANT_ID),
             eq("DWD dwd_trade_custom_sql_df"),
-            eq("onelake_dbt_model_run"),
+            eq("onelake_pipeline_run"),
             anyString()
         )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
         mockDwdOperatorManifests("output.iceberg_table");
@@ -556,7 +754,7 @@ class DwdModelServiceTest {
             assertThat(compiled.operatorGraph()).contains("gate.custom_sql", "custom_sql_gate");
             assertThat(schemaYaml)
                 .contains("      - onelake_custom_sql:")
-                .contains("            assertion_sql: \"select * from __ONELAKE_MODEL__ where amount < 0\"");
+                .contains("            assertion_sql: \"select * from __ONELAKE_TEMPLATE__ where amount < 0\"");
         } finally {
             if (previous == null) {
                 System.clearProperty("onelake.dbt.projectDir");
@@ -578,7 +776,7 @@ class DwdModelServiceTest {
             eq(UUID.class),
             eq(TENANT_ID),
             eq("DWD dwd_trade_order_df"),
-            eq("onelake_dbt_model_run"),
+            eq("onelake_pipeline_run"),
             anyString()
         )).thenReturn(UUID.fromString("33333333-3333-3333-3333-333333333333"));
         mockDwdOperatorManifests("output.incremental_merge");
@@ -608,7 +806,7 @@ class DwdModelServiceTest {
             assertThat(modelSql).contains("unique_key='order_id'");
             assertThat(modelSql).contains("incremental_strategy='merge'");
             assertThat(modelSql).contains("{% if is_incremental() %}");
-            assertThat(modelSql).contains("where updated_at > (select coalesce(max(updated_at), timestamp '1970-01-01 00:00:00') from {{ this }})");
+            assertThat(modelSql).contains("where src.updated_at > (select coalesce(max(updated_at), timestamp '1970-01-01 00:00:00') from {{ this }})");
         } finally {
             if (previous == null) {
                 System.clearProperty("onelake.dbt.projectDir");
@@ -651,54 +849,6 @@ class DwdModelServiceTest {
     }
 
     @Test
-    void runValidatedModelLaunchesDagsterAndStoresRun() {
-        savedModel = validatedModel();
-        when(dagsterClient.launchDwdModelRun(eq("onelake_dbt_model_run"), anyMap(), anyList()))
-            .thenReturn(new DwdModelDagsterClient.LaunchResult("dagster-run-1", "STARTED"));
-
-        DwdModelRunDTO dto = service.run(MODEL_ID, new DwdModelRunRequest("MANUAL", null));
-
-        assertThat(dto.id()).isEqualTo(RUN_ID);
-        assertThat(dto.status()).isEqualTo("RUNNING");
-        assertThat(dto.dagsterRunId()).isEqualTo("dagster-run-1");
-        assertThat(dto.resourceGroup()).isEqualTo("default");
-        assertThat(dto.computeProfile()).isEqualTo("trino-small");
-        assertThat(savedModel.getLastRunId()).isEqualTo(RUN_ID);
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void backfillRunPassesBackfillConfigToDagster() {
-        savedModel = validatedModel();
-        when(dagsterClient.launchDwdModelRun(eq("onelake_dbt_model_run"), anyMap(), anyList()))
-            .thenReturn(new DwdModelDagsterClient.LaunchResult("dagster-run-1", "STARTED"));
-        UUID sourceRunId = UUID.fromString("55555555-5555-5555-5555-555555555555");
-        ArgumentCaptor<Map<String, Object>> configCaptor = ArgumentCaptor.forClass(Map.class);
-
-        DwdModelRunDTO dto = service.run(MODEL_ID, new DwdModelRunRequest(
-            "BACKFILL",
-            sourceRunId,
-            true,
-            "2026-06-01",
-            "2026-06-07"
-        ));
-
-        verify(dagsterClient).launchDwdModelRun(eq("onelake_dbt_model_run"), configCaptor.capture(), anyList());
-        Map<String, Object> ops = (Map<String, Object>) configCaptor.getValue().get("ops");
-        Map<String, Object> op = (Map<String, Object>) ops.get("run_dwd_model");
-        Map<String, Object> config = (Map<String, Object>) op.get("config");
-        Map<String, Object> backfill = (Map<String, Object>) config.get("backfill");
-        assertThat(dto.triggerType()).isEqualTo("BACKFILL");
-        assertThat(savedRun.getQueueReason()).contains("fullRefresh=true", "2026-06-01..2026-06-07", sourceRunId.toString());
-        assertThat(backfill)
-            .containsEntry("enabled", true)
-            .containsEntry("fullRefresh", true)
-            .containsEntry("partitionStart", "2026-06-01")
-            .containsEntry("partitionEnd", "2026-06-07")
-            .containsEntry("sourceIntegrationRunId", sourceRunId.toString());
-    }
-
-    @Test
     void listModelsBySourceFqnReturnsDwdModels() {
         savedModel = validatedModel();
         when(modelRepo.findByTenantIdAndSourceFqnOrderByCreatedAtDesc(TENANT_ID, "ods.ods_codex_orders"))
@@ -711,107 +861,6 @@ class DwdModelServiceTest {
             assertThat(model.sourceFqn()).isEqualTo("ods.ods_codex_orders");
             assertThat(model.targetFqn()).isEqualTo("dwd.dwd_trade_order_df");
         });
-    }
-
-    @Test
-    void getRunRefreshesDagsterTerminalStatusAndPublishesLoadedEvent(@TempDir Path tempDir) throws Exception {
-        savedModel = validatedModel();
-        savedRun = new DataModelRun();
-        savedRun.setId(RUN_ID);
-        savedRun.setTenantId(TENANT_ID);
-        savedRun.setModelId(MODEL_ID);
-        savedRun.setStatus("RUNNING");
-        savedRun.setDagsterRunId("dagster-run-1");
-        Instant startedAt = Instant.parse("2026-06-22T01:00:00Z");
-        Instant finishedAt = Instant.parse("2026-06-22T01:03:00Z");
-        when(dagsterClient.getRunStatus("dagster-run-1"))
-            .thenReturn(new DwdModelDagsterClient.RunStatus("dagster-run-1", "SUCCESS", startedAt, finishedAt));
-
-        Files.createDirectories(tempDir.resolve("target"));
-        Files.writeString(tempDir.resolve("target/run_results.json"), """
-            {"results":[
-              {"unique_id":"model.onelake.dwd_trade_order_df","status":"success","adapter_response":{"rows_affected":8}},
-              {"unique_id":"test.onelake.not_null_dwd_trade_order_df_order_id.abc","status":"pass","adapter_response":{"rows_affected":-1},"failures":0}
-            ]}
-            """);
-        String previous = System.getProperty("onelake.dbt.projectDir");
-        System.setProperty("onelake.dbt.projectDir", tempDir.toString());
-        DwdModelRunDTO dto;
-        try {
-            dto = service.getRun(RUN_ID);
-        } finally {
-            if (previous == null) {
-                System.clearProperty("onelake.dbt.projectDir");
-            } else {
-                System.setProperty("onelake.dbt.projectDir", previous);
-            }
-        }
-
-        assertThat(dto.status()).isEqualTo("SUCCEEDED");
-        assertThat(dto.startedAt()).isEqualTo(startedAt);
-        assertThat(dto.finishedAt()).isEqualTo(finishedAt);
-        assertThat(dto.rowsWritten()).isEqualTo(8L);
-        assertThat(dto.artifactsPath()).isEqualTo("target/run_results.json");
-
-        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(outboxPublisher).publish(
-            eq(DomainEvents.MODELING_MODEL_LOADED),
-            eq(RUN_ID.toString()),
-            payloadCaptor.capture()
-        );
-        assertThat(payloadCaptor.getValue())
-            .containsEntry("modelId", MODEL_ID.toString())
-            .containsEntry("targetFqn", "dwd.dwd_trade_order_df")
-            .containsEntry("ownerId", USER_ID.toString())
-            .containsEntry("ownerName", "dev")
-            .containsEntry("rowsWritten", 8L);
-        assertThat((List<Map<String, Object>>) payloadCaptor.getValue().get("qualityChecks"))
-            .singleElement()
-            .satisfies(check -> {
-                assertThat(check).containsEntry("status", "pass");
-                assertThat(check.get("uniqueId").toString()).startsWith("test.onelake.not_null");
-            });
-    }
-
-    @Test
-    void refreshByDagsterRunIdUsesExistingDwdTerminalTail() {
-        savedModel = validatedModel();
-        savedRun = new DataModelRun();
-        savedRun.setId(RUN_ID);
-        savedRun.setTenantId(TENANT_ID);
-        savedRun.setModelId(MODEL_ID);
-        savedRun.setStatus("RUNNING");
-        savedRun.setDagsterRunId("dagster-run-1");
-        Instant startedAt = Instant.parse("2026-06-22T01:00:00Z");
-        Instant finishedAt = Instant.parse("2026-06-22T01:03:00Z");
-        when(runRepo.findByDagsterRunIdAndTenantId("dagster-run-1", TENANT_ID)).thenReturn(List.of(savedRun));
-        when(dagsterClient.getRunStatus("dagster-run-1"))
-            .thenReturn(new DwdModelDagsterClient.RunStatus("dagster-run-1", "SUCCESS", startedAt, finishedAt));
-
-        boolean refreshed = service.refreshByDagsterRunId("dagster-run-1");
-
-        assertThat(refreshed).isTrue();
-        assertThat(savedRun.getStatus()).isEqualTo("SUCCEEDED");
-        assertThat(savedRun.getStartedAt()).isEqualTo(startedAt);
-        assertThat(savedRun.getFinishedAt()).isEqualTo(finishedAt);
-        verify(outboxPublisher).publish(eq(DomainEvents.MODELING_MODEL_LOADED), eq(RUN_ID.toString()), any(Map.class));
-    }
-
-    @Test
-    void runLaunchFailureStoresFailedRunAndPublishesFailedEvent() {
-        savedModel = validatedModel();
-        doThrow(new RuntimeException("dagster unavailable"))
-            .when(dagsterClient).launchDwdModelRun(eq("onelake_dbt_model_run"), anyMap(), anyList());
-
-        DwdModelRunDTO dto = service.run(MODEL_ID, new DwdModelRunRequest("MANUAL", null));
-
-        assertThat(dto.status()).isEqualTo("FAILED");
-        assertThat(dto.errorMsg()).contains("dagster unavailable");
-        verify(outboxPublisher).publish(
-            eq(DomainEvents.MODELING_MODEL_FAILED),
-            eq(RUN_ID.toString()),
-            any(Map.class)
-        );
     }
 
     private void mockCatalogAsset(String fqn, String layer, String domain, List<Map<String, Object>> columns)
@@ -837,6 +886,7 @@ class DwdModelServiceTest {
         mockBuiltInOperator("transform.rename_columns", "TRANSFORM");
         mockBuiltInOperator("govern.drop_required_missing", "GOVERN");
         mockBuiltInOperator("gate.not_null", "QUALITY_GATE");
+        mockBuiltInOperator("transform.spark_sql", "TRANSFORM");
         mockBuiltInOperator(outputRef, "OUTPUT");
     }
 
@@ -867,7 +917,7 @@ class DwdModelServiceTest {
         manifest.put("inputPorts", List.of(Map.of("name", "in", "cardinality", "ONE", "accept", "TABLE")));
         manifest.put("outputSchema", Map.of("mode", "PASSTHROUGH"));
         manifest.put("paramsSchema", Map.of("type", "object"));
-        manifest.put("compileTarget", "SQL_DBT");
+        manifest.put("compileTarget", "SPARK");
         manifest.put("template", Map.of("kind", "TEST", "sql", "select 1"));
         manifest.put("lineageRule", Map.of("type", "ONE_TO_ONE"));
         manifest.put("emitsQualityResult", "QUALITY_GATE".equals(category));
@@ -912,12 +962,12 @@ class DwdModelServiceTest {
         model.setStatus("VALIDATED");
         model.setMaterialization("TABLE");
         model.setDbtModelName("dwd_trade_order_df");
-        model.setDagsterJob("onelake_dbt_model_run");
+        model.setDagsterJob("onelake_pipeline_run");
         model.setArtifactPath("models/intermediate/dwd_trade_order_df.sql");
         model.setOrchestrationDagId(UUID.fromString("33333333-3333-3333-3333-333333333333"));
-        model.setResourceGroup("default");
-        model.setComputeProfile("trino-small");
-        model.setEngine("TRINO_DBT");
+        model.setResourceGroup("spark-default");
+        model.setComputeProfile("spark-small");
+        model.setEngine("SPARK");
         model.setOwnerId(USER_ID);
         model.setOwnerName("dev");
         return model;

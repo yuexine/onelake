@@ -32,6 +32,10 @@ public final class DomainEvents {
     public static final String MODELING_TERM_APPROVED = "modeling.term.approved";
     public static final String MODELING_TERM_DEPRECATED = "modeling.term.deprecated";
     public static final String MODELING_TERM_BINDING_CHANGED = "modeling.term.binding_changed";
+    public static final String MODELING_CODEBOOK_CREATED = "modeling.codebook.created";
+    public static final String MODELING_CODEBOOK_UPDATED = "modeling.codebook.updated";
+    public static final String MODELING_CODEBOOK_PUBLISHED = "modeling.codebook.published";
+    public static final String MODELING_CODEBOOK_DEPRECATED = "modeling.codebook.deprecated";
 
     public static final String QUALITY_CHECK_COMPLETED = "quality.check.completed";
     public static final String QUALITY_CHECK_FAILED = "quality.check.failed";

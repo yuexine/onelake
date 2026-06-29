@@ -119,6 +119,7 @@ class AirbyteSyncDriverTest {
 
         AirbyteSyncDriver driver = new AirbyteSyncDriver(WebClient.builder());
         ReflectionTestUtils.setField(driver, "baseUrl", "http://localhost:" + server.getAddress().getPort() + "/api/v1");
+        ReflectionTestUtils.setField(driver, "discoverSchemaOnPublish", true);
 
         String connectionId = driver.ensureConnection(
             "source-1",

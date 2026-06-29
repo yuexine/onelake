@@ -190,7 +190,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     }
 
     @Override
-    @Transactional
+    @Transactional(noRollbackFor = BizException.class)
     public SyncTaskDTO enable(UUID id) {
         SyncTask task = taskRepo.findById(id)
             .orElseThrow(() -> new BizException(40400, "同步任务不存在"));
@@ -490,6 +490,8 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         }
         String airbyteSourceId = firstText(config, "airbyteSourceId", "externalSourceId");
         String airbyteDestinationId = firstText(config, "airbyteDestinationId", "externalDestinationId");
+        Map<String, Object> airbyteSourceConfiguration = airbyteSourceConfig(source, config);
+        config.put("airbyteSourceConfig", airbyteSourceConfiguration);
         boolean configChanged = false;
         if (airbyteSourceId.isBlank()) {
             String sourceDefinitionId = firstText(config, "airbyteSourceDefinitionId", "sourceDefinitionId");
@@ -508,9 +510,23 @@ public class SyncTaskServiceImpl implements SyncTaskService {
                     workspaceId,
                     sourceDefinitionId,
                     "onelake-" + source.getName(),
-                    airbyteSourceConfig(source, config)
+                    airbyteSourceConfiguration
                 );
                 config.put("airbyteSourceId", airbyteSourceId);
+                configChanged = true;
+                persistSourceConfig(source, config);
+            } catch (DataplaneException e) {
+                throw new BizException(50010, e.getMessage());
+            }
+        } else {
+            try {
+                airbyte.ensureSource(
+                    airbyteSourceId,
+                    workspaceId,
+                    "",
+                    "onelake-" + source.getName(),
+                    airbyteSourceConfiguration
+                );
                 configChanged = true;
             } catch (DataplaneException e) {
                 throw new BizException(50010, e.getMessage());
@@ -540,6 +556,7 @@ public class SyncTaskServiceImpl implements SyncTaskService {
                 );
                 config.put("airbyteDestinationId", airbyteDestinationId);
                 configChanged = true;
+                persistSourceConfig(source, config);
             } catch (DataplaneException e) {
                 throw new BizException(50010, e.getMessage());
             }
@@ -569,6 +586,11 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         } catch (Exception e) {
             throw new BizException(50001, "数据源配置解析失败");
         }
+    }
+
+    private void persistSourceConfig(DataSource source, Map<String, Object> config) {
+        source.setConfig(JsonUtil.toJson(config));
+        dsRepo.save(source);
     }
 
     private SyncTaskDryRunDTO buildDryRunReport(DataSource source, String sourceTable, String targetTable, Object fieldMapping, String connectionId) {
@@ -645,10 +667,25 @@ public class SyncTaskServiceImpl implements SyncTaskService {
     private Map<String, Object> airbyteSourceConfig(DataSource source, Map<String, Object> config) {
         Object raw = config.get("airbyteSourceConfig");
         if (raw instanceof Map<?, ?> map) {
-            return (Map<String, Object>) map;
+            Map<String, Object> result = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() != null) {
+                    result.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+            if (result.containsKey("host")) {
+                result.put("host", dataplaneReachableHost(String.valueOf(result.get("host"))));
+            }
+            return result;
         }
         Map<String, Object> result = new LinkedHashMap<>();
         copyIfPresent(config, result, "host", "host");
+        String hostOverride = firstText(config, "airbyteHostOverride", "dataplaneHost");
+        if (!hostOverride.isBlank()) {
+            result.put("host", hostOverride);
+        } else if (result.containsKey("host")) {
+            result.put("host", dataplaneReachableHost(String.valueOf(result.get("host"))));
+        }
         copyIfPresent(config, result, "port", "port");
         copyIfPresent(config, result, "username", "username");
         copyIfPresent(config, result, "password", "password");
@@ -660,6 +697,19 @@ public class SyncTaskServiceImpl implements SyncTaskService {
         result.putIfAbsent("ssl", false);
         result.putIfAbsent("replication_method", Map.of("method", source.getType() == com.onelake.integration.domain.enums.DataSourceType.POSTGRES ? "Standard" : "STANDARD"));
         return result;
+    }
+
+    private String dataplaneReachableHost(String host) {
+        if (host == null) {
+            return "";
+        }
+        String normalized = host.trim();
+        if ("localhost".equalsIgnoreCase(normalized)
+            || "127.0.0.1".equals(normalized)
+            || "::1".equals(normalized)) {
+            return "host.docker.internal";
+        }
+        return normalized;
     }
 
     @SuppressWarnings("unchecked")

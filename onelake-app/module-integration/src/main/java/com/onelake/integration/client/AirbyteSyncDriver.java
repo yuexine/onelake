@@ -58,6 +58,9 @@ public class AirbyteSyncDriver {
     @Value("${onelake.dataplane.airbyte.auth.token-path:/applications/token}")
     private String tokenPath;
 
+    @Value("${onelake.dataplane.airbyte.discover-schema-on-publish:false}")
+    private boolean discoverSchemaOnPublish;
+
     private volatile String accessToken;
     private volatile Instant accessTokenExpiresAt = Instant.EPOCH;
 
@@ -142,6 +145,7 @@ public class AirbyteSyncDriver {
                                String name,
                                Map<String, Object> connectionConfiguration) {
         if (sourceId != null && !sourceId.isBlank()) {
+            updateSourceBestEffort(sourceId, name, connectionConfiguration);
             return sourceId;
         }
         if (workspaceId == null || workspaceId.isBlank()) {
@@ -161,6 +165,25 @@ public class AirbyteSyncDriver {
             throw new DataplaneException("airbyte createSource returned no sourceId");
         }
         return createdId;
+    }
+
+    private void updateSourceBestEffort(String sourceId,
+                                        String name,
+                                        Map<String, Object> connectionConfiguration) {
+        if (!StringUtils.hasText(sourceId) || connectionConfiguration == null || connectionConfiguration.isEmpty()) {
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sourceId", sourceId);
+        if (StringUtils.hasText(name)) {
+            body.put("name", name);
+        }
+        body.put("connectionConfiguration", connectionConfiguration);
+        try {
+            post("/sources/update", body);
+        } catch (DataplaneException e) {
+            log.warn("airbyte updateSource skipped for sourceId={}: {}", sourceId, e.getMessage());
+        }
     }
 
     /**
@@ -399,9 +422,11 @@ public class AirbyteSyncDriver {
         if (!StringUtils.hasText(sourceTable) || fieldMapping == null || fieldMapping.isEmpty()) {
             return Map.of();
         }
-        Map<String, Object> discovered = discoveredSyncCatalog(sourceId, sourceTable, targetTable);
-        if (!discovered.isEmpty()) {
-            return discovered;
+        if (discoverSchemaOnPublish) {
+            Map<String, Object> discovered = discoveredSyncCatalog(sourceId, sourceTable, targetTable);
+            if (!discovered.isEmpty()) {
+                return discovered;
+            }
         }
         String namespace = namespaceOf(sourceTable);
         String table = tableNameOf(sourceTable);

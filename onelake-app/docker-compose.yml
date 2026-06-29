@@ -77,6 +77,47 @@ services:
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/jvm.config:/etc/trino/jvm.config:ro
 
+  # ===== P-Spark: Spark runtime shared with Trino (C5 / docs/流水线模块重设计方案.md §6.4) =====
+  # Shares Iceberg + Hive Metastore + MinIO with Trino so cross-engine table-level deps close.
+  spark-master:
+    image: apache/spark:3.5.1-scala2.12-java17-ubuntu
+    container_name: onelake-spark-master
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8080
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      # Shared Iceberg/Hive/MinIO config (same S3 endpoint as Trino)
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+    depends_on: [hive-metastore, minio]
+    ports: ["18081:8080"]   # Spark Master Web UI
+    volumes:
+      - ./spark/conf:/opt/spark/conf:ro
+      - ./spark/jars:/opt/spark/extra-jars:ro
+
+  spark-worker:
+    image: apache/spark:3.5.1-scala2.12-java17-ubuntu
+    container_name: onelake-spark-worker
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+      --host 0.0.0.0 --webui-port 8081
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: 2
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+    depends_on: [spark-master]
+    ports: ["18082:8081"]   # Spark Worker Web UI
+    volumes:
+      - ./spark/conf:/opt/spark/conf:ro
+      - ./spark/jars:/opt/spark/extra-jars:ro
+
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
     container_name: onelake-keycloak

@@ -2,7 +2,6 @@ package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
-import com.onelake.common.modeling.DwdModelRunSynchronizer;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
@@ -16,7 +15,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
@@ -25,10 +23,16 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+// Pipeline dependencies used by the unified Spark runtime path.
+import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
+import com.onelake.orchestration.repository.PipelineTaskRepository;
+import com.onelake.orchestration.repository.TaskRunRepository;
+import com.onelake.orchestration.service.spi.SparkRunConfigBuilder;
+
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -56,8 +60,6 @@ class OrchestrationServiceTest {
     private static final UUID TENANT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID DAG_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID RUN_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
-    private static final UUID MODEL_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
-
     @Mock
     private DagRepository dagRepo;
 
@@ -71,13 +73,15 @@ class OrchestrationServiceTest {
     private JdbcTemplate jdbc;
 
     @Mock
-    private ObjectProvider<DwdModelRunSynchronizer> dwdModelRunSynchronizer;
-
-    @Mock
-    private DwdModelRunSynchronizer dwdSynchronizer;
-
-    @Mock
     private RuntimeContractService runtimeContractService;
+
+    // Pipeline dependencies shared by orchestration runtime tests.
+    @Mock private PipelineCompileService pipelineCompileService;
+    @Mock private PipelineTaskRepository pipelineTaskRepo;
+    @Mock private PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
+    @Mock private TaskRunRepository taskRunRepo;
+    @Mock private SparkRunConfigBuilder sparkBuilder;
+    @Mock private ObjectProvider<OutboxPublisher> outboxPublisher;
 
     private OrchestrationService service;
 
@@ -85,8 +89,9 @@ class OrchestrationServiceTest {
     void setUp() {
         TenantContext.setTenantId(TENANT_ID);
         lenient().when(runtimeContractService.triggerBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
-        service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc, dwdModelRunSynchronizer,
-            runtimeContractService);
+        service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
+            runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
+            sparkBuilder, outboxPublisher);
     }
 
     @AfterEach
@@ -105,7 +110,7 @@ class OrchestrationServiceTest {
             )
         );
 
-        DagDTO dto = service.updateDag(DAG_ID, "trade_dwd_pipeline", "onelake_dbt_model_run",
+        DagDTO dto = service.updateDag(DAG_ID, "trade_dwd_pipeline", "onelake_pipeline_run",
             definition, "0 2 * * *", false);
 
         assertThat(dto.name()).isEqualTo("trade_dwd_pipeline");
@@ -144,7 +149,7 @@ class OrchestrationServiceTest {
         assertThat(dto.dagName()).isEqualTo("old_pipeline");
         assertThat(dto.dagsterJob()).isEqualTo("old_job");
         assertThat(dto.dagsterRunId()).isEqualTo("dagster-run-1");
-        assertThat(dto.status()).isEqualTo("SUCCESS");
+        assertThat(dto.status()).isEqualTo("SUCCEEDED");
         assertThat(dto.triggerType()).isEqualTo("MANUAL");
     }
 
@@ -163,24 +168,24 @@ class OrchestrationServiceTest {
             eq(pageable)
         )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
         when(dagster.getRunStatus("dagster-run-1"))
-            .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "SUCCESS", startedAt, finishedAt));
+            .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "SUCCEEDED", startedAt, finishedAt));
 
         Page<JobRunDTO> page = service.listRuns(pageable);
 
         JobRunDTO dto = page.getContent().get(0);
-        assertThat(dto.status()).isEqualTo("SUCCESS");
+        assertThat(dto.status()).isEqualTo("SUCCEEDED");
         assertThat(dto.startedAt()).isEqualTo(startedAt);
         assertThat(dto.finishedAt()).isEqualTo(finishedAt);
         verify(runRepo).save(run);
-        verify(jdbc).update(startsWith("UPDATE modeling.model_run"),
-            eq("SUCCEEDED"), eq(Timestamp.from(startedAt)), eq(Timestamp.from(finishedAt)), eq("dagster-run-1"));
+        // Runtime status refresh must not write back into modeling-owned tables.
+        verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
     }
 
     @Test
-    void listRunsSyncsTerminalRunToDwdModelRunWithoutDagsterRefresh() {
+    void listRunsKeepsTerminalRunLocalWithoutDagsterRefresh() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());
-        run.setStatus(DagStatus.SUCCESS);
+        run.setStatus(DagStatus.SUCCEEDED);
         Instant startedAt = Instant.parse("2026-06-23T02:00:00Z");
         Instant finishedAt = Instant.parse("2026-06-23T02:03:00Z");
         run.setStartedAt(startedAt);
@@ -194,21 +199,19 @@ class OrchestrationServiceTest {
 
         Page<JobRunDTO> page = service.listRuns(pageable);
 
-        assertThat(page.getContent().get(0).status()).isEqualTo("SUCCESS");
+        assertThat(page.getContent().get(0).status()).isEqualTo("SUCCEEDED");
         verify(dagster, never()).getRunStatus("dagster-run-1");
-        verify(jdbc).update(startsWith("UPDATE modeling.model_run"),
-            eq("SUCCEEDED"), eq(Timestamp.from(startedAt)), eq(Timestamp.from(finishedAt)), eq("dagster-run-1"));
+        // Runtime status reads stay inside orchestration.
+        verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
     }
 
     @Test
-    void listRunsDelegatesDwdStatusSyncToModelingSynchronizerWhenAvailable() {
+    void listRunsDoesNotWriteModelingRunTables() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());
-        run.setStatus(DagStatus.SUCCESS);
+        run.setStatus(DagStatus.SUCCEEDED);
         run.setFinishedAt(Instant.parse("2026-06-23T02:03:00Z"));
         PageRequest pageable = PageRequest.of(0, 20);
-        when(dwdModelRunSynchronizer.getIfAvailable()).thenReturn(dwdSynchronizer);
-        when(dwdSynchronizer.refreshByDagsterRunId("dagster-run-1")).thenReturn(true);
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
         when(runRepo.findByDagIdInOrderByStartedAtDesc(
             argThat(ids -> ids != null && ids.contains(DAG_ID)),
@@ -217,7 +220,6 @@ class OrchestrationServiceTest {
 
         service.listRuns(pageable);
 
-        verify(dwdSynchronizer).refreshByDagsterRunId("dagster-run-1");
         verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
     }
 
@@ -243,7 +245,7 @@ class OrchestrationServiceTest {
         assertThat(dags).hasSize(1);
         assertThat(dags.get(0).lastRun()).isNotNull();
         assertThat(dags.get(0).lastRun().dagsterRunId()).isEqualTo("dagster-run-1");
-        assertThat(dags.get(0).lastRun().status()).isEqualTo("SUCCESS");
+        assertThat(dags.get(0).lastRun().status()).isEqualTo("SUCCEEDED");
         assertThat(dags.get(0).lastRun().dagName()).isEqualTo("old_pipeline");
         assertThat(dags.get(0).triggerable()).isTrue();
         assertThat(dags.get(0).triggerBlockedReason()).isNull();
@@ -279,48 +281,30 @@ class OrchestrationServiceTest {
     }
 
     @Test
-    void triggerDwdModelDagCreatesModelRunAndLaunchesDagsterWithRunConfig() {
+    void triggerNonUnifiedRuntimeJobIsBlockedByRuntimeContract() {
         Dag dag = dag();
-        dag.setDagsterJob("onelake_dbt_model_run");
+        dag.setDagsterJob("external_model_run");
         dag.setDefinition("""
             {
-              "kind": "DWD_MODEL_DAG",
+              "kind": "EXTERNAL_MODEL_DAG",
               "modelId": "44444444-4444-4444-4444-444444444444",
-              "dbtModelName": "dwd_orders",
+              "modelName": "dwd_orders",
               "sourceFqn": "ods.orders",
               "targetFqn": "dwd.orders",
               "artifactPath": "models/intermediate/dwd_orders.sql",
-              "resourceGroup": "default",
-              "computeProfile": "trino-small"
+              "resourceGroup": "spark-default",
+              "computeProfile": "spark-small"
             }
             """);
-        List<DagStatus> statuses = captureRunStatuses();
         when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(jdbc.queryForMap(anyString(), eq(MODEL_ID), eq(TENANT_ID))).thenReturn(validatedModelRow());
-        when(dagster.launch(eq("onelake_dbt_model_run"), eq("onelake"), eq("onelake-loc"), anyMap(), any()))
-            .thenReturn("dagster-dwd-run");
+        when(runtimeContractService.triggerBlockedReason(eq("external_model_run"), anyMap()))
+            .thenReturn(Optional.of("仅支持统一 Spark 流水线运行"));
 
-        UUID runId = service.triggerDag(DAG_ID, TriggerType.MANUAL);
+        assertThatThrownBy(() -> service.triggerDag(DAG_ID, TriggerType.MANUAL))
+            .isInstanceOf(BizException.class)
+            .hasMessageContaining("仅支持统一 Spark 流水线运行");
 
-        assertThat(runId).isEqualTo(RUN_ID);
-        assertThat(statuses).containsExactly(DagStatus.QUEUED, DagStatus.RUNNING);
-        ArgumentCaptor<Map<String, Object>> configCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(dagster).launch(eq("onelake_dbt_model_run"), eq("onelake"), eq("onelake-loc"),
-            configCaptor.capture(), any());
-        @SuppressWarnings("unchecked")
-        Map<String, Object> op = (Map<String, Object>) ((Map<String, Object>) ((Map<String, Object>) configCaptor.getValue()
-            .get("ops")).get("run_dwd_model")).get("config");
-        assertThat(op).containsEntry("model_name", "dwd_orders");
-        assertThat(op).containsEntry("model_id", MODEL_ID.toString());
-        assertThat(op).containsEntry("tenant_id", TENANT_ID.toString());
-        assertThat(op).containsEntry("trigger_type", "MANUAL");
-        assertThat(op.get("run_id")).asString().isNotBlank();
-        verify(jdbc).update(startsWith("INSERT INTO modeling.model_run"), any(), eq(TENANT_ID), eq(MODEL_ID),
-            eq("MANUAL"), eq(DAG_ID), eq("default"), eq("trino-small"),
-            eq("models/intermediate/dwd_orders.sql"));
-        verify(jdbc).update(startsWith("UPDATE modeling.data_model"), any(), eq(MODEL_ID), eq(TENANT_ID));
-        verify(jdbc).update(startsWith("UPDATE modeling.model_run\nSET dagster_run_id"),
-            eq("dagster-dwd-run"), any());
+        verifyNoInteractions(dagster);
     }
 
     @Test
@@ -372,24 +356,10 @@ class OrchestrationServiceTest {
         run.setDagId(dagId);
         run.setDagsterRunId("dagster-run-1");
         run.setTriggerType(TriggerType.MANUAL);
-        run.setStatus(DagStatus.SUCCESS);
+        run.setStatus(DagStatus.SUCCEEDED);
         run.setStartedAt(Instant.parse("2026-06-23T01:02:03Z"));
         run.setFinishedAt(Instant.parse("2026-06-23T01:03:04Z"));
         return run;
-    }
-
-    private Map<String, Object> validatedModelRow() {
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("id", MODEL_ID);
-        row.put("tenant_id", TENANT_ID);
-        row.put("status", "VALIDATED");
-        row.put("dbt_model_name", "dwd_orders");
-        row.put("source_fqn", "ods.orders");
-        row.put("target_fqn", "dwd.orders");
-        row.put("artifact_path", "models/intermediate/dwd_orders.sql");
-        row.put("resource_group", "default");
-        row.put("compute_profile", "trino-small");
-        return row;
     }
 
     private List<DagStatus> captureRunStatuses() {

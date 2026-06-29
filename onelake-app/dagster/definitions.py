@@ -1,9 +1,7 @@
-import json
 import os
 import subprocess
 
-from dagster import Bool, Field, Shape, String, job, op, repository
-
+from dagster import Array, Field, Shape, String, job, op, repository
 
 @op(
     name="reconcile_sync_task_schedule",
@@ -28,98 +26,215 @@ def reconcile_sync_task_schedule(context):
     )
 
 
-@op(
-    name="run_dwd_model",
-    config_schema={
-        "model_name": Field(String),
-        "model_id": Field(String),
-        "run_id": Field(String),
-        "tenant_id": Field(String),
-        "trigger_type": Field(String, default_value="MANUAL"),
-        "source_fqn": Field(String, default_value=""),
-        "target_fqn": Field(String, default_value=""),
-        "artifact_path": Field(String, default_value=""),
-        "resource_group": Field(String, default_value=""),
-        "compute_profile": Field(String, default_value=""),
-        "backfill": Field(
-            Shape({
-                "enabled": Field(Bool, default_value=False),
-                "fullRefresh": Field(Bool, default_value=False),
-                "partitionStart": Field(String, default_value=""),
-                "partitionEnd": Field(String, default_value=""),
-                "sourceIntegrationRunId": Field(String, default_value=""),
-            }),
-            default_value={
-                "enabled": False,
-                "fullRefresh": False,
-                "partitionStart": "",
-                "partitionEnd": "",
-                "sourceIntegrationRunId": "",
-            },
-        ),
-    },
-)
-def run_dwd_model(context):
-    cfg = context.op_config
-    dbt_project_dir = os.getenv("ONELAKE_DBT_PROJECT_DIR", "/opt/onelake/dbt")
-    profiles_dir = os.getenv("ONELAKE_DBT_PROFILES_DIR", dbt_project_dir)
-    model_name = cfg["model_name"].strip()
-    if not model_name:
-        raise ValueError("model_name is required")
-
-    cmd = ["dbt", "build", "--select", model_name, "--profiles-dir", profiles_dir]
-    backfill = cfg["backfill"]
-    if backfill["enabled"] and backfill["fullRefresh"]:
-        cmd.append("--full-refresh")
-    if backfill["enabled"] and (backfill["partitionStart"] or backfill["partitionEnd"]):
-        cmd.extend([
-            "--vars",
-            json.dumps({
-                "backfill_start": backfill["partitionStart"],
-                "backfill_end": backfill["partitionEnd"],
-                "source_integration_run_id": backfill["sourceIntegrationRunId"],
-            }),
-        ])
-    context.log.info(
-        "OneLake DWD model run model=%s model_id=%s run_id=%s tenant_id=%s trigger=%s source=%s target=%s resource=%s/%s backfill=%s",
-        model_name,
-        cfg["model_id"],
-        cfg["run_id"],
-        cfg["tenant_id"],
-        cfg["trigger_type"],
-        cfg["source_fqn"],
-        cfg["target_fqn"],
-        cfg["resource_group"],
-        cfg["compute_profile"],
-        backfill,
-    )
-    result = subprocess.run(
-        cmd,
-        cwd=dbt_project_dir,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.stdout:
-        context.log.info(result.stdout)
-    if result.stderr:
-        context.log.warning(result.stderr)
-    if result.returncode != 0:
-        raise RuntimeError(f"dbt build failed for {model_name} with exit code {result.returncode}")
-    return {"model_name": model_name, "artifact_path": cfg["artifact_path"]}
-
-
 @job(name="onelake_sync_task_schedule_reconcile")
 def onelake_sync_task_schedule_reconcile():
     reconcile_sync_task_schedule()
 
 
-@job(name="onelake_dbt_model_run")
-def onelake_dbt_model_run():
-    run_dwd_model()
+# ---------------------------------------------------------------------------
+# Spark task op — real execution path for unified pipeline SPARK_SQL / PYSPARK tasks.
+# ---------------------------------------------------------------------------
+
+
+@op(
+    name="run_spark_task_op",
+    config_schema={
+        "pipeline_id": Field(String),
+        "run_id": Field(String),
+        "tenant_id": Field(String),
+        "resource_profile": Field(
+            Shape({
+                "executor_memory": Field(String, default_value="2g"),
+                "executor_cores": Field(String, default_value="2"),
+                "num_executors": Field(String, default_value="2"),
+                "driver_memory": Field(String, default_value="1g"),
+            }),
+            default_value={
+                "executor_memory": "2g",
+                "executor_cores": "2",
+                "num_executors": "2",
+                "driver_memory": "1g",
+            },
+        ),
+        "iceberg_catalog": Field(String, default_value="onelake"),
+        "tasks": Field(
+            Array(Shape({
+                "task_key": Field(String),
+                "task_type": Field(String, description="SPARK_SQL | PYSPARK | QUALITY_GATE"),
+                "sql_or_script": Field(String, description="Spark SQL string or PySpark script content"),
+                "target_fqn": Field(String, default_value=""),
+                "from_tables": Field(Array(String), default_value=[]),
+                "resource_profile": Field(
+                    Shape({
+                        "executor_memory": Field(String, default_value="2g"),
+                        "executor_cores": Field(String, default_value="2"),
+                        "num_executors": Field(String, default_value="2"),
+                        "driver_memory": Field(String, default_value="1g"),
+                    }),
+                    default_value={
+                        "executor_memory": "2g",
+                        "executor_cores": "2",
+                        "num_executors": "2",
+                        "driver_memory": "1g",
+                    },
+                ),
+            })),
+            default_value=[],
+        ),
+    },
+)
+def run_spark_task_op(context):
+    """Run one Spark task via spark-submit.
+
+    C5 (§6.4): resource_profile is honored here — mapped to spark-submit flags.
+    The unified pipeline mainline is Spark-only; upstream readiness is enforced by
+    orchestration.task_run and pipeline_task_edge before this op is launched.
+    """
+    import tempfile
+    import os
+
+    cfg = context.op_config
+    iceberg_catalog = cfg["iceberg_catalog"]
+    spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
+    tasks = cfg.get("tasks") or []
+    if not tasks:
+        context.log.info(
+            "OneLake Spark pipeline=%s run=%s tenant=%s has no Spark tasks; skipping",
+            cfg["pipeline_id"], cfg["run_id"], cfg["tenant_id"],
+        )
+        return {
+            "pipeline_id": cfg["pipeline_id"],
+            "run_id": cfg["run_id"],
+            "tasks": [],
+        }
+
+    results = []
+    for task in tasks:
+        task_type = task["task_type"]
+        resource = task.get("resource_profile") or cfg["resource_profile"]
+        context.log.info(
+            "OneLake Spark task pipeline=%s run=%s tenant=%s task=%s type=%s resource=%s from=%s target=%s",
+            cfg["pipeline_id"], cfg["run_id"], cfg["tenant_id"], task["task_key"],
+            task_type, resource, task.get("from_tables", []), task.get("target_fqn", ""),
+        )
+
+        temp_paths = []
+        try:
+            if task_type in ("PYSPARK", "QUALITY_GATE"):
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+                    f.write(task["sql_or_script"])
+                    script_path = f.name
+                temp_paths.append(script_path)
+                app_args = []
+            else:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as sql_file:
+                    sql_file.write(task["sql_or_script"])
+                    sql_path = sql_file.name
+                temp_paths.append(sql_path)
+                wrapper = """
+import re
+import sys
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("onelake-spark-sql").getOrCreate()
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    sql_text = f.read()
+statements = [s.strip() for s in sql_text.split(";") if s.strip()]
+for statement in statements:
+    df = spark.sql(statement)
+    if re.match(r"^\\s*(select|show|describe|explain)\\b", statement, re.IGNORECASE):
+        df.show(20, truncate=False)
+spark.stop()
+"""
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+                    f.write(wrapper)
+                    script_path = f.name
+                temp_paths.append(script_path)
+                app_args = [sql_path]
+
+            cmd = [
+                "spark-submit",
+                "--master", spark_master,
+                "--executor-memory", resource["executor_memory"],
+                "--executor-cores", resource["executor_cores"],
+                "--num-executors", resource["num_executors"],
+                "--driver-memory", resource["driver_memory"],
+                "--packages",
+                "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2,"
+                "org.apache.iceberg:iceberg-aws-bundle:1.5.2,"
+                "org.apache.hadoop:hadoop-aws:3.3.4,"
+                "org.postgresql:postgresql:42.7.3,"
+                "com.mysql:mysql-connector-j:8.4.0",
+                "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+                "--conf", f"spark.sql.defaultCatalog={iceberg_catalog}",
+                "--conf", "spark.sql.catalog.onelake=org.apache.iceberg.spark.SparkCatalog",
+                "--conf", "spark.sql.catalog.onelake.type=hive",
+                "--conf", "spark.sql.catalog.onelake.uri=thrift://hive-metastore:9083",
+                "--conf", "spark.sql.catalog.onelake.warehouse=s3a://onelake/warehouse",
+                "--conf", "spark.sql.catalog.onelake.io-impl=org.apache.iceberg.aws.s3.S3FileIO",
+                "--conf", "spark.sql.catalog.onelake.s3.endpoint=http://minio:9000",
+                "--conf", "spark.sql.catalog.onelake.s3.path-style-access=true",
+                "--conf", "spark.sql.catalog.onelake.s3.access-key-id=minio",
+                "--conf", "spark.sql.catalog.onelake.s3.secret-access-key=minio12345",
+                "--conf", "spark.sql.catalog.onelake.client.region=us-east-1",
+                "--conf", "spark.hadoop.fs.s3a.endpoint=http://minio:9000",
+                "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
+                "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
+                "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "--conf", "spark.executorEnv.AWS_ACCESS_KEY_ID=minio",
+                "--conf", "spark.executorEnv.AWS_SECRET_ACCESS_KEY=minio12345",
+                "--conf", "spark.yarn.appMasterEnv.AWS_ACCESS_KEY_ID=minio",
+                "--conf", "spark.yarn.appMasterEnv.AWS_SECRET_ACCESS_KEY=minio12345",
+                script_path,
+            ]
+            cmd.extend(app_args)
+
+            context.log.info("spark-submit cmd: %s", " ".join(cmd))
+            result = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.stdout:
+                context.log.info(result.stdout)
+            if result.stderr:
+                context.log.warning(result.stderr)
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"spark-submit failed for task {task['task_key']} (exit {result.returncode})"
+                )
+
+            results.append({
+                "task_key": task["task_key"],
+                "task_type": task_type,
+                "exit_code": result.returncode,
+                "target_fqn": task.get("target_fqn", ""),
+            })
+        finally:
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+    return {
+        "pipeline_id": cfg["pipeline_id"],
+        "run_id": cfg["run_id"],
+        "tasks": results,
+    }
+
+
+@job(name="onelake_pipeline_run")
+def onelake_pipeline_run():
+    """Pipeline v2 job: Spark-only pipeline execution."""
+    run_spark_task_op()
 
 
 @repository(name="onelake")
 def onelake_repository():
-    return [onelake_sync_task_schedule_reconcile, onelake_dbt_model_run]
+    return [
+        onelake_sync_task_schedule_reconcile,
+        onelake_pipeline_run,
+    ]

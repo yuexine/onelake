@@ -38,11 +38,11 @@ public final class BuiltInOperatorCatalog {
 
     private static final List<BuiltinSpec> SPECS = List.of(
         spec("input.ods_table", INPUT, "ODS 表输入", "读取 ODS 分层表作为算子图起点", "DERIVE", "SELECT_EXPR", "{{ source('ods', sourceFqn) }}", "sourceFqn"),
-        spec("input.dwd_table", INPUT, "DWD 表输入", "读取已有 DWD/dbt 模型作为输入", "DERIVE", "SELECT_EXPR", "{{ ref(modelRef) }}", "modelRef"),
+        spec("input.dwd_table", INPUT, "DWD 表输入", "读取已有 DWD 表作为输入", "DERIVE", "SELECT_EXPR", "{{ dwd(modelRef) }}", "modelRef"),
         spec("input.sql_query", INPUT, "SQL 查询输入", "读取经只读校验的 SQL 子查询", "DERIVE", "RAW_SQL", "({{ sql }})", "sql"),
-        spec("output.iceberg_table", OUTPUT, "Iceberg 表输出", "将结果物化为 Iceberg 表", "PASSTHROUGH", "DBT_CONFIG", "config(materialized='table', file_format='iceberg')", "targetFqn", "partitionBy"),
-        spec("output.view", OUTPUT, "视图输出", "将结果物化为视图", "PASSTHROUGH", "DBT_CONFIG", "config(materialized='view')", "targetFqn"),
-        spec("output.incremental_merge", OUTPUT, "增量合并输出", "按唯一键和增量字段合并写入", "PASSTHROUGH", "DBT_CONFIG", "config(materialized='incremental', unique_key=uniqueKey)", "uniqueKey", "incrementalColumn", "strategy"),
+        spec("output.iceberg_table", OUTPUT, "Iceberg 表输出", "将结果物化为 Iceberg 表", "PASSTHROUGH", "SPARK_SINK", "write_iceberg({{ targetFqn }})", "targetFqn", "partitionBy"),
+        spec("output.view", OUTPUT, "视图输出", "将结果物化为视图", "PASSTHROUGH", "SPARK_SINK", "create_or_replace_view({{ targetFqn }})", "targetFqn"),
+        spec("output.incremental_merge", OUTPUT, "增量合并输出", "按唯一键和增量字段合并写入", "PASSTHROUGH", "SPARK_SINK", "merge_into({{ targetFqn }}, {{ uniqueKey }})", "uniqueKey", "incrementalColumn", "strategy"),
 
         spec("transform.select_columns", TRANSFORM, "选择字段", "保留指定字段集合", "DERIVE", "SELECT_EXPR", "{{ columns | join(', ') }}", "columns"),
         spec("transform.rename_columns", TRANSFORM, "重命名字段", "按映射关系重命名字段", "DERIVE", "SELECT_EXPR", "{{ mapping }}", "mapping"),
@@ -54,6 +54,7 @@ public final class BuiltInOperatorCatalog {
         spec("transform.case_when", TRANSFORM, "条件分支", "按 CASE WHEN 规则派生字段", "DERIVE", "SELECT_EXPR", "CASE {{ cases }} ELSE {{ else }} END AS {{ as }}", "cases", "else", "as"),
         spec("transform.rename_by_standard", TRANSFORM, "按标准命名", "按数据标准映射字段名", "DERIVE", "SELECT_EXPR", "{{ standardId }}", "standardId"),
         spec("transform.reorder_columns", TRANSFORM, "字段排序", "调整字段输出顺序", "DERIVE", "SELECT_EXPR", "{{ order | join(', ') }}", "order"),
+        spec("transform.spark_sql", TRANSFORM, "Spark SQL 执行", "执行编译后的 Spark SQL 并产出中间表", "DERIVE", "SPARK_SQL", "{{ sql }}", "sql"),
 
         spec("govern.trim_whitespace", GOVERN, "去除空白", "去除字段首尾空白字符", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "trim({{ column }})", "columns"),
         spec("govern.fillna", GOVERN, "空值填充", "用默认值填充空值", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "coalesce({{ column }}, {{ fillValue }})", "column", "fillValue"),
@@ -76,7 +77,7 @@ public final class BuiltInOperatorCatalog {
         spec("mask.partial", MASK, "部分掩码", "保留首尾并掩码中间字符", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "regexp_replace({{ column }}, '^(.{3}).*(.{4})$', '$1****$2')", "column", "keepHead", "keepTail"),
         spec("mask.full", MASK, "全量掩码", "将字段完全替换为掩码字符", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "repeat('*', length({{ column }}))", "column"),
         spec("mask.name", MASK, "姓名脱敏", "保留姓氏并隐藏名", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "concat(substr({{ column }}, 1, 1), '**')", "column"),
-        spec("mask.id_card", MASK, "身份证脱敏", "复用 dbt 宏掩码身份证号", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "{{ mask_id_card(column) }}", "column"),
+        spec("mask.id_card", MASK, "身份证脱敏", "按内置 Spark 表达式掩码身份证号", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "{{ mask_id_card(column) }}", "column"),
         spec("mask.email", MASK, "邮箱脱敏", "隐藏邮箱用户名中间部分", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "regexp_replace({{ column }}, '^(.).+(@.+)$', '$1***$2')", "column"),
         spec("mask.bankcard", MASK, "银行卡脱敏", "仅保留银行卡后四位", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "concat('****', substr({{ column }}, -4))", "column"),
         spec("mask.nullify", MASK, "置空脱敏", "将敏感字段置空", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "NULL", "column"),
@@ -101,15 +102,15 @@ public final class BuiltInOperatorCatalog {
         spec("join.lookup_enrich", JOIN, "维表查找补全", "关联维表补充属性字段", "DERIVE", "JOIN", "LEFT JOIN {{ dimRef }} ON {{ on }}", "dimRef", "on", "enrichColumns"),
         spec("join.dedup_merge", JOIN, "去重合并", "多输入按策略合并金标记录", "DERIVE", "JOIN", "MERGE BY {{ keys }}", "keys", "orderBy", "strategy"),
 
-        spec("gate.not_null", QUALITY_GATE, "非空门禁", "校验字段非空", "ASSERT", "DBT_TEST", "not_null", "columns"),
-        spec("gate.unique", QUALITY_GATE, "唯一门禁", "校验字段唯一", "ASSERT", "DBT_TEST", "unique", "columns"),
-        spec("gate.range", QUALITY_GATE, "范围门禁", "校验数值在范围内", "ASSERT", "DBT_TEST", "{{ column }} BETWEEN {{ min }} AND {{ max }}", "column", "min", "max"),
-        spec("gate.regex", QUALITY_GATE, "正则门禁", "校验字段匹配正则", "ASSERT", "DBT_TEST", "regexp_like({{ column }}, {{ pattern }})", "column", "pattern"),
-        spec("gate.enum", QUALITY_GATE, "枚举门禁", "校验字段值在允许集合内", "ASSERT", "DBT_TEST", "accepted_values", "column", "values", "dictType"),
-        spec("gate.freshness", QUALITY_GATE, "新鲜度门禁", "校验数据更新时间延迟", "ASSERT", "DBT_TEST", "freshness {{ maxDelay }}", "column", "maxDelay"),
-        spec("gate.row_count", QUALITY_GATE, "行数门禁", "校验输出行数范围", "ASSERT", "DBT_TEST", "row_count between {{ min }} and {{ max }}", "min", "max"),
-        spec("gate.referential", QUALITY_GATE, "参照完整性门禁", "校验字段引用存在", "ASSERT", "DBT_TEST", "relationships to {{ refModel }}.{{ refColumn }}", "column", "refModel", "refColumn"),
-        spec("gate.custom_sql", QUALITY_GATE, "自定义 SQL 门禁", "执行只读断言 SQL", "ASSERT", "DBT_TEST", "{{ assertionSql }}", "assertionSql")
+        spec("gate.not_null", QUALITY_GATE, "非空门禁", "校验字段非空", "ASSERT", "QUALITY_ASSERT", "not_null", "columns"),
+        spec("gate.unique", QUALITY_GATE, "唯一门禁", "校验字段唯一", "ASSERT", "QUALITY_ASSERT", "unique", "columns"),
+        spec("gate.range", QUALITY_GATE, "范围门禁", "校验数值在范围内", "ASSERT", "QUALITY_ASSERT", "{{ column }} BETWEEN {{ min }} AND {{ max }}", "column", "min", "max"),
+        spec("gate.regex", QUALITY_GATE, "正则门禁", "校验字段匹配正则", "ASSERT", "QUALITY_ASSERT", "regexp_like({{ column }}, {{ pattern }})", "column", "pattern"),
+        spec("gate.enum", QUALITY_GATE, "枚举门禁", "校验字段值在允许集合内", "ASSERT", "QUALITY_ASSERT", "accepted_values", "column", "values", "dictType"),
+        spec("gate.freshness", QUALITY_GATE, "新鲜度门禁", "校验数据更新时间延迟", "ASSERT", "QUALITY_ASSERT", "freshness {{ maxDelay }}", "column", "maxDelay"),
+        spec("gate.row_count", QUALITY_GATE, "行数门禁", "校验输出行数范围", "ASSERT", "QUALITY_ASSERT", "row_count between {{ min }} and {{ max }}", "min", "max"),
+        spec("gate.referential", QUALITY_GATE, "参照完整性门禁", "校验字段引用存在", "ASSERT", "QUALITY_ASSERT", "relationships to {{ refModel }}.{{ refColumn }}", "column", "refModel", "refColumn"),
+        spec("gate.custom_sql", QUALITY_GATE, "自定义 SQL 门禁", "执行只读断言 SQL", "ASSERT", "QUALITY_ASSERT", "{{ assertionSql }}", "assertionSql")
     );
 
     public static List<OperatorManifestDTO> manifests() {
@@ -150,8 +151,8 @@ public final class BuiltInOperatorCatalog {
         policy.put("actionOnViolation", spec.category() == QUALITY_GATE ? "FAIL" : null);
 
         Map<String, Object> resourceHint = new LinkedHashMap<>();
-        resourceHint.put("defaultResourceGroup", "default");
-        resourceHint.put("engine", "TRINO_DBT");
+        resourceHint.put("defaultResourceGroup", "spark-default");
+        resourceHint.put("engine", "SPARK");
 
         Map<String, Object> example = new LinkedHashMap<>();
         example.put("title", spec.displayName() + "示例");
@@ -169,7 +170,7 @@ public final class BuiltInOperatorCatalog {
             inputPorts(spec),
             outputSchema,
             paramsSchema(spec.params()),
-            "SQL_DBT",
+            "SPARK",
             template,
             lineageRule,
             securityRule,
@@ -319,7 +320,7 @@ public final class BuiltInOperatorCatalog {
         List<String> tags = new ArrayList<>();
         tags.add(category.name());
         tags.add("内置");
-        tags.add("SQL_DBT");
+        tags.add("SPARK");
         if (category == MASK || category == ENCRYPT) {
             tags.add("安全");
         }

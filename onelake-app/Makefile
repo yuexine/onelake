@@ -75,11 +75,11 @@ ods-dwd-verify:
 	./scripts/ods-dwd-baseline.sh verify
 
 backend:
-	$(MVN) -pl bootstrap -am compile
+	$(MVN) -pl bootstrap -am install -DskipTests -Djacoco.skip=true
 	$(MVN) -pl bootstrap spring-boot:run
 
 debug:
-	$(MVN) -pl bootstrap -am compile
+	$(MVN) -pl bootstrap -am install -DskipTests -Djacoco.skip=true
 	$(MVN) -pl bootstrap spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
 
 frontend:

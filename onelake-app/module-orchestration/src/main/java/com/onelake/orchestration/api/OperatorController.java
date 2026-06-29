@@ -64,7 +64,7 @@ public class OperatorController {
 
     @Operation(
         summary = "校验算子图",
-        description = "用途：按市场 Manifest 校验 DAG/OperatorGraph 的节点、边、版本、必需参数和 SQL_DBT 编译目标，不落库。"
+        description = "用途：按市场 Manifest 校验 DAG/OperatorGraph 的节点、边、版本、必需参数和 Spark 编译目标，不落库。"
     )
     @PostMapping("/graph/validate")
     @PreAuthorize("hasRole('DE')")

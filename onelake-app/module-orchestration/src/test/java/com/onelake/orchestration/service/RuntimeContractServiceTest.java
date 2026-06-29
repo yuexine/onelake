@@ -14,6 +14,9 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
+/**
+ * Runtime-contract tests: unified pipelines expose Spark as the only runnable engine.
+ */
 @ExtendWith(MockitoExtension.class)
 class RuntimeContractServiceTest {
 
@@ -21,39 +24,43 @@ class RuntimeContractServiceTest {
     private DagsterClient dagster;
 
     @Test
-    void listRuntimeContractsMarksSparkAndPythonAsContractOnlyUntilJobsExist() {
+    void listRuntimeContractsMarksSparkReady() {
         RuntimeContractService service = new RuntimeContractService(dagster);
         when(dagster.listJobs("onelake", "onelake-loc"))
-            .thenReturn(List.of("onelake_dbt_model_run", "onelake_sync_task_schedule_reconcile"));
+            .thenReturn(List.of("onelake_pipeline_run"));
 
         List<RuntimeContractDTO> result = service.listRuntimeContracts();
 
         assertThat(result).extracting(RuntimeContractDTO::compileTarget)
-            .containsExactly("SQL_DBT", "SPARK", "PYTHON");
-        assertThat(result).filteredOn(contract -> contract.compileTarget().equals("SQL_DBT"))
+            .containsExactly("SPARK");
+
+        assertThat(result).filteredOn(c -> c.compileTarget().equals("SPARK"))
             .singleElement()
-            .satisfies(contract -> {
-                assertThat(contract.status()).isEqualTo("READY");
-                assertThat(contract.graphExecutionSupported()).isTrue();
-                assertThat(contract.dagsterJobAvailable()).isTrue();
-            });
-        assertThat(result).filteredOn(contract -> contract.compileTarget().equals("SPARK"))
-            .singleElement()
-            .satisfies(contract -> {
-                assertThat(contract.status()).isEqualTo("MISSING_DAGSTER_JOB");
-                assertThat(contract.graphExecutionSupported()).isFalse();
-                assertThat(contract.blockedReason()).contains("onelake_spark_operator_run");
+            .satisfies(c -> {
+                assertThat(c.status()).isEqualTo("READY");
+                assertThat(c.graphExecutionSupported()).isTrue();
+                assertThat(c.dagsterJob()).isEqualTo("onelake_pipeline_run");
             });
     }
 
     @Test
-    void triggerBlockedReasonRejectsSparkDefinition() {
+    void triggerBlockedReasonAllowsSparkWhenPipelineJobIsUsed() {
         RuntimeContractService service = new RuntimeContractService(dagster);
 
-        Optional<String> reason = service.triggerBlockedReason("onelake_spark_operator_run",
+        Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_run",
             Map.of("compileTarget", "SPARK", "engine", "SPARK"));
 
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
+    void triggerBlockedReasonRejectsNonSparkOnPipelineJob() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+
+        Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_run",
+            Map.of("compileTarget", "LEGACY", "engine", "LEGACY"));
+
         assertThat(reason).isPresent();
-        assertThat(reason.get()).contains("SPARK 仍处于 Manifest 契约态");
+        assertThat(reason.get()).contains("Spark");
     }
 }

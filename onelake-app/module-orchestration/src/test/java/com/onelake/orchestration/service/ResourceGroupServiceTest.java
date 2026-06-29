@@ -57,12 +57,12 @@ class ResourceGroupServiceTest {
 
     @Test
     void listMergesBuiltinAndTenantOverrideProfiles() {
-        ResourceGroup builtin = resourceGroup(null, "default", "TRINO_DBT");
+        ResourceGroup builtin = resourceGroup(null, "spark-default", "SPARK");
         builtin.setId(UUID.fromString("33333333-3333-3333-3333-333333333333"));
-        ResourceGroup tenant = resourceGroup(TENANT_ID, "default", "TRINO_DBT");
+        ResourceGroup tenant = resourceGroup(TENANT_ID, "spark-default", "SPARK");
         tenant.setId(GROUP_ID);
-        ComputeProfile builtinProfile = profile(builtin.getId(), "trino-small", "TRINO_DBT");
-        ComputeProfile tenantProfile = profile(GROUP_ID, "trino-codex", "TRINO_DBT");
+        ComputeProfile builtinProfile = profile(builtin.getId(), "spark-small", "SPARK");
+        ComputeProfile tenantProfile = profile(GROUP_ID, "spark-codex", "SPARK");
         when(resourceGroupRepo.findByTenantIdIsNullOrderByCodeAsc()).thenReturn(List.of(builtin));
         when(resourceGroupRepo.findByTenantIdOrderByCodeAsc(TENANT_ID)).thenReturn(List.of(tenant));
         when(computeProfileRepo.findByResourceGroupIdInOrderByCodeAsc(List.of(builtin.getId(), GROUP_ID)))
@@ -73,7 +73,7 @@ class ResourceGroupServiceTest {
         assertThat(result).hasSize(1);
         assertThat(result.get(0).builtin()).isFalse();
         assertThat(result.get(0).computeProfiles()).extracting(ComputeProfileDTO::code)
-            .containsExactly("trino-codex", "trino-small");
+            .containsExactly("spark-codex", "spark-small");
     }
 
     @Test
@@ -89,7 +89,7 @@ class ResourceGroupServiceTest {
         ResourceGroupDTO result = service.upsertResourceGroup(new ResourceGroupRequest(
             "warehouse-codex",
             "Warehouse Codex",
-            "TRINO_DBT",
+            "SPARK",
             "ACTIVE",
             4,
             32,
@@ -105,30 +105,30 @@ class ResourceGroupServiceTest {
 
     @Test
     void supportsDefaultRegistryWhenDatabaseRowsAreAbsent() {
-        when(resourceGroupRepo.findByTenantIdAndCode(TENANT_ID, "default")).thenReturn(Optional.empty());
-        when(resourceGroupRepo.findByTenantIdIsNullAndCode("default")).thenReturn(Optional.empty());
+        when(resourceGroupRepo.findByTenantIdAndCode(TENANT_ID, "spark-default")).thenReturn(Optional.empty());
+        when(resourceGroupRepo.findByTenantIdIsNullAndCode("spark-default")).thenReturn(Optional.empty());
 
-        assertThat(service.supportsResourceGroup("TRINO_DBT", "default")).isTrue();
+        assertThat(service.supportsResourceGroup("SPARK", "spark-default")).isTrue();
     }
 
     @Test
     void supportsTenantComputeProfile() {
-        ResourceGroup group = resourceGroup(TENANT_ID, "warehouse-codex", "TRINO_DBT");
+        ResourceGroup group = resourceGroup(TENANT_ID, "warehouse-codex", "SPARK");
         group.setId(GROUP_ID);
-        ComputeProfile profile = profile(GROUP_ID, "trino-codex", "TRINO_DBT");
+        ComputeProfile profile = profile(GROUP_ID, "spark-codex", "SPARK");
         when(resourceGroupRepo.findByTenantIdAndCode(TENANT_ID, "warehouse-codex")).thenReturn(Optional.of(group));
         when(resourceGroupRepo.findByTenantIdIsNullAndCode("warehouse-codex")).thenReturn(Optional.empty());
-        when(computeProfileRepo.findByResourceGroupIdAndCode(GROUP_ID, "trino-codex")).thenReturn(Optional.of(profile));
+        when(computeProfileRepo.findByResourceGroupIdAndCode(GROUP_ID, "spark-codex")).thenReturn(Optional.of(profile));
 
-        assertThat(service.supportsComputeProfile("warehouse-codex", "trino-codex")).isTrue();
+        assertThat(service.supportsComputeProfile("warehouse-codex", "spark-codex")).isTrue();
     }
 
     @Test
     void upsertComputeProfileRequiresTenantResourceGroup() {
-        ResourceGroup group = resourceGroup(TENANT_ID, "warehouse-codex", "TRINO_DBT");
+        ResourceGroup group = resourceGroup(TENANT_ID, "warehouse-codex", "SPARK");
         group.setId(GROUP_ID);
         when(resourceGroupRepo.findByTenantIdAndCode(TENANT_ID, "warehouse-codex")).thenReturn(Optional.of(group));
-        when(computeProfileRepo.findByResourceGroupIdAndCode(GROUP_ID, "trino-codex")).thenReturn(Optional.empty());
+        when(computeProfileRepo.findByResourceGroupIdAndCode(GROUP_ID, "spark-codex")).thenReturn(Optional.empty());
         when(computeProfileRepo.save(any(ComputeProfile.class))).thenAnswer(invocation -> {
             ComputeProfile profile = invocation.getArgument(0);
             profile.setId(UUID.fromString("44444444-4444-4444-4444-444444444444"));
@@ -136,8 +136,8 @@ class ResourceGroupServiceTest {
         });
 
         ComputeProfileDTO result = service.upsertComputeProfile("warehouse-codex", new ComputeProfileRequest(
-            "trino-codex",
-            "Trino Codex",
+            "spark-codex",
+            "Spark Codex",
             null,
             "ACTIVE",
             8,
@@ -146,8 +146,8 @@ class ResourceGroupServiceTest {
             1800
         ));
 
-        assertThat(result.code()).isEqualTo("trino-codex");
-        assertThat(result.engine()).isEqualTo("TRINO_DBT");
+        assertThat(result.code()).isEqualTo("spark-codex");
+        assertThat(result.engine()).isEqualTo("SPARK");
         verify(audit).auditCreate(any(), any(), any());
     }
 

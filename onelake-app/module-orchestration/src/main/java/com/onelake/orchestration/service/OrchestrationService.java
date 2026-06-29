@@ -1,18 +1,34 @@
 package com.onelake.orchestration.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
-import com.onelake.common.modeling.DwdModelRunSynchronizer;
+import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
+import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.TaskRunStatus;
+import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
+import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
+import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
+import com.onelake.orchestration.repository.PipelineTaskRepository;
+import com.onelake.orchestration.repository.TaskRunRepository;
+import com.onelake.orchestration.service.spi.DagsterRunConfig;
+import com.onelake.orchestration.service.spi.EngineType;
+import com.onelake.orchestration.service.spi.SparkRunConfigBuilder;
+import com.onelake.orchestration.service.spi.TaskBundleContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -23,11 +39,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
-import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -38,13 +56,21 @@ import java.util.stream.Collectors;
 public class OrchestrationService {
 
     private static final String DRAFT_DAGSTER_JOB = "sql_workbench_draft";
+    private static final String PIPELINE_JOB_NAME = "onelake_pipeline_run";
 
     private final DagRepository dagRepo;
     private final JobRunRepository runRepo;
     private final DagsterClient dagster;
     private final JdbcTemplate jdbc;
-    private final ObjectProvider<DwdModelRunSynchronizer> dwdModelRunSynchronizer;
     private final RuntimeContractService runtimeContractService;
+
+    // Pipeline v2 dependencies (P1+)
+    private final PipelineCompileService pipelineCompileService;
+    private final PipelineTaskRepository pipelineTaskRepo;
+    private final PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
+    private final TaskRunRepository taskRunRepo;
+    private final SparkRunConfigBuilder sparkBuilder;
+    private final ObjectProvider<OutboxPublisher> outboxPublisher;
 
     @Transactional
     public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
@@ -114,27 +140,15 @@ public class OrchestrationService {
         run.setTriggeredBy(TenantContext.getUserId());
         runRepo.save(run);
 
-        DwdRunContext dwdRun = null;
         try {
-            LaunchSpec launchSpec = launchSpec(dag, run, trigger);
-            dwdRun = launchSpec.dwdRun();
-            String dagsterRunId = launchSpec.runConfig() == null
-                ? dagster.launch(dag.getDagsterJob(), "onelake", "onelake-loc")
-                : dagster.launch(dag.getDagsterJob(), "onelake", "onelake-loc",
-                    launchSpec.runConfig(), launchSpec.tags());
+            String dagsterRunId = dagster.launch(dag.getDagsterJob(), "onelake", "onelake-loc");
             run.setDagsterRunId(dagsterRunId);
             run.setStatus(DagStatus.RUNNING);
             runRepo.save(run);
-            if (dwdRun != null) {
-                updateDwdModelRunLaunched(dwdRun.modelRunId(), dagsterRunId);
-            }
         } catch (RuntimeException ex) {
             run.setStatus(DagStatus.FAILED);
             run.setFinishedAt(Instant.now());
             runRepo.save(run);
-            if (dwdRun != null) {
-                updateDwdModelRunFailed(dwdRun.modelRunId(), ex.getMessage());
-            }
             if (ex instanceof BizException bizException) {
                 throw bizException;
             }
@@ -143,106 +157,236 @@ public class OrchestrationService {
         return run.getId();
     }
 
-    private LaunchSpec launchSpec(Dag dag, JobRun run, TriggerType trigger) {
-        @SuppressWarnings("unchecked")
-        Map<String, Object> definition = dag.getDefinition() == null || dag.getDefinition().isBlank()
-            ? Map.of()
-            : JsonUtil.fromJson(dag.getDefinition(), Map.class);
-        if (!"DWD_MODEL_DAG".equals(asString(definition.get("kind")))) {
-            return new LaunchSpec(null, null, null);
-        }
-        DwdRunContext dwdRun = createDwdModelRun(dag, run, trigger, definition);
-        return new LaunchSpec(dwdRun.runConfig(), dwdRun.tags(), dwdRun);
-    }
-
-    private DwdRunContext createDwdModelRun(Dag dag, JobRun orchestrationRun, TriggerType trigger,
-                                           Map<String, Object> definition) {
+    /**
+     * P1 pipeline v2 trigger path.
+     *
+     * <p><b>C2 (docs/流水线模块重设计方案.md §7 P1)</b>: this is a NEW code path that
+     * coexists with the generic {@link #triggerDag(UUID, TriggerType)} for non-pipeline
+     * Dagster jobs. External model execution has been removed. The new path:
+     * <ol>
+     *   <li>Compiles the pipeline via {@link PipelineCompileService}.</li>
+     *   <li>Builds Spark Dagster runConfig via {@link SparkRunConfigBuilder}.</li>
+     *   <li>Launches {@code onelake_pipeline_run} Dagster job.</li>
+     *   <li>Creates one {@link TaskRun} per observable task and initializes status by topology.</li>
+     *   <li><b>Does NOT write modeling.* schema</b> — modeling updates come from Outbox events.</li>
+     * </ol>
+     *
+     * @return the JobRun ID
+     */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId, TriggerType trigger) {
         UUID tenantId = TenantContext.getTenantId();
-        UUID modelId = parseUuid(asString(definition.get("modelId")), "DWD DAG definition 缺少 modelId");
-        Map<String, Object> model = jdbc.queryForMap("""
-            SELECT id, tenant_id, status, dbt_model_name, source_fqn, target_fqn,
-                   artifact_path, resource_group, compute_profile
-            FROM modeling.data_model
-            WHERE id = ? AND tenant_id = ?
-            """, modelId, tenantId);
-        String status = asString(model.get("status"));
-        if (!"VALIDATED".equalsIgnoreCase(status)) {
-            throw new BizException(40055, "DWD 模型必须先完成 compile/validate 后才能运行");
+        if (tenantId == null) {
+            throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
-        String dbtModelName = firstText(asString(model.get("dbt_model_name")), asString(definition.get("dbtModelName")));
-        if (!StringUtils.hasText(dbtModelName)) {
-            throw new BizException(40056, "DWD 模型缺少 dbtModelName");
+        Dag dag = findTenantDag(dagId);
+
+        // 1. Compile
+        PipelineCompileResult plan = pipelineCompileService.compile(dagId);
+        if (!plan.allValidated()) {
+            throw new BizException(40060, "Pipeline 编译未通过，无法触发: "
+                    + String.join("; ",
+                        plan.tasks().stream()
+                                .filter(t -> !t.valid())
+                                .map(t -> t.taskKey() + ": " + t.errorMessage())
+                                .toList())
+                    + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
-        String artifactPath = firstText(asString(model.get("artifact_path")), asString(definition.get("artifactPath")));
-        if (!StringUtils.hasText(artifactPath)) {
-            throw new BizException(40057, "DWD 模型缺少 dbt 产物路径，请先重新 compile");
+        // 2. Readiness: ensure at least one real engine task; observation-only
+        // nodes (SYNC_REF/QUALITY_GATE) still get task_run rows for UI visibility.
+        List<PipelineTask> tasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
+        long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
+        if (executableCount == 0) {
+            throw new BizException(40061, "流水线没有可执行任务（可能是 Spark 任务尚未就绪，P-Spark 阶段后启用）");
         }
 
-        UUID modelRunId = UUID.randomUUID();
-        String triggerType = trigger == TriggerType.EVENT ? "ODS_EVENT" : "MANUAL";
-        String resourceGroup = firstText(asString(model.get("resource_group")), asString(definition.get("resourceGroup")));
-        String computeProfile = firstText(asString(model.get("compute_profile")), asString(definition.get("computeProfile")));
-        jdbc.update("""
-            INSERT INTO modeling.model_run
-                (id, tenant_id, model_id, status, trigger_type, orchestration_dag_id,
-                 resource_group, compute_profile, artifacts_path, queued_at, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, now(), now(), now())
-            """, modelRunId, tenantId, modelId, triggerType, dag.getId(),
-            resourceGroup, computeProfile, artifactPath);
-        jdbc.update("""
-            UPDATE modeling.data_model
-            SET last_run_id = ?, updated_at = now()
-            WHERE id = ? AND tenant_id = ?
-            """, modelRunId, modelId, tenantId);
+        // 3. Create JobRun
+        JobRun run = new JobRun();
+        run.setDagId(dagId);
+        run.setTriggerType(trigger);
+        run.setStatus(DagStatus.QUEUED);
+        run.setStartedAt(Instant.now());
+        run.setTriggeredBy(TenantContext.getUserId());
+        runRepo.save(run);
 
-        Map<String, Object> config = new LinkedHashMap<>();
-        config.put("model_name", dbtModelName);
-        config.put("model_id", modelId.toString());
-        config.put("run_id", modelRunId.toString());
-        config.put("tenant_id", tenantId.toString());
-        config.put("trigger_type", triggerType);
-        config.put("source_fqn", firstText(asString(model.get("source_fqn")), asString(definition.get("sourceFqn"))));
-        config.put("target_fqn", firstText(asString(model.get("target_fqn")), asString(definition.get("targetFqn"))));
-        config.put("artifact_path", artifactPath);
-        config.put("resource_group", firstText(resourceGroup, ""));
-        config.put("compute_profile", firstText(computeProfile, ""));
-        config.put("backfill", Map.of(
-            "enabled", false,
-            "fullRefresh", false,
-            "partitionStart", "",
-            "partitionEnd", "",
-            "sourceIntegrationRunId", ""
-        ));
-        Map<String, Object> runConfig = Map.of("ops", Map.of("run_dwd_model", Map.of("config", config)));
-        List<Map<String, String>> tags = List.of(
-            Map.of("key", "onelake.model_id", "value", modelId.toString()),
-            Map.of("key", "onelake.model_run_id", "value", modelRunId.toString()),
-            Map.of("key", "onelake.orchestration_run_id", "value", orchestrationRun.getId().toString()),
-            Map.of("key", "onelake.tenant_id", "value", tenantId.toString()),
-            Map.of("key", "onelake.trigger_type", "value", triggerType),
-            Map.of("key", "onelake.dbt_model", "value", dbtModelName)
+        // 4. Create TaskRun per valid task. Status is initialized from the data-flow
+        // DAG so the run instance reflects direct-upstream readiness instead of
+        // flattening every node to QUEUED.
+        List<PipelineTask> observable = observableTasks(plan, tasks);
+        Map<String, TaskRunStatus> initialStatuses = initialTaskRunStatuses(observable,
+                pipelineTaskEdgeRepo.findByDagId(dagId));
+        for (PipelineTask t : observable) {
+            TaskRun tr = new TaskRun();
+            tr.setTenantId(tenantId);
+            tr.setJobRunId(run.getId());
+            tr.setTaskKey(t.getTaskKey());
+            TaskRunStatus initialStatus = initialStatuses.getOrDefault(t.getTaskKey(), TaskRunStatus.QUEUED);
+            tr.setStatus(initialStatus);
+            if (initialStatus == TaskRunStatus.RUNNING || initialStatus == TaskRunStatus.SUCCEEDED) {
+                tr.setStartedAt(run.getStartedAt());
+            }
+            if (initialStatus == TaskRunStatus.SUCCEEDED) {
+                tr.setFinishedAt(run.getStartedAt());
+                if (StringUtils.hasText(t.getTargetFqn())) {
+                    tr.setArtifactPath("table:" + normalizeTableFqn(t.getTargetFqn()));
+                }
+            }
+            taskRunRepo.save(tr);
+        }
+
+        // 5. Build Dagster runConfig (C3 — Java builds, Dagster executes)
+        TaskBundleContext ctx = new TaskBundleContext(
+                dagId, tenantId, run.getId(), plan,
+                plan.pipelineTag(),
+                dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
+                dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
         );
-        return new DwdRunContext(modelRunId, runConfig, tags);
+        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks);
+
+        // 6. Launch Dagster
+        try {
+            List<Map<String, String>> tags = List.of(
+                    Map.of("key", "onelake.pipeline_id", "value", dagId.toString()),
+                    Map.of("key", "onelake.run_id", "value", run.getId().toString()),
+                    Map.of("key", "onelake.tenant_id", "value", tenantId.toString()),
+                    Map.of("key", "onelake.trigger_type", "value", trigger.name()),
+                    Map.of("key", "onelake.engine", "value", pipelineEngineTag(tasks))
+            );
+            String dagsterRunId = dagster.launch(
+                    PIPELINE_JOB_NAME, "onelake", "onelake-loc",
+                    runConfig.opConfig(), tags);
+            run.setDagsterRunId(dagsterRunId);
+            run.setStatus(DagStatus.RUNNING);
+            runRepo.save(run);
+            log.info("Spark pipeline {} launched, runId={}, dagsterRunId={}",
+                    dagId, run.getId(), dagsterRunId);
+        } catch (RuntimeException ex) {
+            run.setStatus(DagStatus.FAILED);
+            run.setFinishedAt(Instant.now());
+            runRepo.save(run);
+            // Fail all non-terminal task_runs
+            taskRunRepo.findByJobRunId(run.getId()).forEach(tr -> {
+                if (!isTerminalTaskRunStatus(tr.getStatus())) {
+                    tr.setStatus(TaskRunStatus.FAILED);
+                    tr.setErrorMsg("Dagster launch failed: " + truncate(ex.getMessage(), 3900));
+                    tr.setFinishedAt(Instant.now());
+                    taskRunRepo.save(tr);
+                }
+            });
+            publishPipelineRunEvent(dag, run, plan, false, ex.getMessage());
+            if (ex instanceof BizException bizException) throw bizException;
+            throw new BizException(50200, "Dagster 触发失败: " + ex.getMessage());
+        }
+        return run.getId();
     }
 
-    private void updateDwdModelRunLaunched(UUID modelRunId, String dagsterRunId) {
-        jdbc.update("""
-            UPDATE modeling.model_run
-            SET dagster_run_id = ?, status = 'RUNNING', started_at = COALESCE(started_at, now()), updated_at = now()
-            WHERE id = ?
-            """, dagsterRunId, modelRunId);
+    private List<PipelineTask> observableTasks(PipelineCompileResult plan, List<PipelineTask> tasks) {
+        Map<String, PipelineTask> byKey = tasks.stream()
+                .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        return plan.tasks().stream()
+                .filter(PipelineCompileResult.TaskCompileResult::valid)
+                .map(PipelineCompileResult.TaskCompileResult::taskKey)
+                .map(byKey::get)
+                .filter(java.util.Objects::nonNull)
+                .toList();
     }
 
-    private void updateDwdModelRunFailed(UUID modelRunId, String errorMessage) {
-        jdbc.update("""
-            UPDATE modeling.model_run
-            SET status = 'FAILED',
-                started_at = COALESCE(started_at, now()),
-                finished_at = now(),
-                error_msg = ?,
-                updated_at = now()
-            WHERE id = ?
-            """, truncate(errorMessage, 2000), modelRunId);
+    private Map<String, TaskRunStatus> initialTaskRunStatuses(List<PipelineTask> tasks,
+                                                              List<PipelineTaskEdge> allEdges) {
+        Map<String, PipelineTask> taskByKey = tasks.stream()
+                .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        Map<String, List<String>> upstreamsByTarget = new LinkedHashMap<>();
+        List<PipelineTaskEdge> edges = allEdges == null ? List.of() : allEdges;
+        for (PipelineTaskEdge edge : edges) {
+            if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
+                continue;
+            }
+            if (!taskByKey.containsKey(edge.getSourceKey()) || !taskByKey.containsKey(edge.getTargetKey())) {
+                continue;
+            }
+            upstreamsByTarget
+                    .computeIfAbsent(edge.getTargetKey(), ignored -> new ArrayList<>())
+                    .add(edge.getSourceKey());
+        }
+
+        Map<String, TaskRunStatus> statuses = new LinkedHashMap<>();
+        for (PipelineTask task : tasks) {
+            if (task.getTaskType() == TaskType.SYNC_REF) {
+                statuses.put(task.getTaskKey(), TaskRunStatus.SUCCEEDED);
+            } else {
+                statuses.put(task.getTaskKey(), TaskRunStatus.QUEUED);
+            }
+        }
+
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (PipelineTask task : tasks) {
+                String taskKey = task.getTaskKey();
+                if (statuses.get(taskKey) != TaskRunStatus.QUEUED) {
+                    continue;
+                }
+                List<String> upstreams = upstreamsByTarget.getOrDefault(taskKey, List.of());
+                boolean ready = upstreams.isEmpty()
+                        || upstreams.stream().allMatch(sourceKey -> statuses.get(sourceKey) == TaskRunStatus.SUCCEEDED);
+                if (ready) {
+                    statuses.put(taskKey, TaskRunStatus.RUNNING);
+                    changed = true;
+                }
+            }
+        }
+        return statuses;
+    }
+
+    private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx, List<PipelineTask> tasks) {
+        return sparkBuilder.build(ctx, tasks);
+    }
+
+    private String pipelineEngineTag(List<PipelineTask> tasks) {
+        return EngineType.SPARK_SQL.name();
+    }
+
+    /**
+     * Publish {@code pipeline.run.succeeded} or {@code pipeline.run.failed} Outbox event.
+     *
+     * <p>Called from {@link #triggerPipelineRun} on launch failure and from
+     * {@code refreshRunStatus} on terminal state (next iteration).
+     *
+     * <p><b>C4</b>: pipeline run events replace direct writes into modeling-owned
+     * runtime tables.
+     */
+    public void publishPipelineRunEvent(Dag dag, JobRun run, PipelineCompileResult plan,
+                                        boolean succeeded, String errorMessage) {
+        OutboxPublisher publisher = outboxPublisher.getIfAvailable();
+        if (publisher == null) {
+            log.warn("OutboxPublisher not available — skipping pipeline.run.* event for runId={}", run.getId());
+            return;
+        }
+        UUID tenantId = TenantContext.getTenantId();
+        String eventType = succeeded
+                ? DomainEvents.PIPELINE_RUN_SUCCEEDED
+                : DomainEvents.PIPELINE_RUN_FAILED;
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("pipelineId", dag.getId().toString());
+        payload.put("tenantId", tenantId == null ? null : tenantId.toString());
+        payload.put("runId", run.getId().toString());
+        payload.put("dagsterRunId", run.getDagsterRunId());
+        payload.put("triggerType", run.getTriggerType().name());
+        payload.put("startedAt", run.getStartedAt() == null ? null : run.getStartedAt().toString());
+        payload.put("finishedAt", run.getFinishedAt() == null ? null : run.getFinishedAt().toString());
+        long durationMs = (run.getStartedAt() == null || run.getFinishedAt() == null)
+                ? 0L : Math.max(0L, run.getFinishedAt().toEpochMilli() - run.getStartedAt().toEpochMilli());
+        payload.put("durationMs", durationMs);
+        if (plan != null) {
+            payload.put("taskCount", plan.tasks().size());
+        }
+        if (!succeeded) {
+            payload.put("errorMsg", truncate(errorMessage, 2000));
+            payload.put("partialSucceeded", List.of()); // populated by refreshRunStatus in later iteration
+        }
+        publisher.publish(eventType, dag.getId().toString(), payload);
     }
 
     @Transactional
@@ -293,11 +437,12 @@ public class OrchestrationService {
         if (run == null || !StringUtils.hasText(run.getDagsterRunId())) {
             return run;
         }
+        DagStatus oldStatus = run.getStatus();
         if (isTerminal(run.getStatus())) {
             try {
-                syncDwdModelRunStatus(run.getDagsterRunId(), run.getStatus(), run.getStartedAt(), run.getFinishedAt());
+                syncTaskRunsFromTerminalRun(run, run.getStatus());
             } catch (RuntimeException e) {
-                log.warn("DWD model run status sync failed for {}: {}", run.getDagsterRunId(), e.getMessage());
+                log.warn("Pipeline task run status sync failed for {}: {}", run.getDagsterRunId(), e.getMessage());
             }
             return run;
         }
@@ -312,61 +457,309 @@ public class OrchestrationService {
                 run.setFinishedAt(status.finishedAt() == null ? Instant.now() : status.finishedAt());
             }
             runRepo.save(run);
-            syncDwdModelRunStatus(run.getDagsterRunId(), mapped, status.startedAt(), run.getFinishedAt());
+
+            // P4-A: publish pipeline.run.succeeded/failed the first time a v2 pipeline enters terminal state.
+            if (isTerminal(mapped) && !isTerminal(oldStatus)) {
+                syncTaskRunsFromTerminalRun(run, mapped);
+                publishPipelineRunEventsIfTerminal(run, mapped);
+            }
         } catch (RuntimeException e) {
             log.warn("Dagster run status refresh failed for {}: {}", run.getDagsterRunId(), e.getMessage());
         }
         return run;
     }
 
-    private void syncDwdModelRunStatus(String dagsterRunId, DagStatus status, Instant startedAt, Instant finishedAt) {
-        if (!StringUtils.hasText(dagsterRunId)) {
-            return;
+    /**
+     * Terminal refresh: Dagster runs the Spark pipeline as one fixed op. Until per-node
+     * Spark artifacts are parsed, every non-terminal task_run follows the Dagster run
+     * terminal state so the UI and Outbox do not stay stuck at QUEUED.
+     */
+    private void syncTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
+        TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
+                ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+        Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
+        if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
+            propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
         }
-        if (refreshDwdModelRunThroughModeling(dagsterRunId)) {
-            return;
-        }
-        String modelStatus = switch (status) {
-            case SUCCESS -> "SUCCEEDED";
-            case FAILED -> "FAILED";
-            case QUEUED -> "QUEUED";
-            case RUNNING -> "RUNNING";
-        };
-        if (isTerminal(status)) {
-            jdbc.update("""
-                UPDATE modeling.model_run
-                SET status = ?,
-                    started_at = COALESCE(started_at, CAST(? AS timestamp with time zone)),
-                    finished_at = COALESCE(finished_at, CAST(? AS timestamp with time zone)),
-                    updated_at = now()
-                WHERE dagster_run_id = ?
-                """, modelStatus, toTimestamp(startedAt), toTimestamp(finishedAt), dagsterRunId);
-        } else {
-            jdbc.update("""
-                UPDATE modeling.model_run
-                SET status = ?,
-                    started_at = COALESCE(started_at, CAST(? AS timestamp with time zone)),
-                    updated_at = now()
-                WHERE dagster_run_id = ?
-                """, modelStatus, toTimestamp(startedAt), dagsterRunId);
+        for (TaskRun tr : taskRuns) {
+            PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(run.getDagId(), tr.getTaskKey()).orElse(null);
+            if (isTerminalTaskRunStatus(tr.getStatus())) {
+                if (tr.getStatus() == TaskRunStatus.SUCCEEDED
+                        && needsTaskRunSummary(tr)
+                        && enrichTaskRunSummary(task, tr)) {
+                    taskRunRepo.save(tr);
+                }
+                continue;
+            }
+            tr.setStatus(mapped);
+            if (tr.getStartedAt() == null) {
+                tr.setStartedAt(run.getStartedAt());
+            }
+            tr.setFinishedAt(run.getFinishedAt() == null ? Instant.now() : run.getFinishedAt());
+            if (mapped == TaskRunStatus.FAILED && !StringUtils.hasText(tr.getErrorMsg())) {
+                tr.setErrorMsg("Dagster run reported " + terminalStatus.name());
+            }
+            if (mapped == TaskRunStatus.SUCCEEDED) {
+                enrichTaskRunSummary(task, tr);
+            }
+            taskRunRepo.save(tr);
         }
     }
 
-    private boolean refreshDwdModelRunThroughModeling(String dagsterRunId) {
-        DwdModelRunSynchronizer synchronizer = dwdModelRunSynchronizer.getIfAvailable();
-        if (synchronizer == null) {
+    private Set<String> failedOrBlockedTaskKeys(List<TaskRun> taskRuns) {
+        Set<String> keys = new HashSet<>();
+        for (TaskRun tr : taskRuns) {
+            if (tr.getStatus() == TaskRunStatus.FAILED
+                    || tr.getStatus() == TaskRunStatus.UPSTREAM_FAILED
+                    || tr.getStatus() == TaskRunStatus.SKIPPED) {
+                keys.add(tr.getTaskKey());
+            }
+        }
+        return keys;
+    }
+
+    private void propagateUpstreamFailures(JobRun run, List<TaskRun> taskRuns, Set<String> failedOrBlocked) {
+        if (failedOrBlocked.isEmpty()) {
+            return;
+        }
+        Map<String, TaskRun> runByTaskKey = taskRuns.stream()
+                .collect(Collectors.toMap(TaskRun::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        List<PipelineTaskEdge> allEdges = pipelineTaskEdgeRepo.findByDagId(run.getDagId());
+        if (allEdges == null) {
+            allEdges = List.of();
+        }
+        List<PipelineTaskEdge> pipelineEdges = allEdges.stream()
+                .filter(edge -> edge.getEdgeLayer() == EdgeLayer.PIPELINE)
+                .toList();
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (PipelineTaskEdge edge : pipelineEdges) {
+                if (!failedOrBlocked.contains(edge.getSourceKey())) {
+                    continue;
+                }
+                TaskRun downstream = runByTaskKey.get(edge.getTargetKey());
+                if (downstream == null || downstream.getStatus() != TaskRunStatus.QUEUED) {
+                    continue;
+                }
+                downstream.setStatus(TaskRunStatus.UPSTREAM_FAILED);
+                downstream.setErrorMsg("Upstream task failed: " + edge.getSourceKey());
+                downstream.setFinishedAt(run.getFinishedAt() == null ? Instant.now() : run.getFinishedAt());
+                taskRunRepo.save(downstream);
+                failedOrBlocked.add(edge.getTargetKey());
+                changed = true;
+            }
+        }
+    }
+
+    private boolean isTerminalTaskRunStatus(TaskRunStatus status) {
+        return status == TaskRunStatus.SUCCEEDED
+                || status == TaskRunStatus.FAILED
+                || status == TaskRunStatus.CANCELLED
+                || status == TaskRunStatus.UPSTREAM_FAILED
+                || status == TaskRunStatus.SKIPPED;
+    }
+
+    private boolean needsTaskRunSummary(TaskRun tr) {
+        return tr.getRowsWritten() == null || !StringUtils.hasText(tr.getArtifactPath());
+    }
+
+    private boolean enrichTaskRunSummary(PipelineTask task, TaskRun tr) {
+        TaskRunSummary summary = taskRunSummary(task);
+        if (summary == null) {
             return false;
+        }
+        boolean changed = false;
+        if (tr.getRowsWritten() == null && summary.rowsWritten() != null) {
+            tr.setRowsWritten(summary.rowsWritten());
+            changed = true;
+        }
+        if (!StringUtils.hasText(tr.getArtifactPath()) && StringUtils.hasText(summary.artifactPath())) {
+            tr.setArtifactPath(summary.artifactPath());
+            changed = true;
+        }
+        return changed;
+    }
+
+    private TaskRunSummary taskRunSummary(PipelineTask task) {
+        if (task == null || task.getTaskType() == null) {
+            return null;
+        }
+        if (task.getTaskType() == TaskType.QUALITY_GATE) {
+            String qualityFqn = qualityTableFqn(task);
+            return new TaskRunSummary(
+                    catalogRowCount(task.getTenantId(), qualityFqn),
+                    StringUtils.hasText(qualityFqn) ? "quality:" + qualityFqn : null);
+        }
+        String targetFqn = normalizeTableFqn(task.getTargetFqn());
+        return new TaskRunSummary(
+                catalogRowCount(task.getTenantId(), targetFqn),
+                StringUtils.hasText(targetFqn) ? "table:" + targetFqn : null);
+    }
+
+    private String qualityTableFqn(PipelineTask task) {
+        JsonNode config = parseTaskConfig(task);
+        String configured = firstText(
+                config.path("qualityTableFqn").asText(""),
+                config.path("quality_table_fqn").asText(""));
+        if (StringUtils.hasText(configured)) {
+            return normalizeTableFqn(configured);
+        }
+        String targetFqn = normalizeTableFqn(task.getTargetFqn());
+        if (!StringUtils.hasText(targetFqn)) {
+            return null;
+        }
+        String[] parts = targetFqn.split("\\.");
+        if (parts.length != 2) {
+            return null;
+        }
+        return parts[0] + "." + parts[1] + "_quality_check";
+    }
+
+    private Long catalogRowCount(UUID tenantId, String fqn) {
+        if (tenantId == null || !StringUtils.hasText(fqn)) {
+            return null;
         }
         try {
-            return synchronizer.refreshByDagsterRunId(dagsterRunId);
+            return jdbc.query("""
+                    select row_count
+                    from catalog.asset
+                    where tenant_id = ? and om_fqn = ?
+                    """,
+                    ps -> {
+                        ps.setObject(1, tenantId);
+                        ps.setString(2, fqn);
+                    },
+                    rs -> rs.next() ? rs.getObject("row_count", Long.class) : null);
         } catch (RuntimeException e) {
-            log.warn("DWD model run synchronizer failed for {}: {}", dagsterRunId, e.getMessage());
-            return false;
+            log.warn("Task run summary row_count lookup skipped for {}: {}", fqn, e.getMessage());
+            return null;
         }
     }
 
-    private Timestamp toTimestamp(Instant instant) {
-        return instant == null ? null : Timestamp.from(instant);
+    private String normalizeTableFqn(String value) {
+        if (!StringUtils.hasText(value)) {
+            return null;
+        }
+        String fqn = value.trim().replace("\"", "");
+        String[] parts = fqn.split("\\.");
+        if (parts.length >= 3) {
+            return parts[parts.length - 2] + "." + parts[parts.length - 1];
+        }
+        if (parts.length == 2) {
+            return parts[0] + "." + parts[1];
+        }
+        return fqn;
+    }
+
+    /**
+     * P4-A — emit {@code pipeline.run.succeeded/failed} (+ per-task {@code pipeline.task.loaded})
+     * the first time a v2 pipeline run reaches terminal state.
+     *
+     */
+    private void publishPipelineRunEventsIfTerminal(JobRun run, DagStatus terminalStatus) {
+        try {
+            Dag dag = dagRepo.findById(run.getDagId()).orElse(null);
+            if (dag == null) return;
+            // Only v2 pipeline job
+            if (!PIPELINE_JOB_NAME.equals(dag.getDagsterJob())) return;
+
+            boolean succeeded = terminalStatus == DagStatus.SUCCEEDED;
+            // 1. pipeline.task.loaded for each executable task_run in this job
+            List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+            for (TaskRun tr : taskRuns) {
+                publishPipelineTaskLoadedEvent(dag, run, tr, succeeded);
+            }
+            // 2. pipeline.run.succeeded/failed (aggregate)
+            publishPipelineRunEvent(dag, run, null, succeeded,
+                    succeeded ? null : "Dagster run reported failure");
+            log.info("Pipeline {} run {} terminal event published: {}",
+                    dag.getId(), run.getId(), succeeded ? "SUCCEEDED" : "FAILED");
+        } catch (RuntimeException e) {
+            log.warn("publishPipelineRunEventsIfTerminal failed for run {}: {}",
+                    run.getId(), e.getMessage());
+        }
+    }
+
+    private void publishPipelineTaskLoadedEvent(Dag dag, JobRun run, TaskRun tr, boolean runSucceeded) {
+        OutboxPublisher publisher = outboxPublisher.getIfAvailable();
+        if (publisher == null) return;
+        if (tr.getStatus() == null) return;
+
+        UUID tenantId = run.getTriggeredBy() != null ? dag.getTenantId() : dag.getTenantId();
+        // Only emit task.loaded for SUCCEEDED task_runs; failed tasks surface via pipeline.run.failed
+        if (tr.getStatus() != com.onelake.orchestration.domain.enums.TaskRunStatus.SUCCEEDED) return;
+
+        java.util.Map<String, Object> payload = new LinkedHashMap<>();
+        PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(dag.getId(), tr.getTaskKey()).orElse(null);
+        if (!isMaterializingTask(task)) {
+            return;
+        }
+        JsonNode taskConfig = parseTaskConfig(task);
+        payload.put("pipelineId", dag.getId().toString());
+        payload.put("tenantId", tenantId.toString());
+        payload.put("runId", run.getId().toString());
+        payload.put("taskKey", tr.getTaskKey());
+        payload.put("taskType", task == null || task.getTaskType() == null ? null : task.getTaskType().name());
+        payload.put("taskName", task == null ? tr.getTaskKey() : task.getName());
+        payload.put("engine", task == null ? EngineType.SPARK_SQL.name() : task.getEngine());
+        payload.put("targetFqn", task == null ? null : task.getTargetFqn());
+        payload.put("modelId", task == null || task.getModelId() == null ? null : task.getModelId().toString());
+        if (run.getTriggeredBy() != null) payload.put("ownerId", run.getTriggeredBy().toString());
+        String ownerName = TenantContext.getUsername();
+        if (StringUtils.hasText(ownerName)) payload.put("ownerName", ownerName);
+        List<String> fromTables = textArray(taskConfig.path("from_tables"));
+        if (fromTables.isEmpty()) {
+            fromTables = textArray(taskConfig.path("fromTables"));
+        }
+        if (!fromTables.isEmpty()) payload.put("fromTables", fromTables);
+        JsonNode catalog = taskConfig.path("catalog");
+        if (catalog != null && catalog.isObject()) {
+            payload.put("catalog", JsonUtil.mapper().convertValue(catalog, Object.class));
+        }
+        if (tr.getRowsWritten() != null) payload.put("rowsWritten", tr.getRowsWritten());
+        if (tr.getScanBytes() != null) payload.put("scanBytes", tr.getScanBytes());
+        if (tr.getArtifactPath() != null) payload.put("artifactPath", tr.getArtifactPath());
+        payload.put("finishedAt", tr.getFinishedAt() == null ? null : tr.getFinishedAt().toString());
+        publisher.publish(DomainEvents.PIPELINE_TASK_LOADED, dag.getId().toString(), payload);
+    }
+
+    private boolean isMaterializingTask(PipelineTask task) {
+        if (task == null || task.getTaskType() == null) {
+            return false;
+        }
+        return switch (task.getTaskType()) {
+            case SPARK_SQL, PYSPARK, QUALITY_GATE -> true;
+            case SYNC_REF -> false;
+        };
+    }
+
+    private JsonNode parseTaskConfig(PipelineTask task) {
+        if (task == null || !StringUtils.hasText(task.getConfig())) {
+            return JsonUtil.mapper().createObjectNode();
+        }
+        try {
+            return JsonUtil.parse(task.getConfig());
+        } catch (RuntimeException e) {
+            log.warn("Pipeline task {} config parse skipped: {}", task.getTaskKey(), e.getMessage());
+            return JsonUtil.mapper().createObjectNode();
+        }
+    }
+
+    private List<String> textArray(JsonNode node) {
+        List<String> values = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return values;
+        }
+        for (JsonNode item : node) {
+            String text = item.asText("");
+            if (StringUtils.hasText(text)) {
+                values.add(text.trim());
+            }
+        }
+        return values;
     }
 
     private DagStatus mapDagsterStatus(String status) {
@@ -374,7 +767,7 @@ public class OrchestrationService {
             return DagStatus.RUNNING;
         }
         return switch (status.trim().toUpperCase()) {
-            case "SUCCESS", "SUCCEEDED" -> DagStatus.SUCCESS;
+            case "SUCCESS", "SUCCEEDED" -> DagStatus.SUCCEEDED;
             case "FAILURE", "FAILED", "CANCELED", "CANCELLED" -> DagStatus.FAILED;
             case "QUEUED", "NOT_STARTED" -> DagStatus.QUEUED;
             default -> DagStatus.RUNNING;
@@ -382,7 +775,7 @@ public class OrchestrationService {
     }
 
     private boolean isTerminal(DagStatus status) {
-        return status == DagStatus.SUCCESS || status == DagStatus.FAILED;
+        return status == DagStatus.SUCCEEDED || status == DagStatus.FAILED;
     }
 
     private DagDTO toDTO(Dag d, JobRun latestRun) {
@@ -421,23 +814,20 @@ public class OrchestrationService {
             .orElseGet(() -> new TriggerReadiness(true, null));
     }
 
-    private UUID parseUuid(String value, String errorMessage) {
-        if (!StringUtils.hasText(value)) {
-            throw new BizException(40022, errorMessage);
+    private String firstText(String... values) {
+        if (values == null) {
+            return null;
         }
-        try {
-            return UUID.fromString(value);
-        } catch (IllegalArgumentException e) {
-            throw new BizException(40023, "DWD DAG definition 中的 modelId 非法");
+        for (String value : values) {
+            if (StringUtils.hasText(value)) {
+                return value.trim();
+            }
         }
+        return null;
     }
 
     private String asString(Object value) {
         return value == null ? "" : String.valueOf(value);
-    }
-
-    private String firstText(String first, String fallback) {
-        return StringUtils.hasText(first) ? first : fallback;
     }
 
     private String truncate(String value, int maxLength) {
@@ -458,15 +848,5 @@ public class OrchestrationService {
 
     private record TriggerReadiness(boolean triggerable, String reason) {}
 
-    private record LaunchSpec(
-        Map<String, Object> runConfig,
-        List<Map<String, String>> tags,
-        DwdRunContext dwdRun
-    ) {}
-
-    private record DwdRunContext(
-        UUID modelRunId,
-        Map<String, Object> runConfig,
-        List<Map<String, String>> tags
-    ) {}
+    private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 }

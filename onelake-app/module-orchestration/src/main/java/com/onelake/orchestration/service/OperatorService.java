@@ -374,10 +374,6 @@ public class OperatorService {
         } else {
             validateTemplateContract(compileTarget, manifest.template(), errors);
             validateResourceHint(compileTarget, manifest.resourceHint(), errors, warnings);
-            if (compileTarget != CompileTarget.SQL_DBT) {
-                warnings.add("compileTarget=" + compileTarget.name()
-                    + " 当前仅完成 Manifest 契约校验，图级执行仍需先接入 Dagster op 与部署契约");
-            }
         }
         if (manifest.displayName() == null || manifest.displayName().isBlank()) {
             errors.add("displayName 不能为空");
@@ -504,11 +500,7 @@ public class OperatorService {
         }
         String operatorRef = textValue(node.get("operatorRef"));
         if (operatorRef == null) {
-            if (isSystemNode(nodeType)) {
-                warnings.add("节点 " + id + " 是系统运行节点，跳过算子 Manifest 校验");
-            } else {
-                errors.add("节点 " + id + " 缺少 operatorRef");
-            }
+            errors.add("节点 " + id + " 缺少 operatorRef");
             return;
         }
 
@@ -562,9 +554,9 @@ public class OperatorService {
         if (nodeType != null && !nodeType.equalsIgnoreCase(manifest.category())) {
             errors.add("节点 " + nodeId + " nodeType 与 Manifest category 不一致");
         }
-        if (!"SQL_DBT".equalsIgnoreCase(manifest.compileTarget())) {
+        if (!"SPARK".equalsIgnoreCase(manifest.compileTarget())) {
             errors.add("节点 " + nodeId + " compileTarget=" + manifest.compileTarget()
-                + " 尚未接入当前 SQL_DBT 图级执行闭环");
+                + " 不在 Spark-only 图级执行闭环内");
         }
     }
 
@@ -583,15 +575,11 @@ public class OperatorService {
             return;
         }
         switch (compileTarget) {
-            case SQL_DBT -> {
-                if (textValue(template.get("sql")) == null) {
-                    errors.add("SQL_DBT template.sql 不能为空");
-                }
-            }
             case SPARK -> {
                 String normalizedKind = kind.toUpperCase(Locale.ROOT);
-                if (!Set.of("SPARK_SQL", "PYSPARK").contains(normalizedKind)) {
-                    errors.add("SPARK template.kind 必须为 SPARK_SQL 或 PYSPARK");
+                if (!Set.of("SPARK_SQL", "PYSPARK", "SELECT_EXPR", "RAW_SQL", "COLUMN_EXPR",
+                    "FILTER", "JOIN", "AGG", "SPARK_SINK", "QUALITY_ASSERT").contains(normalizedKind)) {
+                    errors.add("SPARK template.kind 不在支持范围内");
                 }
                 if ("SPARK_SQL".equals(normalizedKind) && textValue(template.get("sql")) == null) {
                     errors.add("SPARK_SQL template.sql 不能为空");
@@ -599,17 +587,8 @@ public class OperatorService {
                 if ("PYSPARK".equals(normalizedKind) && textValue(template.get("entrypoint")) == null) {
                     errors.add("PYSPARK template.entrypoint 不能为空");
                 }
-            }
-            case PYTHON -> {
-                if (!"PYTHON".equalsIgnoreCase(kind)) {
-                    errors.add("PYTHON template.kind 必须为 PYTHON");
-                }
-                if (textValue(template.get("entrypoint")) == null) {
-                    errors.add("PYTHON template.entrypoint 不能为空");
-                }
-                Object requirements = template.get("requirements");
-                if (requirements != null && !(requirements instanceof List<?>)) {
-                    errors.add("PYTHON template.requirements 必须是数组");
+                if (!"PYSPARK".equals(normalizedKind) && textValue(template.get("sql")) == null) {
+                    errors.add("SPARK template.sql 不能为空");
                 }
             }
         }
@@ -622,25 +601,12 @@ public class OperatorService {
         List<String> warnings
     ) {
         if (resourceHint == null) {
-            if (compileTarget == CompileTarget.SQL_DBT) {
-                warnings.add("resourceHint 未声明，运行时将使用默认 SQL_DBT 资源组");
-            } else {
-                errors.add("compileTarget=" + compileTarget.name()
-                    + " 必须声明 resourceHint.defaultResourceGroup 与 resourceHint.engine");
-            }
+            errors.add("compileTarget=" + compileTarget.name()
+                + " 必须声明 resourceHint.defaultResourceGroup 与 resourceHint.engine");
             return;
         }
         String engine = textValue(resourceHint.get("engine"));
         String resourceGroup = textValue(resourceHint.get("defaultResourceGroup"));
-        if (compileTarget == CompileTarget.SQL_DBT) {
-            if (engine != null && !"TRINO_DBT".equalsIgnoreCase(engine)) {
-                warnings.add("SQL_DBT resourceHint.engine 建议为 TRINO_DBT，当前为 " + engine);
-            }
-            if (resourceGroup != null) {
-                validateResourceGroup("TRINO_DBT", resourceGroup, errors);
-            }
-            return;
-        }
         if (resourceGroup == null) {
             errors.add("compileTarget=" + compileTarget.name() + " 必须声明 resourceHint.defaultResourceGroup");
         }
@@ -1135,11 +1101,11 @@ public class OperatorService {
         List<String> errors,
         List<String> warnings
     ) {
-        String engine = firstText(textValue(graph.get("engine")), "TRINO_DBT").toUpperCase(Locale.ROOT);
+        String engine = firstText(textValue(graph.get("engine")), "SPARK").toUpperCase(Locale.ROOT);
         String resourceGroup = textValue(graph.get("resourceGroup"));
         String computeProfile = textValue(graph.get("computeProfile"));
-        if (!"TRINO_DBT".equals(engine)) {
-            errors.add("operator graph engine=" + engine + " 尚未接入当前 SQL_DBT 执行闭环");
+        if (!"SPARK".equals(engine)) {
+            errors.add("operator graph engine=" + engine + " 不在 Spark-only 执行闭环内");
         }
         if (resourceGroup != null) {
             validateResourceGroup(engine, resourceGroup, errors);
@@ -1173,7 +1139,7 @@ public class OperatorService {
     }
 
     private void validateResourceGroup(String engine, String resourceGroup, List<String> errors) {
-        String normalizedEngine = engine == null ? "TRINO_DBT" : engine.toUpperCase(Locale.ROOT);
+        String normalizedEngine = engine == null ? "SPARK" : engine.toUpperCase(Locale.ROOT);
         if (!resourceGroupService.supportsResourceGroup(normalizedEngine, resourceGroup)) {
             errors.add("resourceGroup 不存在或不支持当前 engine: " + resourceGroup + "/" + normalizedEngine);
         }
@@ -1254,10 +1220,6 @@ public class OperatorService {
         visiting.remove(node);
         visited.add(node);
         return false;
-    }
-
-    private boolean isSystemNode(String nodeType) {
-        return "DBT_MODEL".equalsIgnoreCase(String.valueOf(nodeType));
     }
 
     private boolean matchesKeyword(Operator operator, String keyword) {

@@ -22,12 +22,8 @@ public class RuntimeContractService {
     private static final String LOCATION = "onelake-loc";
 
     private static final List<RuntimeSpec> SPECS = List.of(
-        new RuntimeSpec("SQL_DBT", "TRINO_DBT", "onelake_dbt_model_run", true, true,
-            "SQL_DBT 已接入 Dagster dbt job"),
-        new RuntimeSpec("SPARK", "SPARK", "onelake_spark_operator_run", true, false,
-            "SPARK 仍处于 Manifest 契约态，尚未接入 Dagster Spark op、依赖隔离和部署契约"),
-        new RuntimeSpec("PYTHON", "PYTHON", "onelake_python_operator_run", true, false,
-            "PYTHON 仍处于 Manifest 契约态，尚未接入 Dagster Python op、requirements 隔离和部署契约")
+        new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_run", true, true,
+            "SPARK 已接入 Dagster onelake_pipeline_run / run_spark_task_op")
     );
 
     private final DagsterClient dagster;
@@ -40,8 +36,19 @@ public class RuntimeContractService {
     }
 
     public Optional<String> triggerBlockedReason(String dagsterJob, Map<String, Object> definition) {
-        RuntimeSpec spec = specFor(dagsterJob, definition).orElse(null);
-        if (spec == null || spec.graphExecutionSupported()) {
+        Map<String, Object> safeDefinition = definition == null ? Map.of() : definition;
+        String requestedTarget = normalizeTarget(firstText(
+                text(safeDefinition.get("compileTarget")), text(safeDefinition.get("engine"))));
+        if (StringUtils.hasText(requestedTarget)
+                && !"SPARK".equals(requestedTarget)
+                && "onelake_pipeline_run".equals(dagsterJob)) {
+            return Optional.of("流水线运行时已收敛为 Spark 引擎，不再支持 " + requestedTarget);
+        }
+        RuntimeSpec spec = specFor(dagsterJob, safeDefinition).orElse(null);
+        if (spec == null) {
+            return Optional.of("Dagster 作业未在运行契约中注册: " + dagsterJob);
+        }
+        if (spec.graphExecutionSupported()) {
             return Optional.empty();
         }
         return Optional.of(spec.blockedReason());
@@ -57,17 +64,16 @@ public class RuntimeContractService {
     }
 
     private RuntimeContractDTO toDTO(RuntimeSpec spec, boolean dagsterJobAvailable) {
-        boolean ready = spec.graphExecutionSupported() && dagsterJobAvailable;
         String status;
         String blockedReason = null;
-        if (ready) {
-            status = "READY";
-        } else if (!dagsterJobAvailable) {
-            status = "MISSING_DAGSTER_JOB";
-            blockedReason = "Dagster repository 未暴露作业: " + spec.dagsterJob();
-        } else {
+        if (!spec.graphExecutionSupported()) {
             status = "CONTRACT_ONLY";
             blockedReason = spec.blockedReason();
+        } else if (dagsterJobAvailable) {
+            status = "READY";
+        } else {
+            status = "MISSING_DAGSTER_JOB";
+            blockedReason = "Dagster repository 未暴露作业: " + spec.dagsterJob();
         }
         return new RuntimeContractDTO(
             spec.compileTarget(),
@@ -108,7 +114,10 @@ public class RuntimeContractService {
             return "";
         }
         String normalized = value.trim().toUpperCase(Locale.ROOT);
-        return "TRINO_DBT".equals(normalized) ? "SQL_DBT" : normalized;
+        if ("SPARK_SQL".equals(normalized) || "PYSPARK".equals(normalized)) {
+            return "SPARK";
+        }
+        return normalized;
     }
 
     private String firstText(String first, String second) {

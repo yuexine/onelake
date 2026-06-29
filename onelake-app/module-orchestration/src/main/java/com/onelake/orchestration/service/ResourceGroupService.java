@@ -34,16 +34,12 @@ import java.util.stream.Collectors;
 public class ResourceGroupService {
 
     private static final Map<String, Set<String>> DEFAULT_RESOURCE_GROUPS_BY_ENGINE = Map.of(
-        "TRINO_DBT", Set.of("default", "rg-default"),
-        "SPARK", Set.of("spark-default"),
-        "PYTHON", Set.of("python-default")
+        "SPARK", Set.of("spark-default")
     );
     private static final Map<String, Set<String>> DEFAULT_COMPUTE_PROFILES_BY_GROUP = Map.of(
-        "default", Set.of("trino-small", "trino-medium", "trino-large"),
-        "rg-default", Set.of("trino-small", "trino-medium", "trino-large"),
-        "spark-default", Set.of("spark-small", "spark-medium", "spark-large"),
-        "python-default", Set.of("python-small", "python-medium")
+        "spark-default", Set.of("spark-small", "spark-medium", "spark-large")
     );
+    private static final Set<String> SUPPORTED_ENGINES = Set.of("SPARK");
 
     private final ResourceGroupRepository resourceGroupRepo;
     private final ComputeProfileRepository computeProfileRepo;
@@ -86,7 +82,8 @@ public class ResourceGroupService {
     public ResourceGroupDTO upsertResourceGroup(ResourceGroupRequest request) {
         UUID tenantId = requireTenant();
         String code = normalizeCode(required(request.code(), "resourceGroup.code"));
-        String engine = normalizeEngine(required(request.engine(), "resourceGroup.engine"));
+        String engine = requireSupportedEngine(required(request.engine(), "resourceGroup.engine"),
+            "resourceGroup.engine");
         ResourceGroup group = resourceGroupRepo.findByTenantIdAndCode(tenantId, code).orElseGet(ResourceGroup::new);
         boolean created = group.getId() == null;
         group.setTenantId(tenantId);
@@ -120,7 +117,8 @@ public class ResourceGroupService {
         boolean created = profile.getId() == null;
         profile.setResourceGroupId(group.getId());
         profile.setCode(code);
-        profile.setEngine(normalizeEngine(nonBlank(request.engine(), group.getEngine())));
+        profile.setEngine(requireSupportedEngine(nonBlank(request.engine(), group.getEngine()),
+            "computeProfile.engine"));
         profile.setDisplayName(nonBlank(request.displayName(), code));
         profile.setStatus(normalizeStatus(request.status()));
         profile.setCpuCores(request.cpuCores());
@@ -283,7 +281,15 @@ public class ResourceGroupService {
     }
 
     private static String normalizeEngine(String engine) {
-        return nonBlank(engine, "TRINO_DBT").toUpperCase(Locale.ROOT);
+        return nonBlank(engine, "SPARK").toUpperCase(Locale.ROOT);
+    }
+
+    private static String requireSupportedEngine(String engine, String field) {
+        String normalized = normalizeEngine(engine);
+        if (!SUPPORTED_ENGINES.contains(normalized)) {
+            throw new BizException(40037, field + " 仅支持 SPARK");
+        }
+        return normalized;
     }
 
     private static String normalizeCode(String code) {

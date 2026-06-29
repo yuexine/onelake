@@ -83,7 +83,7 @@ class OperatorServiceTest {
     }
 
     @Test
-    void seedBuiltInsCreatesSixtyFiveOperatorsAndVersions() {
+    void seedBuiltInsCreatesSixtySixOperatorsAndVersions() {
         when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(anyString(), eq(OperatorScope.BUILTIN)))
             .thenReturn(Optional.empty());
         when(operatorRepo.save(any(Operator.class))).thenAnswer(invocation -> {
@@ -95,10 +95,10 @@ class OperatorServiceTest {
 
         int seeded = service.seedBuiltIns();
 
-        assertThat(seeded).isEqualTo(65);
-        assertThat(BuiltInOperatorCatalog.size()).isEqualTo(65);
-        verify(operatorRepo, times(65)).save(any(Operator.class));
-        verify(versionRepo, times(65)).save(any(OperatorVersion.class));
+        assertThat(seeded).isEqualTo(66);
+        assertThat(BuiltInOperatorCatalog.size()).isEqualTo(66);
+        verify(operatorRepo, times(66)).save(any(Operator.class));
+        verify(versionRepo, times(66)).save(any(OperatorVersion.class));
     }
 
     @Test
@@ -115,13 +115,13 @@ class OperatorServiceTest {
             List.of(port()),
             Map.of("mode", "ASSERT"),
             paramsSchema(),
-            "SQL_DBT",
-            Map.of("kind", "DBT_TEST", "sql", "not_null"),
+            "SPARK",
+            Map.of("kind", "QUALITY_ASSERT", "sql", "not_null"),
             Map.of("type", "ONE_TO_ONE"),
             Map.of("effect", "INHERIT"),
             true,
             new LinkedHashMap<>(),
-            Map.of("engine", "TRINO_DBT"),
+            Map.of("defaultResourceGroup", "spark-default", "engine", "SPARK"),
             List.of()
         );
 
@@ -132,15 +132,14 @@ class OperatorServiceTest {
     }
 
     @Test
-    void validateAllowsSparkManifestAsExtensionContractOnly() {
+    void validateAllowsSparkManifest() {
         OperatorManifestDTO manifest = sparkManifest("custom.spark_dedupe", true);
 
         OperatorValidationResultDTO result = service.validateOperator(manifest);
 
         assertThat(result.ok()).isTrue();
         assertThat(result.errors()).isEmpty();
-        assertThat(result.warnings()).anySatisfy(warning ->
-            assertThat(warning).contains("compileTarget=SPARK").contains("Manifest 契约校验"));
+        assertThat(result.warnings()).isEmpty();
     }
 
     @Test
@@ -168,13 +167,13 @@ class OperatorServiceTest {
             List.of(port()),
             Map.of("mode", "PASSTHROUGH_MODIFY"),
             paramsSchema(),
-            "SQL_DBT",
+            "SPARK",
             Map.of("kind", "COLUMN_EXPR", "sql", "regexp_replace({{ column }}, '[^0-9]', '')"),
             Map.of("type", "ONE_TO_ONE"),
             Map.of("effect", "INHERIT"),
             false,
             new LinkedHashMap<>(),
-            Map.of("defaultResourceGroup", "warehouse-xl", "engine", "TRINO_DBT"),
+            Map.of("defaultResourceGroup", "warehouse-xl", "engine", "SPARK"),
             List.of()
         );
 
@@ -182,12 +181,12 @@ class OperatorServiceTest {
 
         assertThat(result.ok()).isFalse();
         assertThat(result.errors()).contains(
-            "resourceGroup 不存在或不支持当前 engine: warehouse-xl/TRINO_DBT");
+            "resourceGroup 不存在或不支持当前 engine: warehouse-xl/SPARK");
     }
 
     @Test
     void validateAllowsTenantRegisteredResourceGroup() {
-        when(resourceGroupService.supportsResourceGroup("TRINO_DBT", "warehouse-codex")).thenReturn(true);
+        when(resourceGroupService.supportsResourceGroup("SPARK", "warehouse-codex")).thenReturn(true);
         OperatorManifestDTO manifest = new OperatorManifestDTO(
             "custom.clean_phone",
             "1.0.0",
@@ -200,13 +199,13 @@ class OperatorServiceTest {
             List.of(port()),
             Map.of("mode", "PASSTHROUGH_MODIFY"),
             paramsSchema(),
-            "SQL_DBT",
+            "SPARK",
             Map.of("kind", "COLUMN_EXPR", "sql", "regexp_replace({{ column }}, '[^0-9]', '')"),
             Map.of("type", "ONE_TO_ONE"),
             Map.of("effect", "INHERIT"),
             false,
             new LinkedHashMap<>(),
-            Map.of("defaultResourceGroup", "warehouse-codex", "engine", "TRINO_DBT"),
+            Map.of("defaultResourceGroup", "warehouse-codex", "engine", "SPARK"),
             List.of()
         );
 
@@ -314,13 +313,14 @@ class OperatorServiceTest {
         mockVisibleBuiltInOperator("transform.rename_columns");
         mockVisibleBuiltInOperator("govern.drop_required_missing");
         mockVisibleBuiltInOperator("gate.not_null");
+        mockVisibleBuiltInOperator("transform.spark_sql");
         mockVisibleBuiltInOperator("output.iceberg_table");
 
         OperatorValidationResultDTO result = service.validateGraph(dwdGraph());
 
         assertThat(result.ok()).isTrue();
         assertThat(result.errors()).isEmpty();
-        assertThat(result.warnings()).contains("节点 dbt_model 是系统运行节点，跳过算子 Manifest 校验");
+        assertThat(result.warnings()).isEmpty();
     }
 
     @Test
@@ -487,17 +487,18 @@ class OperatorServiceTest {
         mockVisibleBuiltInOperator("transform.rename_columns");
         mockVisibleBuiltInOperator("govern.drop_required_missing");
         mockVisibleBuiltInOperator("gate.not_null");
+        mockVisibleBuiltInOperator("transform.spark_sql");
         mockVisibleBuiltInOperator("output.iceberg_table");
         Map<String, Object> graph = dwdGraph();
-        graph.put("engine", "TRINO_DBT");
+        graph.put("engine", "SPARK");
         graph.put("resourceGroup", "warehouse-xl");
-        graph.put("computeProfile", "trino-small");
+        graph.put("computeProfile", "spark-small");
 
         OperatorValidationResultDTO result = service.validateGraph(graph);
 
         assertThat(result.ok()).isFalse();
         assertThat(result.errors()).contains(
-            "resourceGroup 不存在或不支持当前 engine: warehouse-xl/TRINO_DBT");
+            "resourceGroup 不存在或不支持当前 engine: warehouse-xl/SPARK");
     }
 
     @Test
@@ -506,17 +507,18 @@ class OperatorServiceTest {
         mockVisibleBuiltInOperator("transform.rename_columns");
         mockVisibleBuiltInOperator("govern.drop_required_missing");
         mockVisibleBuiltInOperator("gate.not_null");
+        mockVisibleBuiltInOperator("transform.spark_sql");
         mockVisibleBuiltInOperator("output.iceberg_table");
         Map<String, Object> graph = dwdGraph();
-        graph.put("engine", "TRINO_DBT");
-        graph.put("resourceGroup", "default");
-        graph.put("computeProfile", "spark-large");
+        graph.put("engine", "SPARK");
+        graph.put("resourceGroup", "spark-default");
+        graph.put("computeProfile", "retired-small");
 
         OperatorValidationResultDTO result = service.validateGraph(graph);
 
         assertThat(result.ok()).isFalse();
         assertThat(result.errors()).contains(
-            "computeProfile 不存在或不属于当前 resourceGroup: spark-large/default");
+            "computeProfile 不存在或不属于当前 resourceGroup: retired-small/spark-default");
     }
 
     @Test
@@ -538,7 +540,7 @@ class OperatorServiceTest {
     }
 
     @Test
-    void validateGraphRejectsSparkExtensionBecauseRuntimeIsNotLanded() {
+    void validateGraphAllowsSparkManifestNode() {
         OperatorManifestDTO manifest = sparkManifest("custom.spark_dedupe", true);
         Operator operator = customOperator("custom.spark_dedupe", "TRANSFORM");
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq("custom.spark_dedupe"), any()))
@@ -553,9 +555,8 @@ class OperatorServiceTest {
 
         OperatorValidationResultDTO result = service.validateGraph(graph);
 
-        assertThat(result.ok()).isFalse();
-        assertThat(result.errors()).contains(
-            "节点 spark_dedupe compileTarget=SPARK 尚未接入当前 SQL_DBT 图级执行闭环");
+        assertThat(result.ok()).isTrue();
+        assertThat(result.errors()).isEmpty();
     }
 
     private Operator builtinOperator(String ref) {
@@ -623,6 +624,14 @@ class OperatorServiceTest {
 
     private Map<String, Object> dwdGraph() {
         Map<String, Object> graph = new LinkedHashMap<>();
+        graph.put("engine", "SPARK");
+        graph.put("resourceGroup", "spark-default");
+        graph.put("computeProfile", "spark-small");
+        graph.put("sourceColumns", List.of(
+            Map.of("name", "order_id", "classification", "L1"),
+            Map.of("name", "order_time", "classification", "L1")
+        ));
+        graph.put("outputColumns", List.of("order_id", "order_time"));
         graph.put("nodes", List.of(
             node("input_ods", "INPUT", "input.ods_table", "1.0.0", Map.of("sourceFqn", "ods.ods_codex_orders")),
             node("transform_mapping", "TRANSFORM", "transform.rename_columns", "1.0.0",
@@ -631,12 +640,8 @@ class OperatorServiceTest {
                 Map.of("requiredColumns", List.of("order_id"))),
             node("quality_gate", "QUALITY_GATE", "gate.not_null", "1.0.0",
                 Map.of("columns", List.of("order_id"))),
-            Map.of(
-                "id", "dbt_model",
-                "nodeType", "DBT_MODEL",
-                "type", "DBT_MODEL",
-                "config", Map.of("dbtModelName", "dwd_trade_order_df")
-            ),
+            node("spark_sql", "TRANSFORM", "transform.spark_sql", "1.0.0",
+                Map.of("sql", "select order_id, order_time from staging_orders")),
             node("output_dwd", "OUTPUT", "output.iceberg_table", "1.0.0",
                 Map.of("targetFqn", "dwd.dwd_trade_order_df", "columns", List.of("order_id", "order_time"),
                     "partitionBy", "days(order_time)"))
@@ -645,8 +650,8 @@ class OperatorServiceTest {
             edge("input_ods", "transform_mapping"),
             edge("transform_mapping", "govern_clean"),
             edge("govern_clean", "quality_gate"),
-            edge("quality_gate", "dbt_model"),
-            edge("dbt_model", "output_dwd")
+            edge("quality_gate", "spark_sql"),
+            edge("spark_sql", "output_dwd")
         ));
         return graph;
     }
@@ -689,13 +694,13 @@ class OperatorServiceTest {
             List.of(port()),
             Map.of("mode", "PASSTHROUGH_MODIFY"),
             paramsSchema(),
-            "SQL_DBT",
+            "SPARK",
             Map.of("kind", "COLUMN_EXPR", "sql", "regexp_replace({{ column }}, '[^0-9]', '')"),
             Map.of("type", "ONE_TO_ONE"),
             Map.of("effect", "INHERIT"),
             false,
             new LinkedHashMap<>(),
-            Map.of("engine", "TRINO_DBT"),
+            Map.of("defaultResourceGroup", "spark-default", "engine", "SPARK"),
             List.of(Map.of("title", "示例", "params", Map.of("column", "phone")))
         );
     }

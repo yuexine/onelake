@@ -45,5 +45,12 @@ public class Dag {
 
     private Integer version = 1;
 
+    /** Pipeline v2 fields (P1). See docs/流水线模块重设计方案.md §6.1. */
+    private String pipelineKind;     // BLANK | ODS_DWD | MULTI_LAYER
+    private String status;           // DRAFT | VALIDATED | PUBLISHED
+    private String engine;           // Spark-only pipeline mainline: SPARK
+    private String resourceGroup;    // e.g. spark-default
+    private String computeProfile;   // e.g. spark-small
+
     private Instant createdAt = Instant.now();
 }

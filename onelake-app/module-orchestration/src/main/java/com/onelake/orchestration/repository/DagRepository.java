@@ -11,4 +11,7 @@ public interface DagRepository extends JpaRepository<Dag, UUID> {
     List<Dag> findByTenantId(UUID tenantId);
 
     Optional<Dag> findByIdAndTenantId(UUID id, UUID tenantId);
+
+    /** P6-B: enabled pipelines for scheduled triggering. */
+    List<Dag> findByEnabledTrue();
 }

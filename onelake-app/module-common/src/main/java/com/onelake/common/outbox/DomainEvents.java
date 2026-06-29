@@ -50,4 +50,13 @@ public final class DomainEvents {
     public static final String DATASERVICE_SUBSCRIPTION_APPROVED = "dataservice.subscription.approved";
     public static final String DATASERVICE_SUBSCRIPTION_REVOKED = "dataservice.subscription.revoked";
     public static final String ORCHESTRATION_JOB_BOUND = "orchestration.job.bound";
+
+    /**
+     * Pipeline v2 lifecycle events (see docs/流水线模块重设计方案.md §6.3 / §6.5).
+     * Replace cross-schema JDBC writes from orchestration → modeling/catalog/quality/security.
+     */
+    public static final String PIPELINE_PUBLISHED = "pipeline.published";
+    public static final String PIPELINE_RUN_SUCCEEDED = "pipeline.run.succeeded";
+    public static final String PIPELINE_RUN_FAILED = "pipeline.run.failed";
+    public static final String PIPELINE_TASK_LOADED = "pipeline.task.loaded";
 }

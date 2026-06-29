@@ -15,14 +15,14 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/v1/orchestration/runtime-contracts")
 @RequiredArgsConstructor
-@Tag(name = "编排运行契约", description = "SQL_DBT、Spark、Python 编译目标与 Dagster 运行态接入边界。")
+@Tag(name = "编排运行契约", description = "Spark 编译目标与 Dagster 运行态接入边界。")
 public class RuntimeContractController {
 
     private final RuntimeContractService service;
 
     @Operation(
         summary = "查询运行契约",
-        description = "用途：返回各 compileTarget 的 Manifest 支持、图级执行支持和 Dagster job 可用性，避免前端误放开未接入运行态的 Spark/Python。"
+        description = "用途：返回 Spark compileTarget 的 Manifest 支持、图级执行支持和 Dagster job 可用性，避免前端误放开未接入运行态的能力。"
     )
     @GetMapping
     public ApiResponse<List<RuntimeContractDTO>> list() {

@@ -10,13 +10,16 @@
 
 | 维度 | 设计要求 | 实施结果 | 状态 |
 |------|---------|---------|------|
-| 控制面 | `onelake-app` 模块化单体（8 业务模块 + bootstrap） | 9 个 Maven 子模块 | ✅ 完成 |
-| 数据面 | Compose 组件 + Airbyte 本地部署 | `docker-compose.yml` 覆盖 Compose 组件；Airbyte 改由 `abctl` 管理且本地入口已可访问 | ⚠ 待端到端联调 |
-| 数据库 | 单 PG + 9 schema（含 dataservice_api） | 8 个 schema Flyway 脚本（含审查补全表） | ✅ 完成 |
-| 前端 | React 18 + TS + Ant Design Pro | 工作台 + 集成模块完整 / 其余占位骨架 | ⚠ 部分 |
+| 控制面 | `onelake-app` 模块化单体（8 业务模块 + bootstrap） | **10 个 Maven 子模块**（2026-06-29 加入 `module-analytics`） | ✅ 完成 |
+| 数据面 | Compose 组件 + Airbyte 本地部署 | `docker-compose.yml` 覆盖 Compose 组件；Airbyte 改由 `abctl` 管理且本地入口已可访问；2026-06-29 加入 `jupyterhub` + Superset 嵌入开关 | ⚠ 待端到端联调 |
+| 数据库 | 单 PG + 9 schema（含 dataservice_api） | **9 个 schema Flyway 脚本**（2026-06-29 加入 `analytics` 含 dataset / dashboard / dashboard_publication / notebook / notebook_template / notebook_run / query_log） | ✅ 完成 |
+| 前端 | React 18 + TS + Ant Design Pro | 工作台 + 集成模块完整 / 其余占位骨架；2026-06-29 加入完整"数据分析"一级菜单（11 段）：数据集 / 大屏中心（自研 ScreenDesigner + Superset 嵌入）/ Notebook / 组件模板库 | ⚠ 部分 |
 | dbt | ODS→DWD→ADS 分层 + 质量门禁 | 工程骨架 + 示例模型 + 脱敏宏 | ✅ 完成 |
+| **数据分析与可视化** | **P1-P4d 全量**（数据集 + Superset 嵌入 + 自研大屏 15 组件 + 发布分享 + Notebook SDK + papermill 调度 + 算法模板库） | **47 个 Java 文件 + 6 个前端页面 + 13 个 Python/Jupyter 文件 + 32 个单元测试全部通过** | ✅ **2026-06-29 完成** |
 
-文件统计：**112 个 Java 源文件 + 12 个 SQL 文件 + 配置/前端/构建脚本 = 164 个文件**。
+文件统计：**159 个 Java 源文件 + 13 个 SQL 文件 + 配置/前端/构建脚本 ≈ 220 个文件**。
+
+> **新增模块**：`module-analytics` 见 §十七。详细方案：`docs/数据分析与可视化模块设计方案.md` v1.1。
 
 ---
 
@@ -322,4 +325,95 @@
 
 ---
 
-✅ **项目初始化阶段交付完成。可执行 `make dev` 一键拉起。**
+## 十七、module-analytics（数据分析与可视化 · 2026-06-29 新增）
+
+> 详细方案见 `docs/数据分析与可视化模块设计方案.md` v1.1（评审修订版）。
+> 阶段：P1 → P4d 全量交付，端到端闭环（资产 → 数据集 → 大屏/Superset 嵌入 → 发布分享 / Notebook 探索 → 调度产出 → 回写资产）。
+
+### 后端（47 个 Java 文件）
+
+| 子包 | 类 | 职责 |
+|------|----|------|
+| domain/entity | `Dataset` `Dashboard` `DashboardPublication` `Notebook` `NotebookTemplate` `NotebookRun` `QueryLog` | 7 个 JPA 实体 |
+| domain/enums | `SourceType` `DashboardStatus` `RunStatus` `TemplateCategory` | 强约束枚举（RunStatus 与 modeling.model_run 对齐） |
+| repository | 7 个 Repository | `findByIdAndTenantId` / `findByTenantId` 强制租户隔离 |
+| client | `TrinoQueryClient` `SupersetClient` `DataServiceClient` `JupyterHubClient` `DagsterClient` | 数据面句柄，bean name `analyticsDagsterClient` 避免与 orchestration 冲突 |
+| service | `DatasetQueryService` `DatasetService` `DashboardService` `SharePublishService` `SupersetEmbedService` `NotebookRunService` `NotebookRunSyncScheduler` `NotebookArtifactService` `NotebookTemplateService` `MaskingPolicyView` `SqlBuilder` | 11 个 Service |
+| api | `DatasetController` `AnalyticsDashboardController` `SupersetEmbedController` `ShareController` `NotebookController` `NotebookTemplateController` | 6 个 Controller |
+| api/vo | `DatasetRequest` `DashboardSaveRequest` `DashboardPublishRequest` | |
+| dto | `DatasetDTO` `DataBinding` `QueryResult` | |
+| config | `AnalyticsConfig` | @EnableAsync + @EnableScheduling + analyticsAsyncExecutor |
+| 测试 | 6 个 Service 测试类（32 个测试全绿） | 覆盖脱敏下推 / single-flight / row_filter 硬校验 / tenant_id 校验 / 乐观锁 / 幂等 |
+
+### 前端（11 段 SideNav 新增"数据分析"）
+
+| 页面 | 路径 | 关键能力 |
+|------|------|---------|
+| `DatasetList` + `DatasetEditor` | `/analytics/datasets` | 4 种来源（ASSET/SQL/API/NOTEBOOK）CRUD |
+| `DatasetDetail` | `/analytics/datasets/:id` | 字段 schema + 试查询 |
+| `DashboardList` + `ScreenDesigner` | `/analytics/dashboards` + `/:id` + `/:id/view` | 三段式（palette + canvas + inspector）拖拽编排 |
+| `WidgetRenderer` + `WIDGET_REGISTRY` | screen/registry.tsx | **P2 最小可用 15 组件**（line/bar/pie/scatter/metric/flipper/table/text/image/decoration/superset/rankList/radar/funnel/heatmap） |
+| `ScreenCanvas` | screen/ScreenCanvas.tsx | react-grid-layout 自由布局（cols=48, compactType=null 允许分层） |
+| `Inspector` | screen/Inspector.tsx | 三 Tab：属性 / 数据 / 交互 |
+| `PublishDialog` | screen/PublishDialog.tsx | isPublic + 过期 + shareToken 复制（含 row_filter 警告） |
+| `SupersetPanel` | screen/SupersetPanel.tsx | @superset-ui/embedded-sdk 0.4.0 + 后端签发 guest token |
+| `Notebooks` | `/analytics/notebooks` | 列表 + 创建 + JupyterLab 启动入口 |
+| `Library` | `/analytics/library` | 组件库 + 算法模板库（含 KMeans / Prophet / 相关性 / RFM） |
+| `ScreenShare` | `/share/screen/:token` | 无鉴权布局独立路由（不在 App layout 下） |
+
+### 数据面 / Python SDK（13 个文件）
+
+| 路径 | 用途 |
+|------|------|
+| `jupyter/Dockerfile` | JupyterHub 4.1 + papermill/pandas/sklearn/prophet/pyspark/trino |
+| `jupyter/jupyterhub_config.py` | Keycloak OAuth + SimpleLocalProcessSpawner + pre_spawn_hook |
+| `jupyter/pre_spawn_hook.py` | 调控制面 issue-token 注入短期 ONELAKE_TOKEN |
+| `jupyter/onelake/` | Python SDK（`__init__.py` / `api.py` / `_control_plane.py` / `_trino.py` / `_spark.py`） |
+| `jupyter/setup.py` | `pip install -e .` 入口 |
+| `jupyter/templates/{kmeans,prophet,correlation,rfm}.py` | 4 个平台预置算法模板 |
+| `dagster/definitions.py` | 新增 `run_notebook_op` + `onelake_notebook_run` job |
+| `dagster/Dockerfile_user_code` | 加装 papermill + nbconvert + ipykernel |
+| `superset/superset_config.py` | EMBEDDED_SUPERSET + GUEST_TOKEN_JWT + CORS + TALISMAN frame-ancestors |
+| `docker-compose.yml` | 新增 `jupyterhub` 服务 + Superset 嵌入开关 + `jupyterdata` volume |
+
+### 关键架构合规（v1.1 评审硬约束落地）
+
+| 评审要求 | 落地点 |
+|----------|--------|
+| 脱敏完全下推 Trino | `SqlBuilder.compose()` 在拼 SELECT 时注入 mask 表达式；不在 Java 层做行后处理 |
+| 公开分享 × row_filter 硬校验 | `SharePublishService.publish()` 在签 shareToken 前 verify 所有绑定数据集 row_filter 为空 |
+| Superset 数据源 tenant_id 前置校验 | `SupersetEmbedService.verifyDatasourceHasTenantColumn()` 签发 guest token 前调用 |
+| Notebook 状态回写单向 | `NotebookRunSyncScheduler` 每 30s 轮询 Dagster；30min 超时兜底置 FAILED；Dagster 不反调控制面 |
+| 同数据集多组件 single-flight | `DatasetQueryService` Redis SETNX + 进程内 ReentrantLock |
+| Dashboard 版本化 | `dashboard.version` 乐观锁 + `publication.is_current` unique index |
+| 公开通道独立布局 | `/share/screen/:token` 不挂 `<App />` layout |
+| Outbox 事件常量化 | 6 个新事件通过 `DomainEvents` 常量发布，避免 magic string |
+
+### 单元测试（32 个全绿）
+
+```
+Tests run: 32, Failures: 0, Errors: 0, Skipped: 0
+- SqlBuilderTest                   (12)  脱敏下推 + 聚合 + 筛选 + row_filter + 边界
+- DatasetQueryServiceTest           (6)  API 分支 + Trino 缓存 + single-flight + 慢查询 + query_log 异步
+- SharePublishServiceTest           (5)  公开 × row_filter 硬校验 + 过期 + 非公开
+- NotebookArtifactServiceTest       (3)  幂等 + 默认密级 + Outbox
+- SupersetEmbedServiceTest          (3)  tenant_id 校验 + Superset 不可达降级
+- DashboardServiceTest              (4)  乐观锁 + 创建 + 不存在
+```
+
+### 验收命令
+
+```bash
+# 后端
+mvn -pl module-analytics test -Djacoco.skip=true   # → BUILD SUCCESS, 32 个测试通过
+
+# 前端
+cd web-console && pnpm exec tsc --noEmit && pnpm build   # → 0 错误，7 个新 chunk
+
+# Python SDK（语法校验）
+cd jupyter && python3 -c "import ast; ast.parse(open('onelake/api.py').read())"
+```
+
+---
+
+✅ **项目初始化阶段交付完成。可执行 `make dev` 一键拉起。数据分析模块（P1-P4d）端到端闭环已就绪，下一步建议见 §十六。**

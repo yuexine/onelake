@@ -45,7 +45,7 @@ export const assetValue = [
 // 闲置资产
 export const idleAssets = [
   { asset: 'ods.ods_tmp_2024', lastAccess: '180 天前', downstream: 0, suggestion: '建议下线' },
-  { asset: 'dwd.dwd_legacy_df', lastAccess: '120 天前', downstream: 0, suggestion: '建议下线' },
+  { asset: 'dwd.dwd_unused_df', lastAccess: '120 天前', downstream: 0, suggestion: '建议下线' },
   { asset: 'dws.dws_old_report', lastAccess: '95 天前', downstream: 1, suggestion: '需确认下游' },
 ];
 

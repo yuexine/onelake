@@ -1,12 +1,14 @@
 /**
- * 业务术语表（对应原型 §8.6.4 升级版）。
+ * 业务术语表（台账化重构版）。
  */
 import {
   App as AntdApp,
   Alert,
   Button,
   Col,
-  Collapse,
+  Descriptions,
+  Drawer,
+  Dropdown,
   Form,
   Grid,
   Input,
@@ -15,27 +17,27 @@ import {
   Select,
   Space,
   Table,
+  Tabs,
   Tag,
-  Tree,
   Typography,
 } from "antd";
+import type { MenuProps, TabsProps } from "antd";
 import {
   ApiOutlined,
-  ApartmentOutlined,
   BookOutlined,
   CheckCircleOutlined,
   DatabaseOutlined,
   EditOutlined,
   LinkOutlined,
+  MoreOutlined,
   PlusOutlined,
   SafetyCertificateOutlined,
   SearchOutlined,
   SendOutlined,
   StopOutlined,
-  WarningOutlined,
 } from "@ant-design/icons";
-import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { CatalogAPI, GlossaryAPI, ModelingAPI } from "../../api";
 import { PageHeader, SectionCard, StateView } from "../../components";
@@ -50,7 +52,7 @@ import type {
   SubjectDomain,
 } from "../../types";
 
-const { Text } = Typography;
+const { Text, Paragraph } = Typography;
 const { useBreakpoint } = Grid;
 
 const STATUS_LABEL: Record<string, string> = {
@@ -72,10 +74,10 @@ const STATUS_COLOR: Record<string, string> = {
 };
 
 const STATUS_HINT: Record<string, string> = {
-  DRAFT: "还未启用，先补齐定义和口径，再提交确认",
-  REVIEWING: "正在等待负责人确认，确认后才能被其他模块正式继承",
-  APPROVED: "已启用，可被目录、建模、质量规则、安全和 API 使用",
-  REJECTED: "已退回，修改后可以重新提交",
+  DRAFT: "还未启用，补齐定义和口径后可提交确认",
+  REVIEWING: "等待负责人确认，确认后可被其他模块正式继承",
+  APPROVED: "已启用，可被目录、建模、质量、安全和 API 使用",
+  REJECTED: "已退回，修改后可重新提交",
   DEPRECATED: "已停用，保留历史影响面，避免继续使用",
   ARCHIVED: "已归档，仅用于历史追溯",
 };
@@ -86,6 +88,8 @@ const SOURCE_LABEL: Record<string, string> = {
   CATALOG: "目录同步",
   QUALITY: "质量引用",
   DATASERVICE: "API 继承",
+  IMPORT: "导入",
+  SUGGESTED: "系统建议",
 };
 
 const RELATION_LABEL: Record<string, string> = {
@@ -100,6 +104,15 @@ const SENSITIVITY_LABEL: Record<string, string> = {
   L3: "L3 敏感",
   L4: "L4 机密",
 };
+
+const STATUS_FILTERS = [
+  { label: "全部状态", value: "ALL" },
+  { label: "草稿", value: "DRAFT" },
+  { label: "待审定", value: "REVIEWING" },
+  { label: "已审定", value: "APPROVED" },
+  { label: "已退回", value: "REJECTED" },
+  { label: "已废弃", value: "DEPRECATED" },
+];
 
 function statusText(status?: string) {
   return STATUS_LABEL[status || ""] || status || "-";
@@ -123,6 +136,10 @@ function sourceText(value?: string) {
   return SOURCE_LABEL[value || ""] || value || "-";
 }
 
+function sensitivityText(value?: string) {
+  return value ? SENSITIVITY_LABEL[value] || value : "未设密级";
+}
+
 function splitTags(value?: string) {
   if (!value) return [];
   return value
@@ -138,47 +155,103 @@ function formatChangeValue(value: unknown) {
   return String(value);
 }
 
-function MetricTile({
-  icon,
+function formatTime(value?: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function termBindingCount(item: BusinessTerm) {
+  return item.bindingCount ?? item.bindings?.length ?? 0;
+}
+
+type TermQueryFilters = {
+  keyword?: string;
+  statusFilter?: string;
+  domainFilter?: string;
+};
+
+function SummaryPill({
   label,
   value,
-  helper,
-  tone = "default",
+  tone,
 }: {
-  icon: ReactNode;
   label: string;
-  value: ReactNode;
-  helper?: ReactNode;
-  tone?: "default" | "success" | "warning";
+  value: number | string;
+  tone?: "brand" | "success" | "warning";
 }) {
-  const toneStyle =
+  const palette =
     tone === "success"
       ? {
-          background: "var(--ol-success-soft)",
-          color: "var(--ol-success)",
-          borderColor: "#BBF7D0",
+          bg: "var(--ol-success-soft)",
+          border: "#BBF7D0",
+          fg: "var(--ol-success)",
         }
       : tone === "warning"
         ? {
-            background: "var(--ol-warning-soft)",
-            color: "#B45309",
-            borderColor: "#FDE68A",
+            bg: "var(--ol-warning-soft)",
+            border: "#FDE68A",
+            fg: "#B45309",
           }
         : {
-            background: "var(--ol-fill-soft)",
-            color: "var(--ol-brand)",
-            borderColor: "var(--ol-line-soft)",
+            bg: "var(--ol-fill-soft)",
+            border: "var(--ol-line-soft)",
+            fg: "var(--ol-brand)",
           };
   return (
     <div
       style={{
-        display: "flex",
-        gap: 10,
-        minHeight: 76,
-        padding: 12,
-        border: `1px solid ${toneStyle.borderColor}`,
+        minWidth: 112,
+        padding: "8px 10px",
         borderRadius: 8,
-        background: toneStyle.background,
+        border: `1px solid ${palette.border}`,
+        background: palette.bg,
+      }}
+    >
+      <div style={{ fontSize: 11, color: "var(--ol-ink-3)" }}>{label}</div>
+      <div
+        style={{
+          marginTop: 3,
+          fontSize: 18,
+          lineHeight: 1.1,
+          fontWeight: 700,
+          color: palette.fg,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function MiniMetric({
+  icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: number;
+  tone?: "warning";
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        minHeight: 58,
+        padding: "10px 12px",
+        border: "1px solid var(--ol-line-soft)",
+        borderRadius: 8,
+        background: tone === "warning" ? "var(--ol-warning-soft)" : "#fff",
       }}
     >
       <span
@@ -189,66 +262,26 @@ function MetricTile({
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
-          color: toneStyle.color,
-          background: "rgba(255,255,255,0.72)",
+          color: tone === "warning" ? "#B45309" : "var(--ol-brand)",
+          background: "var(--ol-fill-soft)",
           flexShrink: 0,
         }}
       >
         {icon}
       </span>
-      <div style={{ minWidth: 0 }}>
-        <div
-          style={{ fontSize: 12, color: "var(--ol-ink-3)", lineHeight: 1.3 }}
-        >
-          {label}
-        </div>
+      <div>
+        <div style={{ fontSize: 12, color: "var(--ol-ink-3)" }}>{label}</div>
         <div
           style={{
-            marginTop: 3,
-            fontSize: 20,
+            marginTop: 2,
+            fontSize: 18,
             fontWeight: 700,
+            lineHeight: 1.1,
             color: "var(--ol-ink)",
-            lineHeight: 1.2,
           }}
         >
           {value}
         </div>
-        {helper && (
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 12,
-              color: "var(--ol-ink-3)",
-              lineHeight: 1.35,
-            }}
-          >
-            {helper}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function InfoBlock({
-  label,
-  children,
-}: {
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <div>
-      <Text style={{ color: "var(--ol-ink-3)", fontSize: 12 }}>{label}</Text>
-      <div
-        style={{
-          marginTop: 5,
-          fontSize: 13,
-          color: "var(--ol-ink)",
-          lineHeight: 1.6,
-        }}
-      >
-        {children || "-"}
       </div>
     </div>
   );
@@ -258,16 +291,22 @@ export default function Glossary() {
   const { message } = AntdApp.useApp();
   const screens = useBreakpoint();
   const compactLayout = !screens.md;
+
   const [terms, setTerms] = useState<BusinessTerm[]>([]);
-  const [term, setTerm] = useState<BusinessTerm>();
+  const [selectedTerm, setSelectedTerm] = useState<BusinessTerm>();
   const [impact, setImpact] = useState<BusinessTermImpact>();
   const [versions, setVersions] = useState<BusinessTermVersion[]>([]);
   const [versionDiff, setVersionDiff] = useState<BusinessTermVersionDiff>();
   const [domains, setDomains] = useState<SubjectDomain[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [keyword, setKeyword] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [domainFilter, setDomainFilter] = useState("ALL");
+  const [ownerFilter, setOwnerFilter] = useState("ALL");
   const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loadError, setLoadError] = useState<string>();
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [termModalOpen, setTermModalOpen] = useState(false);
   const [bindingModalOpen, setBindingModalOpen] = useState(false);
   const [editingTerm, setEditingTerm] = useState<BusinessTerm>();
@@ -276,42 +315,75 @@ export default function Glossary() {
   const [termForm] = Form.useForm();
   const [bindingForm] = Form.useForm();
 
-  const loadTermContext = async (id: string) => {
-    const [detail, nextImpact, nextVersions, nextDiff] = await Promise.all([
-      GlossaryAPI.getTerm(id),
-      GlossaryAPI.termImpact(id),
-      GlossaryAPI.termVersions(id),
-      GlossaryAPI.termVersionDiff(id),
-    ]);
-    setTerms((current) =>
-      current.map((item) => (item.id === detail.id ? detail : item)),
-    );
-    setTerm(detail);
-    setImpact(nextImpact);
-    setVersions(nextVersions);
-    setVersionDiff(nextDiff);
+  const activeBindings = (selectedTerm?.bindings || []).filter(
+    (item) => item.status === "ACTIVE",
+  );
+  const canSubmit =
+    selectedTerm?.status === "DRAFT" || selectedTerm?.status === "REJECTED";
+  const canApprove = selectedTerm?.status === "REVIEWING";
+  const canDeprecate =
+    !!selectedTerm &&
+    selectedTerm.status !== "DEPRECATED" &&
+    selectedTerm.status !== "ARCHIVED";
+
+  const loadTermContext = async (id: string, openDrawer = false) => {
+    setDetailLoading(true);
+    try {
+      const [detail, nextImpact, nextVersions, nextDiff] = await Promise.all([
+        GlossaryAPI.getTerm(id),
+        GlossaryAPI.termImpact(id),
+        GlossaryAPI.termVersions(id),
+        GlossaryAPI.termVersionDiff(id),
+      ]);
+      setTerms((current) =>
+        current.map((item) => (item.id === detail.id ? detail : item)),
+      );
+      setSelectedTerm(detail);
+      setImpact(nextImpact);
+      setVersions(nextVersions);
+      setVersionDiff(nextDiff);
+      if (openDrawer) setDrawerOpen(true);
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
-  const loadData = async (preferredId?: string) => {
+  const loadData = async (
+    preferredId?: string,
+    overrides: TermQueryFilters = {},
+  ) => {
     setLoading(true);
     setLoadError(undefined);
     try {
+      const nextKeyword = overrides.keyword ?? keyword;
+      const nextStatus = overrides.statusFilter ?? statusFilter;
+      const nextDomain = overrides.domainFilter ?? domainFilter;
+      const params = {
+        ...(nextKeyword.trim() ? { keyword: nextKeyword.trim() } : {}),
+        ...(nextStatus !== "ALL" ? { status: nextStatus } : {}),
+        ...(nextDomain !== "ALL" ? { domainId: nextDomain } : {}),
+      };
       const [nextTerms, nextDomains, nextAssets] = await Promise.all([
-        GlossaryAPI.listTerms(keyword ? { keyword } : undefined),
+        GlossaryAPI.listTerms(params),
         ModelingAPI.listDomains(),
         CatalogAPI.listAssets(),
       ]);
       setTerms(nextTerms);
       setDomains(nextDomains);
       setAssets(nextAssets);
-      const nextId = preferredId || term?.id || nextTerms[0]?.id;
+      const nextId =
+        preferredId ||
+        (selectedTerm && nextTerms.some((item) => item.id === selectedTerm.id)
+          ? selectedTerm.id
+          : nextTerms[0]?.id);
       if (nextId) {
         await loadTermContext(nextId);
       } else {
-        setTerm(undefined);
+        setSelectedTerm(undefined);
         setImpact(undefined);
         setVersions([]);
         setVersionDiff(undefined);
+        setDrawerOpen(false);
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : "业务术语加载失败";
@@ -327,119 +399,22 @@ export default function Glossary() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const treeData = useMemo(() => {
-    const byDomain = new Map<string, BusinessTerm[]>();
-    terms.forEach((item) => {
-      const key = item.domainName || "未归属";
-      byDomain.set(key, [...(byDomain.get(key) || []), item]);
-    });
-    return Array.from(byDomain.entries()).map(([domain, items]) => ({
-      title: <Text strong>{domain}</Text>,
-      key: `domain:${domain}`,
-      children: items.map((item) => ({
-        title: compactLayout ? (
-          <div style={{ minWidth: 0, padding: "2px 0" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                minWidth: 0,
-                flexWrap: "wrap",
-              }}
-            >
-              <Text
-                strong
-                className="ol-truncate"
-                style={{ fontSize: 13, maxWidth: "100%" }}
-              >
-                {item.name}
-              </Text>
-              <Tag
-                color={statusColor(item.status)}
-                style={{ margin: 0, flexShrink: 0 }}
-              >
-                {statusText(item.status)}
-              </Tag>
-            </div>
-            <div
-              style={{ marginTop: 2, fontSize: 11, color: "var(--ol-ink-3)" }}
-            >
-              {item.bindingCount ?? item.bindings?.length ?? 0} 个字段
-            </div>
-          </div>
-        ) : (
-          <div style={{ minWidth: 0, padding: "2px 0" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                minWidth: 0,
-                flexWrap: "wrap",
-              }}
-            >
-              <Text
-                strong
-                className="ol-truncate"
-                style={{ fontSize: 13, maxWidth: "100%" }}
-              >
-                {item.name}
-              </Text>
-              <Tag
-                color={statusColor(item.status)}
-                style={{ margin: 0, flexShrink: 0 }}
-              >
-                {statusText(item.status)}
-              </Tag>
-            </div>
-            <div
-              style={{
-                marginTop: 2,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                color: "var(--ol-ink-3)",
-                flexWrap: "wrap",
-              }}
-            >
-              <Text
-                code
-                style={{
-                  fontSize: 11,
-                  whiteSpace: "normal",
-                  wordBreak: "break-all",
-                }}
-              >
-                {item.code}
-              </Text>
-              <span style={{ fontSize: 11 }}>
-                {item.bindingCount ?? item.bindings?.length ?? 0} 个字段
-              </span>
-            </div>
-          </div>
-        ),
-        key: item.id,
-      })),
-    }));
-  }, [compactLayout, terms]);
+  const ownerOptions = useMemo(() => {
+    const names = Array.from(
+      new Set(terms.map((item) => item.ownerName).filter(Boolean)),
+    ) as string[];
+    return [
+      { label: "全部负责人", value: "ALL" },
+      ...names.map((name) => ({ label: name, value: name })),
+    ];
+  }, [terms]);
+
+  const filteredTerms = useMemo(() => {
+    if (ownerFilter === "ALL") return terms;
+    return terms.filter((item) => item.ownerName === ownerFilter);
+  }, [ownerFilter, terms]);
 
   const selectedAsset = assets.find((asset) => asset.fqn === selectedAssetFqn);
-  const activeBindings = (term?.bindings || []).filter(
-    (item) => item.status === "ACTIVE",
-  );
-  const warningCount = impact?.warnings?.length || 0;
-  const canSubmit = term?.status === "DRAFT" || term?.status === "REJECTED";
-  const canApprove = term?.status === "REVIEWING";
-  const canDeprecate =
-    !!term && term.status !== "DEPRECATED" && term.status !== "ARCHIVED";
-  const impactScore = impact?.impactScore ?? 0;
-  const linkedCount =
-    activeBindings.length +
-    (impact?.downstreamAssets?.length || 0) +
-    (impact?.qualityRules?.length || 0) +
-    (impact?.apis?.length || 0) +
-    (impact?.securityNotices?.length || 0);
 
   const openCreate = () => {
     setEditingTerm(undefined);
@@ -448,7 +423,7 @@ export default function Glossary() {
     setTermModalOpen(true);
   };
 
-  const openEdit = () => {
+  const openEdit = (term = selectedTerm) => {
     if (!term) return;
     setEditingTerm(term);
     termForm.setFieldsValue({
@@ -486,6 +461,7 @@ export default function Glossary() {
       message.success(editingTerm ? "术语已更新" : "术语已创建");
       setTermModalOpen(false);
       await loadData(saved.id);
+      await loadTermContext(saved.id, true);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "术语保存失败");
     } finally {
@@ -493,7 +469,10 @@ export default function Glossary() {
     }
   };
 
-  const runAction = async (action: "submit" | "approve" | "deprecate") => {
+  const runAction = async (
+    action: "submit" | "approve" | "deprecate" | "reject",
+    term = selectedTerm,
+  ) => {
     if (!term) return;
     setSaving(true);
     try {
@@ -502,15 +481,19 @@ export default function Glossary() {
           ? await GlossaryAPI.submitTerm(term.id)
           : action === "approve"
             ? await GlossaryAPI.approveTerm(term.id)
-            : await GlossaryAPI.deprecateTerm(term.id);
-      setTerm(next);
+            : action === "reject"
+              ? await GlossaryAPI.rejectTerm(term.id)
+              : await GlossaryAPI.deprecateTerm(term.id);
       await loadData(next.id);
+      await loadTermContext(next.id, drawerOpen);
       message.success(
         action === "submit"
-          ? "已提交审定"
+          ? "已提交启用"
           : action === "approve"
-            ? "已审定"
-            : "已标记废弃",
+            ? "已确认启用"
+            : action === "reject"
+              ? "已退回"
+              : "已停用",
       );
     } catch (error) {
       message.error(error instanceof Error ? error.message : "操作失败");
@@ -520,49 +503,513 @@ export default function Glossary() {
   };
 
   const saveBinding = async () => {
-    if (!term) return;
+    if (!selectedTerm) return;
     const values = await bindingForm.validateFields();
     const asset = assets.find((item) => item.fqn === values.assetFqn);
     setSaving(true);
     try {
-      await GlossaryAPI.bindTerm(term.id, {
+      await GlossaryAPI.bindTerm(selectedTerm.id, {
         assetId: asset?.id,
         assetFqn: values.assetFqn,
         columnName: values.columnName,
         relationType: values.relationType || "DEFINES",
         source: "MANUAL",
       });
-      message.success("关联字段已保存");
+      message.success("字段已绑定");
       setBindingModalOpen(false);
       bindingForm.resetFields();
       setSelectedAssetFqn(undefined);
-      const next = await GlossaryAPI.getTerm(term.id);
-      setTerm(next);
-      await loadData(term.id);
+      await loadData(selectedTerm.id);
+      await loadTermContext(selectedTerm.id, true);
     } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : "关联字段保存失败",
-      );
+      message.error(error instanceof Error ? error.message : "字段绑定失败");
     } finally {
       setSaving(false);
     }
   };
 
   const removeBinding = async (binding: BusinessTermBinding) => {
-    if (!term) return;
+    if (!selectedTerm) return;
     setSaving(true);
     try {
       await GlossaryAPI.removeBinding(binding.id);
-      message.success("关联字段已移除");
-      const next = await GlossaryAPI.getTerm(term.id);
-      setTerm(next);
-      await loadData(term.id);
+      message.success("字段绑定已移除");
+      await loadData(selectedTerm.id);
+      await loadTermContext(selectedTerm.id, true);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "移除关联失败");
+      message.error(error instanceof Error ? error.message : "移除绑定失败");
     } finally {
       setSaving(false);
     }
   };
+
+  const resetFilters = () => {
+    setKeyword("");
+    setStatusFilter("ALL");
+    setDomainFilter("ALL");
+    setOwnerFilter("ALL");
+    void loadData(undefined, {
+      keyword: "",
+      statusFilter: "ALL",
+      domainFilter: "ALL",
+    });
+  };
+
+  const primaryAction = (item: BusinessTerm) => {
+    if (item.status === "DRAFT" || item.status === "REJECTED") {
+      return (
+        <Button
+          type="link"
+          size="small"
+          icon={<SendOutlined />}
+          onClick={() => runAction("submit", item)}
+        >
+          提交启用
+        </Button>
+      );
+    }
+    if (item.status === "REVIEWING") {
+      return (
+        <Button
+          type="link"
+          size="small"
+          icon={<CheckCircleOutlined />}
+          onClick={() => runAction("approve", item)}
+        >
+          确认启用
+        </Button>
+      );
+    }
+    if (item.status === "DEPRECATED") {
+      return (
+        <Button
+          type="link"
+          size="small"
+          onClick={() => loadTermContext(item.id, true)}
+        >
+          查看影响
+        </Button>
+      );
+    }
+    return (
+      <Button type="link" size="small" onClick={() => openEdit(item)}>
+        修改
+      </Button>
+    );
+  };
+
+  const moreMenu = (item: BusinessTerm): MenuProps => ({
+    items: [
+      { key: "view", label: "查看详情" },
+      { key: "edit", label: "修改术语" },
+      { type: "divider" },
+      {
+        key: "submit",
+        label: "提交启用",
+        disabled: !(item.status === "DRAFT" || item.status === "REJECTED"),
+      },
+      {
+        key: "approve",
+        label: "确认启用",
+        disabled: item.status !== "REVIEWING",
+      },
+      {
+        key: "reject",
+        label: "退回",
+        disabled: item.status !== "REVIEWING",
+      },
+      {
+        key: "deprecate",
+        label: "停用术语",
+        danger: true,
+        disabled: item.status === "DEPRECATED" || item.status === "ARCHIVED",
+      },
+    ],
+    onClick: ({ key }) => {
+      if (key === "view") void loadTermContext(item.id, true);
+      if (key === "edit") openEdit(item);
+      if (key === "submit") void runAction("submit", item);
+      if (key === "approve") void runAction("approve", item);
+      if (key === "reject") void runAction("reject", item);
+      if (key === "deprecate") void runAction("deprecate", item);
+    },
+  });
+
+  const drawerTabs: TabsProps["items"] = [
+    {
+      key: "overview",
+      label: "概览",
+      children: selectedTerm && (
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <Descriptions
+            column={1}
+            size="small"
+            styles={{ label: { width: 96, color: "var(--ol-ink-3)" } }}
+          >
+            <Descriptions.Item label="业务定义">
+              <Paragraph style={{ margin: 0 }}>
+                {selectedTerm.definition || "未填写定义"}
+              </Paragraph>
+            </Descriptions.Item>
+            <Descriptions.Item label="取值口径">
+              {selectedTerm.caliberSql ? (
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: 10,
+                    borderRadius: 6,
+                    border: "1px solid var(--ol-line-soft)",
+                    background: "var(--ol-fill-soft)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontSize: 12,
+                  }}
+                >
+                  {selectedTerm.caliberSql}
+                </pre>
+              ) : (
+                "未填写口径"
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="负责人">
+              {selectedTerm.ownerName || "未指定"}
+            </Descriptions.Item>
+            <Descriptions.Item label="数据密级">
+              <Tag
+                color={
+                  selectedTerm.sensitivityLevel === "L3" ||
+                  selectedTerm.sensitivityLevel === "L4"
+                    ? "warning"
+                    : "default"
+                }
+              >
+                {sensitivityText(selectedTerm.sensitivityLevel)}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="同义词">
+              {(selectedTerm.synonyms || []).length ? (
+                <Space wrap size={4}>
+                  {selectedTerm.synonyms.map((item) => (
+                    <span key={item} className="ol-chip">
+                      {item}
+                    </span>
+                  ))}
+                </Space>
+              ) : (
+                "暂无"
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="标签">
+              {(selectedTerm.tags || []).length ? (
+                <Space wrap size={4}>
+                  {selectedTerm.tags.map((item) => (
+                    <Tag key={item} style={{ margin: 0 }}>
+                      {item}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                "暂无"
+              )}
+            </Descriptions.Item>
+          </Descriptions>
+        </Space>
+      ),
+    },
+    {
+      key: "bindings",
+      label: `字段绑定 (${activeBindings.length})`,
+      children: (
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Button
+            size="small"
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setBindingModalOpen(true)}
+            disabled={!selectedTerm}
+          >
+            绑定字段
+          </Button>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            scroll={{ x: "max-content" }}
+            locale={{ emptyText: "暂无绑定字段" }}
+            dataSource={activeBindings}
+            columns={[
+              {
+                title: "字段",
+                render: (_: unknown, binding: BusinessTermBinding) => (
+                  <Link
+                    to={
+                      binding.assetId
+                        ? `/catalog/assets/${binding.assetId}?tab=schema&column=${binding.columnName || ""}`
+                        : `/catalog/search?keyword=${binding.assetFqn}`
+                    }
+                  >
+                    <Text code style={{ fontSize: 12 }}>
+                      {binding.columnName
+                        ? `${binding.assetFqn}.${binding.columnName}`
+                        : binding.assetFqn}
+                    </Text>
+                  </Link>
+                ),
+              },
+              {
+                title: "关系",
+                dataIndex: "relationType",
+                width: 100,
+                render: relationText,
+              },
+              {
+                title: "来源",
+                dataIndex: "source",
+                width: 100,
+                render: sourceText,
+              },
+              {
+                title: "",
+                width: 64,
+                render: (_: unknown, binding: BusinessTermBinding) => (
+                  <Button
+                    type="link"
+                    size="small"
+                    danger
+                    onClick={() => removeBinding(binding)}
+                  >
+                    移除
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </Space>
+      ),
+    },
+    {
+      key: "impact",
+      label: "影响范围",
+      children: (
+        <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          {(impact?.warnings || []).length ? (
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              {impact?.warnings.map((warning) => (
+                <Alert
+                  key={warning}
+                  type="warning"
+                  showIcon
+                  message={warning}
+                />
+              ))}
+            </Space>
+          ) : (
+            <Alert type="success" showIcon message="暂无阻断风险" />
+          )}
+          <Row gutter={[10, 10]}>
+            <Col span={12}>
+              <MiniMetric
+                icon={<DatabaseOutlined />}
+                label="下游资产"
+                value={impact?.downstreamAssets?.length || 0}
+              />
+            </Col>
+            <Col span={12}>
+              <MiniMetric
+                icon={<CheckCircleOutlined />}
+                label="质量规则"
+                value={impact?.qualityRules?.length || 0}
+              />
+            </Col>
+            <Col span={12}>
+              <MiniMetric
+                icon={<ApiOutlined />}
+                label="DaaS API"
+                value={impact?.apis?.length || 0}
+              />
+            </Col>
+            <Col span={12}>
+              <MiniMetric
+                icon={<SafetyCertificateOutlined />}
+                label="安全提示"
+                value={impact?.securityNotices?.length || 0}
+                tone={
+                  (impact?.securityNotices?.length || 0) > 0
+                    ? "warning"
+                    : undefined
+                }
+              />
+            </Col>
+          </Row>
+          <Tabs
+            size="small"
+            items={[
+              {
+                key: "assets",
+                label: "资产",
+                children: (
+                  <Table
+                    size="small"
+                    rowKey={(row) => `${row.relation}-${row.fqn}`}
+                    pagination={false}
+                    scroll={{ x: "max-content" }}
+                    locale={{ emptyText: "暂无资产影响" }}
+                    dataSource={impact?.downstreamAssets || []}
+                    columns={[
+                      {
+                        title: "资产",
+                        render: (_: unknown, row) =>
+                          row.id ? (
+                            <Link to={`/catalog/assets/${row.id}`}>
+                              <Text code style={{ fontSize: 12 }}>
+                                {row.fqn}
+                              </Text>
+                            </Link>
+                          ) : (
+                            <Text code style={{ fontSize: 12 }}>
+                              {row.fqn}
+                            </Text>
+                          ),
+                      },
+                      {
+                        title: "关系",
+                        dataIndex: "relation",
+                        width: 96,
+                        render: (value: string) =>
+                          value === "BOUND" ? "已绑定" : "下游",
+                      },
+                    ]}
+                  />
+                ),
+              },
+              {
+                key: "quality",
+                label: "质量",
+                children: (
+                  <Table
+                    size="small"
+                    rowKey="id"
+                    pagination={false}
+                    scroll={{ x: "max-content" }}
+                    locale={{ emptyText: "暂无质量规则引用" }}
+                    dataSource={impact?.qualityRules || []}
+                    columns={[
+                      { title: "规则", dataIndex: "ruleType", width: 120 },
+                      {
+                        title: "字段",
+                        render: (_: unknown, row) =>
+                          row.targetColumn || row.targetFqn || "-",
+                      },
+                    ]}
+                  />
+                ),
+              },
+              {
+                key: "api",
+                label: "API",
+                children: (
+                  <Table
+                    size="small"
+                    rowKey="id"
+                    pagination={false}
+                    scroll={{ x: "max-content" }}
+                    locale={{ emptyText: "暂无 API 引用" }}
+                    dataSource={impact?.apis || []}
+                    columns={[
+                      {
+                        title: "API",
+                        render: (_: unknown, row) => (
+                          <Link to={`/dataservice/apis/${row.id}`}>
+                            <Text code style={{ fontSize: 12 }}>
+                              {row.apiPath}
+                            </Text>
+                          </Link>
+                        ),
+                      },
+                      { title: "状态", dataIndex: "status", width: 90 },
+                    ]}
+                  />
+                ),
+              },
+              {
+                key: "security",
+                label: "安全",
+                children: (
+                  <Table
+                    size="small"
+                    rowKey={(row) => `${row.type}-${row.fqn}`}
+                    pagination={false}
+                    scroll={{ x: "max-content" }}
+                    locale={{ emptyText: "暂无安全提示" }}
+                    dataSource={impact?.securityNotices || []}
+                    columns={[
+                      { title: "提示", dataIndex: "message" },
+                      { title: "级别", dataIndex: "level", width: 72 },
+                      { title: "状态", dataIndex: "status", width: 90 },
+                    ]}
+                  />
+                ),
+              },
+            ]}
+          />
+        </Space>
+      ),
+    },
+    {
+      key: "versions",
+      label: `版本记录 (${versions.length})`,
+      children: (
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            locale={{ emptyText: "暂无历史版本" }}
+            dataSource={versions}
+            columns={[
+              {
+                title: "版本",
+                dataIndex: "version",
+                width: 80,
+                render: (value: number) => <Tag color="blue">v{value}</Tag>,
+              },
+              {
+                title: "变更说明",
+                dataIndex: "changeReason",
+                render: (value?: string) => value || "-",
+              },
+              {
+                title: "时间",
+                dataIndex: "createdAt",
+                width: 120,
+                render: formatTime,
+              },
+            ]}
+          />
+          <Table
+            size="small"
+            rowKey="field"
+            pagination={false}
+            locale={{ emptyText: "暂无最近差异" }}
+            dataSource={versionDiff?.changes || []}
+            columns={[
+              { title: "字段", dataIndex: "field", width: 110 },
+              {
+                title: "变更前",
+                dataIndex: "before",
+                render: formatChangeValue,
+              },
+              {
+                title: "变更后",
+                dataIndex: "after",
+                render: formatChangeValue,
+              },
+            ]}
+          />
+        </Space>
+      ),
+    },
+  ];
 
   return (
     <div className="ol-page">
@@ -570,757 +1017,294 @@ export default function Glossary() {
         icon={<BookOutlined />}
         title="业务术语表"
         subtitle={<span className="ol-chip">数据目录 · L3-2</span>}
-        description="把业务概念维护成统一定义，并绑定到真实字段，让目录、建模、质量、安全和 API 使用同一套口径"
-        meta={[
-          { label: "总术语", value: terms.length },
-          {
-            label: "已审定",
-            value: terms.filter((item) => item.status === "APPROVED").length,
-          },
-          {
-            label: "字段绑定",
-            value: terms.reduce(
-              (sum, item) =>
-                sum + (item.bindingCount ?? item.bindings?.length ?? 0),
-              0,
-            ),
-          },
-        ]}
+        description="以台账方式管理标准业务定义、字段绑定和跨模块影响"
         actions={
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            {compactLayout ? "新建" : "新建标准术语"}
+            新建术语
           </Button>
         }
       />
 
       <SectionCard padded="md">
-        <Space.Compact style={{ width: "100%" }}>
-          <Input
-            prefix={<SearchOutlined style={{ color: "var(--ol-ink-4)" }} />}
-            placeholder="搜索名称、编码、定义、口径或同义词"
-            value={keyword}
-            onChange={(event) => setKeyword(event.target.value)}
-            onPressEnter={() => loadData()}
-          />
-          <Button icon={<SearchOutlined />} onClick={() => loadData()}>
-            {compactLayout ? null : "搜索"}
-          </Button>
-        </Space.Compact>
-      </SectionCard>
-
-      {loading ? (
-        <StateView state="loading" rows={6} />
-      ) : loadError ? (
-        <StateView
-          state="error"
-          title="业务术语加载失败"
-          description={loadError}
-          onRetry={() => loadData()}
-        />
-      ) : terms.length === 0 ? (
-        <StateView
-          state="empty"
-          title="还没有业务术语"
-          description="创建一条标准定义后，再绑定到数据字段，相关字段就能在目录、建模、质量、安全和 API 中复用同一口径。"
-          cta={
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              {compactLayout ? "新建" : "新建标准术语"}
-            </Button>
-          }
-        />
-      ) : (
-        <Row gutter={compactLayout ? [0, 12] : [16, 16]}>
-          <Col xs={24} xl={7} xxl={6}>
-            <SectionCard
-              title="选择术语"
-              subtitle="按业务域分组，点选后查看定义和联动情况"
-              icon={<BookOutlined />}
-              padded="sm"
-            >
-              <Tree
-                defaultExpandAll
-                selectedKeys={term ? [term.id] : []}
-                treeData={treeData}
-                onSelect={async (keys) => {
-                  const id = String(keys[0] || "");
-                  if (!id || id.startsWith("domain:")) return;
-                  try {
-                    await loadTermContext(id);
-                  } catch (error) {
-                    message.error(
-                      error instanceof Error
-                        ? error.message
-                        : "术语详情加载失败",
-                    );
-                  }
-                }}
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+            }}
+          >
+            <Space wrap size={8}>
+              <Input
+                allowClear
+                prefix={<SearchOutlined style={{ color: "var(--ol-ink-4)" }} />}
+                placeholder="搜索名称、编码、定义、同义词"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                onPressEnter={() => loadData()}
+                style={{ width: compactLayout ? 240 : 340 }}
               />
-            </SectionCard>
-          </Col>
-          <Col xs={24} xl={17} xxl={18}>
-            {term ? (
-              <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                <SectionCard
-                  title={
-                    <Space size={8} wrap>
-                      <Text strong style={{ fontSize: 16 }}>
-                        {term.name}
+              <Select
+                value={statusFilter}
+                onChange={setStatusFilter}
+                options={STATUS_FILTERS}
+                style={{ width: 118 }}
+              />
+              <Select
+                value={domainFilter}
+                onChange={setDomainFilter}
+                options={[
+                  { label: "全部业务域", value: "ALL" },
+                  ...domains.map((domain) => ({
+                    label: domain.name,
+                    value: domain.id,
+                  })),
+                ]}
+                style={{ width: 150 }}
+              />
+              <Select
+                value={ownerFilter}
+                onChange={setOwnerFilter}
+                options={ownerOptions}
+                style={{ width: 140 }}
+              />
+              <Button icon={<SearchOutlined />} onClick={() => loadData()}>
+                查询
+              </Button>
+              <Button onClick={resetFilters}>重置</Button>
+            </Space>
+            <Space size={8} wrap>
+              <SummaryPill label="全部术语" value={terms.length} />
+              <SummaryPill
+                label="已审定"
+                value={
+                  terms.filter((item) => item.status === "APPROVED").length
+                }
+                tone="success"
+              />
+              <SummaryPill
+                label="待处理"
+                value={
+                  terms.filter(
+                    (item) =>
+                      item.status === "DRAFT" || item.status === "REVIEWING",
+                  ).length
+                }
+                tone="warning"
+              />
+            </Space>
+          </div>
+
+          {loading ? (
+            <StateView state="loading" rows={7} />
+          ) : loadError ? (
+            <StateView
+              state="error"
+              title="业务术语加载失败"
+              description={loadError}
+              onRetry={() => loadData()}
+            />
+          ) : (
+            <Table
+              rowKey="id"
+              size="middle"
+              dataSource={filteredTerms}
+              loading={loading}
+              pagination={{ pageSize: 12, showSizeChanger: false }}
+              scroll={{ x: 980 }}
+              locale={{
+                emptyText:
+                  terms.length === 0 ? "还没有业务术语" : "没有匹配的业务术语",
+              }}
+              onRow={(record) => ({
+                onClick: () => loadTermContext(record.id, true),
+                style: {
+                  cursor: "pointer",
+                  background:
+                    selectedTerm?.id === record.id
+                      ? "var(--ol-brand-soft)"
+                      : undefined,
+                },
+              })}
+              columns={[
+                {
+                  title: "术语",
+                  width: 270,
+                  fixed: compactLayout ? undefined : "left",
+                  render: (_: unknown, record: BusinessTerm) => (
+                    <Space
+                      direction="vertical"
+                      size={2}
+                      style={{ minWidth: 0 }}
+                    >
+                      <Text strong style={{ color: "var(--ol-ink)" }}>
+                        {record.name}
                       </Text>
                       <Text code style={{ fontSize: 12 }}>
-                        {term.code}
+                        {record.code}
                       </Text>
-                      <Tag
-                        color={statusColor(term.status)}
-                        style={{ margin: 0 }}
-                      >
-                        {statusText(term.status)}
-                      </Tag>
-                      <Tag color="blue" style={{ margin: 0 }}>
-                        {term.domainName || "未归属业务域"}
-                      </Tag>
-                      <Tag style={{ margin: 0 }}>v{term.version}</Tag>
                     </Space>
-                  }
-                  subtitle={statusHint(term.status)}
-                  icon={<BookOutlined />}
-                  extra={
-                    <Space wrap>
-                      <Button
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={openEdit}
-                      >
-                        {compactLayout ? "修改" : "修改术语"}
-                      </Button>
-                      <Button
-                        size="small"
-                        icon={<SendOutlined />}
-                        onClick={() => runAction("submit")}
-                        loading={saving}
-                        disabled={!canSubmit}
-                      >
-                        {compactLayout ? "提交" : "提交启用"}
-                      </Button>
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<CheckCircleOutlined />}
-                        onClick={() => runAction("approve")}
-                        loading={saving}
-                        disabled={!canApprove}
-                      >
-                        {compactLayout ? "启用" : "确认启用"}
-                      </Button>
-                      <Button
-                        size="small"
-                        danger
-                        icon={<StopOutlined />}
-                        onClick={() => runAction("deprecate")}
-                        loading={saving}
-                        disabled={!canDeprecate}
-                      >
-                        {compactLayout ? "停用" : "停用术语"}
-                      </Button>
-                    </Space>
-                  }
-                >
-                  <Row gutter={compactLayout ? [0, 12] : [16, 16]}>
-                    <Col xs={24} lg={16}>
-                      <Space
-                        direction="vertical"
-                        size={14}
-                        style={{ width: "100%" }}
-                      >
-                        <InfoBlock label="业务定义">
-                          {term.definition || (
-                            <Text type="secondary">未填写定义</Text>
-                          )}
-                        </InfoBlock>
-                        <InfoBlock label="计算或取值口径">
-                          {term.caliberSql ? (
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: "8px 10px",
-                                border: "1px solid var(--ol-line-soft)",
-                                borderRadius: 6,
-                                background: "var(--ol-fill-soft)",
-                                whiteSpace: "pre-wrap",
-                                wordBreak: "break-word",
-                                fontSize: 12,
-                                lineHeight: 1.55,
-                              }}
-                            >
-                              {term.caliberSql}
-                            </pre>
-                          ) : (
-                            <Text type="secondary">未填写口径</Text>
-                          )}
-                        </InfoBlock>
-                        <InfoBlock label="同义词和标签">
-                          <Space size={6} wrap>
-                            {(term.synonyms || []).map((item) => (
-                              <span key={`syn-${item}`} className="ol-chip">
-                                {item}
-                              </span>
-                            ))}
-                            {(term.tags || []).map((item) => (
-                              <Tag key={`tag-${item}`} style={{ margin: 0 }}>
-                                {item}
-                              </Tag>
-                            ))}
-                            {!(term.synonyms || []).length &&
-                              !(term.tags || []).length && (
-                                <Text type="secondary">暂无</Text>
-                              )}
-                          </Space>
-                        </InfoBlock>
-                      </Space>
-                    </Col>
-                    <Col xs={24} lg={8}>
-                      <div
-                        style={{
-                          height: "100%",
-                          padding: 14,
-                          border: "1px solid var(--ol-line-soft)",
-                          borderRadius: 8,
-                          background: "var(--ol-fill-soft)",
-                        }}
-                      >
-                        <Text
-                          style={{ color: "var(--ol-ink-3)", fontSize: 12 }}
-                        >
-                          当前可用状态
-                        </Text>
-                        <div style={{ marginTop: 8 }}>
-                          <Tag
-                            color={statusColor(term.status)}
-                            style={{ margin: 0 }}
-                          >
-                            {statusText(term.status)}
-                          </Tag>
-                        </div>
-                        <div
-                          style={{
-                            marginTop: 10,
-                            color: "var(--ol-ink)",
-                            fontSize: 13,
-                            lineHeight: 1.55,
-                          }}
-                        >
-                          {statusHint(term.status)}
-                        </div>
-                        <div
-                          style={{
-                            marginTop: 14,
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: 6,
-                          }}
-                        >
-                          <span className="ol-chip">
-                            负责人 {term.ownerName || "未指定"}
-                          </span>
-                          <span className="ol-chip">
-                            {term.sensitivityLevel
-                              ? SENSITIVITY_LABEL[term.sensitivityLevel] ||
-                                term.sensitivityLevel
-                              : "未设密级"}
-                          </span>
-                        </div>
-                      </div>
-                    </Col>
-                  </Row>
-                </SectionCard>
-
-                <SectionCard
-                  title="绑定到数据字段"
-                  subtitle="这些字段会在目录、建模、质量规则和 API 中继承该术语的定义、口径和密级"
-                  icon={<LinkOutlined />}
-                  extra={
-                    <Button
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={() => setBindingModalOpen(true)}
+                  ),
+                },
+                {
+                  title: "状态",
+                  dataIndex: "status",
+                  width: 105,
+                  filters: STATUS_FILTERS.filter(
+                    (item) => item.value !== "ALL",
+                  ).map((item) => ({
+                    text: item.label,
+                    value: item.value,
+                  })),
+                  onFilter: (value, record) => record.status === value,
+                  render: (value: string) => (
+                    <Tag color={statusColor(value)}>{statusText(value)}</Tag>
+                  ),
+                },
+                {
+                  title: "业务域",
+                  dataIndex: "domainName",
+                  width: 130,
+                  render: (value?: string) => value || "未归属",
+                },
+                {
+                  title: "负责人",
+                  dataIndex: "ownerName",
+                  width: 120,
+                  render: (value?: string) => value || "未指定",
+                },
+                {
+                  title: "密级",
+                  dataIndex: "sensitivityLevel",
+                  width: 110,
+                  render: (value?: string) => sensitivityText(value),
+                },
+                {
+                  title: "绑定字段",
+                  width: 100,
+                  sorter: (a, b) => termBindingCount(a) - termBindingCount(b),
+                  render: (_: unknown, record: BusinessTerm) =>
+                    termBindingCount(record),
+                },
+                {
+                  title: "更新时间",
+                  dataIndex: "updatedAt",
+                  width: 130,
+                  render: formatTime,
+                },
+                {
+                  title: "操作",
+                  width: 180,
+                  fixed: compactLayout ? undefined : "right",
+                  render: (_: unknown, record: BusinessTerm) => (
+                    <Space
+                      size={4}
+                      onClick={(event) => event.stopPropagation()}
                     >
-                      {compactLayout ? "绑定" : "绑定字段"}
-                    </Button>
-                  }
-                >
-                  {activeBindings.length === 0 ? (
-                    <Alert
-                      type="info"
-                      showIcon
-                      message="暂无绑定字段"
-                      description="术语只有绑定到真实字段后，其他模块才能自动识别和复用它。"
-                    />
-                  ) : (
-                    <Table
-                      size="small"
-                      rowKey="id"
-                      pagination={false}
-                      scroll={{ x: "max-content" }}
-                      dataSource={activeBindings}
-                      columns={[
-                        {
-                          title: "数据字段",
-                          render: (
-                            _: unknown,
-                            binding: BusinessTermBinding,
-                          ) => (
-                            <Link
-                              to={
-                                binding.assetId
-                                  ? `/catalog/assets/${binding.assetId}?tab=schema&column=${binding.columnName || ""}`
-                                  : `/catalog/search?keyword=${binding.assetFqn}`
-                              }
-                            >
-                              <Text
-                                code
-                                style={{
-                                  fontSize: 12,
-                                  whiteSpace: "normal",
-                                  wordBreak: "break-all",
-                                }}
-                              >
-                                {binding.columnName
-                                  ? `${binding.assetFqn}.${binding.columnName}`
-                                  : binding.assetFqn}
-                              </Text>
-                            </Link>
-                          ),
-                        },
-                        {
-                          title: "绑定关系",
-                          dataIndex: "relationType",
-                          width: 120,
-                          render: (value: string) => (
-                            <Tag>{relationText(value)}</Tag>
-                          ),
-                        },
-                        {
-                          title: "来源",
-                          dataIndex: "source",
-                          width: 120,
-                          render: (value: string) => sourceText(value),
-                        },
-                        {
-                          title: "操作",
-                          width: 80,
-                          render: (
-                            _: unknown,
-                            binding: BusinessTermBinding,
-                          ) => (
-                            <Button
-                              type="link"
-                              danger
-                              size="small"
-                              onClick={() => removeBinding(binding)}
-                            >
-                              移除
-                            </Button>
-                          ),
-                        },
-                      ]}
-                    />
-                  )}
-                </SectionCard>
+                      {primaryAction(record)}
+                      <Dropdown menu={moreMenu(record)} trigger={["click"]}>
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<MoreOutlined />}
+                        />
+                      </Dropdown>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </Space>
+      </SectionCard>
 
-                <SectionCard
-                  title="联动概览"
-                  subtitle="这里汇总该术语已经影响到的模块，改定义或停用前先看风险提示"
-                  icon={<ApartmentOutlined />}
-                >
-                  <Space
-                    direction="vertical"
-                    size={12}
-                    style={{ width: "100%" }}
-                  >
-                    {warningCount > 0 ? (
-                      <Space
-                        direction="vertical"
-                        size={6}
-                        style={{ width: "100%" }}
-                      >
-                        {impact?.warnings.map((warning) => (
-                          <Alert
-                            key={warning}
-                            type="warning"
-                            showIcon
-                            message={
-                              <span style={{ fontSize: 13 }}>{warning}</span>
-                            }
-                          />
-                        ))}
-                      </Space>
-                    ) : (
-                      <Alert
-                        type="success"
-                        showIcon
-                        message="暂无阻断风险"
-                        description="当前没有待处理审批或高风险影响提示。"
-                      />
-                    )}
-                    <Row gutter={compactLayout ? [0, 10] : [10, 10]}>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<LinkOutlined />}
-                          label="字段"
-                          value={activeBindings.length}
-                          helper="直接绑定"
-                          tone={
-                            activeBindings.length > 0 ? "success" : "default"
-                          }
-                        />
-                      </Col>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<DatabaseOutlined />}
-                          label="下游资产"
-                          value={impact?.downstreamAssets?.length || 0}
-                          helper="含绑定和血缘"
-                        />
-                      </Col>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<CheckCircleOutlined />}
-                          label="质量规则"
-                          value={impact?.qualityRules?.length || 0}
-                          helper="规则引用"
-                        />
-                      </Col>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<ApiOutlined />}
-                          label="API"
-                          value={impact?.apis?.length || 0}
-                          helper="响应字段继承"
-                        />
-                      </Col>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<SafetyCertificateOutlined />}
-                          label="安全"
-                          value={impact?.securityNotices?.length || 0}
-                          helper="密级和脱敏"
-                          tone={
-                            (impact?.securityNotices?.length || 0) > 0
-                              ? "warning"
-                              : "default"
-                          }
-                        />
-                      </Col>
-                      <Col xs={12} md={8} xl={4}>
-                        <MetricTile
-                          icon={<WarningOutlined />}
-                          label="影响分"
-                          value={impactScore}
-                          helper={`${linkedCount} 项联动`}
-                          tone={warningCount > 0 ? "warning" : "default"}
-                        />
-                      </Col>
-                    </Row>
-                  </Space>
-                </SectionCard>
-
-                <SectionCard
-                  title="详细影响与版本"
-                  subtitle="需要修改口径、停用术语或排查影响时再展开查看"
-                  icon={<WarningOutlined />}
-                >
-                  <Collapse
-                    size="small"
-                    bordered={false}
-                    items={[
-                      {
-                        key: "assets",
-                        label: `关联和下游资产 (${impact?.downstreamAssets?.length || 0})`,
-                        children: (
-                          <Table
-                            size="small"
-                            rowKey={(row) => `${row.relation}-${row.fqn}`}
-                            pagination={false}
-                            scroll={{ x: "max-content" }}
-                            locale={{ emptyText: "暂无关联或下游资产" }}
-                            dataSource={impact?.downstreamAssets || []}
-                            columns={[
-                              {
-                                title: "资产",
-                                render: (_: unknown, row) =>
-                                  row.id ? (
-                                    <Link to={`/catalog/assets/${row.id}`}>
-                                      <Text
-                                        code
-                                        style={{
-                                          fontSize: 12,
-                                          whiteSpace: "normal",
-                                          wordBreak: "break-all",
-                                        }}
-                                      >
-                                        {row.fqn}
-                                      </Text>
-                                    </Link>
-                                  ) : (
-                                    <Text
-                                      code
-                                      style={{
-                                        fontSize: 12,
-                                        whiteSpace: "normal",
-                                        wordBreak: "break-all",
-                                      }}
-                                    >
-                                      {row.fqn}
-                                    </Text>
-                                  ),
-                              },
-                              {
-                                title: "名称",
-                                dataIndex: "displayName",
-                                width: 180,
-                                render: (value?: string) => value || "-",
-                              },
-                              {
-                                title: "分层",
-                                dataIndex: "layer",
-                                width: 90,
-                                render: (value?: string) =>
-                                  value ? <Tag>{value}</Tag> : "-",
-                              },
-                              {
-                                title: "关系",
-                                dataIndex: "relation",
-                                width: 110,
-                                render: (value: string) => (
-                                  <Tag
-                                    color={
-                                      value === "BOUND" ? "blue" : "purple"
-                                    }
-                                  >
-                                    {value === "BOUND" ? "已绑定" : "下游"}
-                                  </Tag>
-                                ),
-                              },
-                            ]}
-                          />
-                        ),
-                      },
-                      {
-                        key: "quality-api",
-                        label: `质量规则和 API (${(impact?.qualityRules?.length || 0) + (impact?.apis?.length || 0)})`,
-                        children: (
-                          <Row gutter={compactLayout ? [0, 10] : [10, 10]}>
-                            <Col xs={24} lg={12}>
-                              <Table
-                                size="small"
-                                rowKey="id"
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无质量规则引用" }}
-                                dataSource={impact?.qualityRules || []}
-                                columns={[
-                                  {
-                                    title: "质量规则",
-                                    render: (_: unknown, row) => (
-                                      <Space size={6}>
-                                        <Tag
-                                          color={
-                                            row.enabled ? "green" : "default"
-                                          }
-                                        >
-                                          {row.ruleType}
-                                        </Tag>
-                                        <Text code style={{ fontSize: 12 }}>
-                                          {row.targetColumn || row.targetFqn}
-                                        </Text>
-                                      </Space>
-                                    ),
-                                  },
-                                  {
-                                    title: "级别",
-                                    dataIndex: "severity",
-                                    width: 80,
-                                  },
-                                ]}
-                              />
-                            </Col>
-                            <Col xs={24} lg={12}>
-                              <Table
-                                size="small"
-                                rowKey="id"
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无 API 引用" }}
-                                dataSource={impact?.apis || []}
-                                columns={[
-                                  {
-                                    title: "DaaS API",
-                                    render: (_: unknown, row) => (
-                                      <Link to={`/dataservice/apis/${row.id}`}>
-                                        <Text code style={{ fontSize: 12 }}>
-                                          {row.apiPath}
-                                        </Text>
-                                      </Link>
-                                    ),
-                                  },
-                                  {
-                                    title: "状态",
-                                    dataIndex: "status",
-                                    width: 90,
-                                    render: (value: string) => (
-                                      <Tag>{value}</Tag>
-                                    ),
-                                  },
-                                ]}
-                              />
-                            </Col>
-                          </Row>
-                        ),
-                      },
-                      {
-                        key: "security",
-                        label: `安全提示和审批 (${(impact?.securityNotices?.length || 0) + (impact?.approvals?.length || 0)})`,
-                        children: (
-                          <Row gutter={compactLayout ? [0, 10] : [10, 10]}>
-                            <Col xs={24} lg={12}>
-                              <Table
-                                size="small"
-                                rowKey={(row) => `${row.type}-${row.fqn}`}
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无安全提示" }}
-                                dataSource={impact?.securityNotices || []}
-                                columns={[
-                                  { title: "安全提示", dataIndex: "message" },
-                                  {
-                                    title: "级别",
-                                    dataIndex: "level",
-                                    width: 80,
-                                    render: (value?: string) =>
-                                      value ? (
-                                        <Tag color="error">{value}</Tag>
-                                      ) : (
-                                        "-"
-                                      ),
-                                  },
-                                  {
-                                    title: "状态",
-                                    dataIndex: "status",
-                                    width: 90,
-                                  },
-                                ]}
-                              />
-                            </Col>
-                            <Col xs={24} lg={12}>
-                              <Table
-                                size="small"
-                                rowKey="id"
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无治理审批" }}
-                                dataSource={impact?.approvals || []}
-                                columns={[
-                                  {
-                                    title: "治理审批",
-                                    dataIndex: "requestType",
-                                  },
-                                  {
-                                    title: "状态",
-                                    dataIndex: "status",
-                                    width: 90,
-                                    render: (value: string) => (
-                                      <Tag
-                                        color={
-                                          value === "PENDING"
-                                            ? "processing"
-                                            : "default"
-                                        }
-                                      >
-                                        {value}
-                                      </Tag>
-                                    ),
-                                  },
-                                ]}
-                              />
-                            </Col>
-                          </Row>
-                        ),
-                      },
-                      {
-                        key: "version",
-                        label: `版本和最近变化 (${versions.length})`,
-                        children: (
-                          <Row gutter={compactLayout ? [0, 10] : [10, 10]}>
-                            <Col xs={24} lg={10}>
-                              <Table
-                                size="small"
-                                rowKey="id"
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无历史版本" }}
-                                dataSource={versions}
-                                columns={[
-                                  {
-                                    title: "版本",
-                                    dataIndex: "version",
-                                    width: 80,
-                                    render: (value: number) => (
-                                      <Tag color="blue">v{value}</Tag>
-                                    ),
-                                  },
-                                  {
-                                    title: "变更说明",
-                                    dataIndex: "changeReason",
-                                    render: (value?: string) => value || "-",
-                                  },
-                                ]}
-                              />
-                            </Col>
-                            <Col xs={24} lg={14}>
-                              <Table
-                                size="small"
-                                rowKey="field"
-                                pagination={false}
-                                scroll={{ x: "max-content" }}
-                                locale={{ emptyText: "暂无最近差异" }}
-                                dataSource={versionDiff?.changes || []}
-                                columns={[
-                                  {
-                                    title: "字段",
-                                    dataIndex: "field",
-                                    width: 120,
-                                  },
-                                  {
-                                    title: "变更前",
-                                    dataIndex: "before",
-                                    ellipsis: true,
-                                    render: formatChangeValue,
-                                  },
-                                  {
-                                    title: "变更后",
-                                    dataIndex: "after",
-                                    ellipsis: true,
-                                    render: formatChangeValue,
-                                  },
-                                ]}
-                              />
-                            </Col>
-                          </Row>
-                        ),
-                      },
-                    ]}
-                  />
-                </SectionCard>
+      <Drawer
+        title={
+          selectedTerm ? (
+            <Space direction="vertical" size={2}>
+              <Space size={8} wrap>
+                <Text strong style={{ fontSize: 16 }}>
+                  {selectedTerm.name}
+                </Text>
+                <Tag color={statusColor(selectedTerm.status)}>
+                  {statusText(selectedTerm.status)}
+                </Tag>
               </Space>
-            ) : (
-              <StateView
-                state="empty"
-                title="请选择一个业务术语"
-                description="左侧选择术语后，这里会展示定义、绑定字段和跨模块联动情况。"
-              />
-            )}
-          </Col>
-        </Row>
-      )}
+              <Text code style={{ fontSize: 12 }}>
+                {selectedTerm.code}
+              </Text>
+            </Space>
+          ) : (
+            "术语详情"
+          )
+        }
+        width={compactLayout ? "100%" : 620}
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        extra={
+          selectedTerm && (
+            <Space size={6}>
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => openEdit()}
+              >
+                修改
+              </Button>
+              {canSubmit && (
+                <Button
+                  size="small"
+                  icon={<SendOutlined />}
+                  onClick={() => runAction("submit")}
+                >
+                  提交启用
+                </Button>
+              )}
+              {canApprove && (
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  onClick={() => runAction("approve")}
+                >
+                  确认启用
+                </Button>
+              )}
+              {canDeprecate && (
+                <Button
+                  size="small"
+                  danger
+                  icon={<StopOutlined />}
+                  onClick={() => runAction("deprecate")}
+                >
+                  停用
+                </Button>
+              )}
+            </Space>
+          )
+        }
+      >
+        {detailLoading && !selectedTerm ? (
+          <StateView state="loading" rows={6} />
+        ) : selectedTerm ? (
+          <Space direction="vertical" size={14} style={{ width: "100%" }}>
+            <Alert
+              type={selectedTerm.status === "APPROVED" ? "success" : "info"}
+              showIcon
+              message={statusHint(selectedTerm.status)}
+            />
+            <Tabs items={drawerTabs} />
+          </Space>
+        ) : (
+          <StateView
+            state="empty"
+            title="请选择一个术语"
+            description="从台账中选择术语后，这里会展示定义、字段绑定、影响范围和版本记录。"
+          />
+        )}
+      </Drawer>
 
       <Modal
         open={termModalOpen}
@@ -1334,7 +1318,7 @@ export default function Glossary() {
       >
         <Form form={termForm} layout="vertical" requiredMark="optional">
           <Row gutter={12}>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item
                 label="术语编码"
                 name="code"
@@ -1351,7 +1335,7 @@ export default function Glossary() {
                 />
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item
                 label="显示名称"
                 name="name"
@@ -1362,7 +1346,7 @@ export default function Glossary() {
                 <Input placeholder="如 客户姓名" />
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item label="业务域" name="domainId">
                 <Select
                   allowClear
@@ -1399,19 +1383,19 @@ export default function Glossary() {
             />
           </Form.Item>
           <Row gutter={12}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item label="同义词" name="synonymsText">
                 <Input placeholder="多个词用顿号或逗号分隔" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item label="负责人" name="ownerName">
                 <Input placeholder="填写业务负责人或数据负责人" />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={12}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item label="数据密级建议" name="sensitivityLevel">
                 <Select
                   allowClear
@@ -1423,7 +1407,7 @@ export default function Glossary() {
                 />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item label="标签" name="tagsText">
                 <Input placeholder="如 客户、敏感、主数据" />
               </Form.Item>

@@ -91,7 +91,7 @@ export default function AssetMap() {
           size="middle"
           dataSource={[
             { key: 1, asset: 'ods.ods_tmp_2024', last: '180 天前', downstream: 0 },
-            { key: 2, asset: 'dwd.dwd_legacy_df', last: '120 天前', downstream: 0 },
+            { key: 2, asset: 'dwd.dwd_unused_df', last: '120 天前', downstream: 0 },
           ]}
           pagination={false}
           columns={[

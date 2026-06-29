@@ -55,7 +55,7 @@ export default function Dashboard() {
   const quickActions = [
     { name: '新建连接',     link: '/integration/datasources',     icon: <DatabaseOutlined /> },
     { name: '新建采集任务', link: '/integration/sync-tasks/new',  icon: <SyncOutlined /> },
-    { name: '新建 dbt 模型', link: '/lakehouse/tables',           icon: <DatabaseOutlined /> },
+    { name: '新建治理表',   link: '/lakehouse/tables',            icon: <DatabaseOutlined /> },
     { name: '发布数据 API', link: '/dataservice/apis/new',        icon: <ThunderboltOutlined /> },
     { name: '配置质量规则', link: '/quality/rules',               icon: <CheckCircleOutlined /> },
     { name: '配置脱敏策略', link: '/security/masking',            icon: <AlertOutlined /> },

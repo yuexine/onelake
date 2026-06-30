@@ -71,8 +71,8 @@ class CatalogAssetDetailServiceTest {
             100L,
             2048L,
             List.of(
-                new AssetDTO.AssetColumnDTO("order_id", "BIGINT", "订单号", null, null, null, List.of()),
-                new AssetDTO.AssetColumnDTO("phone", "VARCHAR", "手机号", "L3", "PHONE", "L3", List.of())
+                new AssetDTO.AssetColumnDTO("order_id", "BIGINT", "订单号", null, null, null, false, List.of()),
+                new AssetDTO.AssetColumnDTO("phone", "VARCHAR", "手机号", "L3", "PHONE", "L3", false, List.of())
             ),
             List.of("dt"),
             "ICEBERG",

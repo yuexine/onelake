@@ -2,9 +2,13 @@ package com.onelake.catalog.service;
 
 import com.onelake.catalog.domain.entity.Asset;
 import com.onelake.catalog.domain.entity.LineageEdge;
+import com.onelake.catalog.dto.AssetDTO;
+import com.onelake.catalog.dto.AssetMetadataUpdateRequest;
 import com.onelake.catalog.repository.AssetRepository;
 import com.onelake.catalog.repository.LineageEdgeRepository;
 import com.onelake.common.context.TenantContext;
+import com.onelake.common.exception.BizException;
+import com.onelake.common.util.JsonUtil;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,7 +19,9 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -81,6 +87,91 @@ class CatalogServiceTest {
         when(rowCountResolver.resolve(anyCollection())).thenReturn(Map.of(assetId, 2L));
 
         assertThat(service.listByLayer(null).get(0).rows()).isEqualTo(2L);
+    }
+
+    @Test
+    void updateMetadataPatchesCatalogFieldsWithoutChangingPhysicalSchema() {
+        UUID assetId = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        Asset asset = asset(assetId, "dwd.user_order_wide", 10L);
+        asset.setDescription("旧描述");
+        asset.setDomain("交易");
+        asset.setOwnerName("张三");
+        asset.setTags(JsonUtil.toJson(List.of("旧标签")));
+        asset.setColumns("""
+            [
+              {"name":"order_id","type":"BIGINT","description":"旧订单号","classification":"L2"},
+              {"name":"phone","type":"VARCHAR","description":"旧手机号","classification":"L3","piiType":"PHONE"}
+            ]
+            """);
+        when(assetRepo.findById(assetId)).thenReturn(java.util.Optional.of(asset));
+        when(assetRepo.save(any(Asset.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        AssetDTO updated = service.updateMetadata(assetId, new AssetMetadataUpdateRequest(
+            "用户订单宽表",
+            "用户",
+            "李四",
+            List.of("核心", "用户", "核心"),
+            List.of(
+                new AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest(
+                    "order_id",
+                    "订单主键",
+                    "L1",
+                    null,
+                    null,
+                    true
+                ),
+                new AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest(
+                    "phone",
+                    "收货手机号",
+                    "L4",
+                    "PHONE",
+                    "L4",
+                    false
+                )
+            )
+        ));
+
+        assertThat(updated.description()).isEqualTo("用户订单宽表");
+        assertThat(updated.domain()).isEqualTo("用户");
+        assertThat(updated.ownerName()).isEqualTo("李四");
+        assertThat(updated.tags()).containsExactly("核心", "用户");
+        assertThat(updated.classification()).isEqualTo("L4");
+        assertThat(updated.columns()).hasSize(2);
+        assertThat(updated.columns().get(0).name()).isEqualTo("order_id");
+        assertThat(updated.columns().get(0).type()).isEqualTo("BIGINT");
+        assertThat(updated.columns().get(0).description()).isEqualTo("订单主键");
+        assertThat(updated.columns().get(0).primaryKey()).isTrue();
+        assertThat(updated.columns().get(1).type()).isEqualTo("VARCHAR");
+        assertThat(updated.columns().get(1).description()).isEqualTo("收货手机号");
+        assertThat(updated.columns().get(1).piiType()).isEqualTo("PHONE");
+        assertThat(updated.columns().get(1).suggestLevel()).isEqualTo("L4");
+    }
+
+    @Test
+    void updateMetadataRejectsUnknownColumns() {
+        UUID assetId = UUID.fromString("55555555-5555-5555-5555-555555555555");
+        Asset asset = asset(assetId, "dwd.user_order_wide", 10L);
+        asset.setColumns("""
+            [{"name":"order_id","type":"BIGINT"}]
+            """);
+        when(assetRepo.findById(assetId)).thenReturn(java.util.Optional.of(asset));
+
+        assertThatThrownBy(() -> service.updateMetadata(assetId, new AssetMetadataUpdateRequest(
+            null,
+            null,
+            null,
+            null,
+            List.of(new AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest(
+                "missing_column",
+                "不存在",
+                "L1",
+                null,
+                null,
+                false
+            ))
+        )))
+            .isInstanceOf(BizException.class)
+            .hasMessageContaining("字段不存在");
     }
 
     private LineageEdge edge(String upstream, String downstream) {

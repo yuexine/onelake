@@ -35,6 +35,7 @@ public record AssetDTO(
         String classification,
         String piiType,
         String suggestLevel,
+        Boolean primaryKey,
         List<AssetColumnTermDTO> terms
     ) {}
 

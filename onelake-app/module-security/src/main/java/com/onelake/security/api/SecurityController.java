@@ -110,6 +110,17 @@ public class SecurityController {
     }
 
     @Operation(
+        summary = "提交 Schema 变更申请",
+        description = "用途：为物理字段增删改提交审批单，只登记审批与影响信息，不直接执行 Iceberg DDL。前端对接：SecurityAPI.applySchemaChange，由 TableDetail 的 Schema 变更入口调用。"
+    )
+    @PostMapping("/schema-change-approvals")
+    @PreAuthorize("hasAnyRole('DE','ADMIN')")
+    public ApiResponse<ApprovalRequest> applySchemaChange(@RequestParam String assetFqn,
+                                                          @RequestBody(required = false) Map<String, Object> payload) {
+        return ApiResponse.ok(service.applySchemaChange(assetFqn, payload == null ? Map.of() : payload));
+    }
+
+    @Operation(
         summary = "查询我的审批申请",
         description = "用途：返回当前用户发起或可见的审批申请分页。前端对接：SecurityAPI.myApprovals，由 SqlWorkbench 访问申请状态面板使用。"
     )

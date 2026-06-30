@@ -373,9 +373,51 @@ export interface AssetColumn {
   classification?: Classification;
   piiType?: string;
   suggestLevel?: Classification;
+  primaryKey?: boolean;
   terms?: AssetColumnTerm[];
   upstreamFqn?: string;
   stats?: { nullRate?: number; cardinality?: number; min?: string; max?: string };
+}
+
+export interface AssetColumnMetadataUpdateRequest {
+  name: string;
+  description?: string;
+  classification?: Classification;
+  piiType?: string;
+  suggestLevel?: Classification;
+  primaryKey?: boolean;
+}
+
+export interface AssetMetadataUpdateRequest {
+  description?: string;
+  domain?: string;
+  ownerName?: string;
+  tags?: string[];
+  columns?: AssetColumnMetadataUpdateRequest[];
+}
+
+export type SchemaChangeType = 'ADD_COLUMN' | 'DROP_COLUMN' | 'RENAME_COLUMN' | 'CHANGE_TYPE';
+
+export interface SchemaChangeApprovalRequest {
+  changeType: SchemaChangeType;
+  columnName?: string;
+  dataType?: string;
+  afterName?: string;
+  afterType?: string;
+  nullable?: boolean;
+  reason?: string;
+  beforeColumns?: Array<Pick<AssetColumn, 'name' | 'type' | 'description' | 'classification'>>;
+  impactSummary?: { assets?: number; apis?: number; subscribers?: number };
+}
+
+export interface SchemaChangeExecutionResult {
+  approvalId: UUID;
+  assetFqn: string;
+  changeType: SchemaChangeType;
+  status: 'SUCCEEDED' | 'FAILED' | string;
+  statement?: string;
+  message: string;
+  executedAt?: string;
 }
 
 export interface AssetColumnTerm {

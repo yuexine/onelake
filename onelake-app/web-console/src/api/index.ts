@@ -7,6 +7,9 @@ import type {
   AssetMaintenanceAssessment,
   AssetMaintenanceOperation,
   AssetMaintenanceResult,
+  AssetMetadataUpdateRequest,
+  SchemaChangeApprovalRequest,
+  SchemaChangeExecutionResult,
   ApprovalRequest,
   BusinessTerm,
   BusinessTermBinding,
@@ -432,6 +435,10 @@ export const CatalogAPI = {
     })),
   getAsset: (id: string) => unwrap<Asset>(http.get(`/catalog/assets/${id}`)),
   getAssetDetail: (id: string) => unwrap<AssetDetail>(http.get(`/catalog/assets/${id}/detail`)),
+  updateAssetMetadata: (id: string, payload: AssetMetadataUpdateRequest) =>
+    unwrap<Asset>(http.patch(`/catalog/assets/${id}/metadata`, payload)),
+  executeSchemaChange: (approvalId: string) =>
+    unwrap<SchemaChangeExecutionResult>(http.post(`/catalog/schema-changes/${approvalId}/execute`)),
   createTable: (payload: TableCreateRequest) => unwrap<Asset>(http.post('/catalog/tables', payload)),
   downstream: (fqn: string) => unwrap<string[]>(http.get('/catalog/lineage/downstream', { params: { fqn } })),
   lineageGraph: (fqn: string, direction: 'UP' | 'DOWN' | 'BOTH' = 'BOTH', depth = 3) =>
@@ -615,6 +622,8 @@ export const SecurityAPI = {
     unwrap<PageResult<ApprovalRequest>>(http.get('/security/approvals/processed', { params })),
   applyAccess: (assetFqn: string, payload: Record<string, unknown>) =>
     unwrap<ApprovalRequest>(http.post('/security/approvals', payload, { params: { assetFqn } })),
+  applySchemaChange: (assetFqn: string, payload: SchemaChangeApprovalRequest) =>
+    unwrap<ApprovalRequest>(http.post('/security/schema-change-approvals', payload, { params: { assetFqn } })),
   approveApproval: (approvalId: string, comment?: string) =>
     unwrap<AccessGrant | null>(http.post(`/security/approvals/${approvalId}/approve`, undefined, { params: { comment } })),
   rejectApproval: (approvalId: string, comment?: string) =>

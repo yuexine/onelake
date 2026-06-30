@@ -3,12 +3,12 @@
  * Tab: Schema / 快照 / 优化 / 血缘 / 权限
  */
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { Alert, App as AntdApp, Table, Tag, Space, Button, Typography } from 'antd';
-import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, HistoryOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { Alert, App as AntdApp, Form, Input, Modal, Select, Space, Switch, Table, Tag, Button, Typography } from 'antd';
+import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined, DatabaseOutlined, EditOutlined, HistoryOutlined, InfoCircleOutlined, ReloadOutlined, TableOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { DetailPageLayout, ClassificationBadge, SectionCard, StateView } from '../../components';
-import type { AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, DataModel } from '../../types';
-import { CatalogAPI, ModelingAPI } from '../../api';
+import type { AssetColumn, AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, AssetMetadataUpdateRequest, Classification, DataModel, SchemaChangeApprovalRequest, SchemaChangeType } from '../../types';
+import { CatalogAPI, ModelingAPI, SecurityAPI } from '../../api';
 import { normalizeCatalogAsset } from './assetAdapter';
 import {
   maintenanceFreshnessLabel,
@@ -53,11 +53,66 @@ interface OptimizeRiskRow {
   action: ReactNode;
 }
 
+interface PipelineSourceRow {
+  key: string;
+  upstreamFqn: string;
+  targetFqn: string;
+  jobRef?: string;
+  syncedAt?: string;
+}
+
+interface EditableColumnMetadata {
+  name: string;
+  type: string;
+  description?: string;
+  classification?: Classification;
+  piiType?: string;
+  suggestLevel?: Classification;
+  primaryKey?: boolean;
+}
+
+interface AssetMetadataFormValues {
+  description?: string;
+  domain?: string;
+  ownerName?: string;
+  tags?: string[];
+}
+
+interface SchemaChangeFormValues {
+  changeType: SchemaChangeType;
+  columnName?: string;
+  dataType?: string;
+  afterName?: string;
+  afterType?: string;
+  nullable?: boolean;
+  reason?: string;
+}
+
+const classificationOptions = ['L1', 'L2', 'L3', 'L4'].map((value) => ({ label: value, value }));
+const piiTypeOptions = [
+  { label: '手机号', value: 'PHONE' },
+  { label: '邮箱', value: 'EMAIL' },
+  { label: '身份证', value: 'ID_CARD' },
+  { label: '姓名', value: 'NAME' },
+  { label: '地址', value: 'ADDRESS' },
+  { label: '银行卡', value: 'BANK_CARD' },
+];
+const schemaChangeTypeOptions: Array<{ label: string; value: SchemaChangeType }> = [
+  { label: '新增字段', value: 'ADD_COLUMN' },
+  { label: '删除字段', value: 'DROP_COLUMN' },
+  { label: '重命名字段', value: 'RENAME_COLUMN' },
+  { label: '修改类型', value: 'CHANGE_TYPE' },
+];
+
 function riskLevelColor(level: OptimizeRiskLevel) {
   if (level === 'critical') return 'error';
   if (level === 'warning') return 'warning';
   if (level === 'success') return 'success';
   return 'processing';
+}
+
+function pipelineFilterPath(targetFqn: string) {
+  return `/orchestration/pipelines?${new URLSearchParams({ targetFqn }).toString()}`;
 }
 
 function hasMaintenanceRisk(maintenance: AssetMaintenanceAssessment | undefined, risk: string) {
@@ -92,6 +147,14 @@ export default function TableDetail() {
   const [maintenanceLoading, setMaintenanceLoading] = useState(false);
   const [maintenanceAction, setMaintenanceAction] = useState<AssetMaintenanceOperation | null>(null);
   const [pipelineResolving, setPipelineResolving] = useState(false);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [metadataSaving, setMetadataSaving] = useState(false);
+  const [metadataColumns, setMetadataColumns] = useState<EditableColumnMetadata[]>([]);
+  const [metadataForm] = Form.useForm<AssetMetadataFormValues>();
+  const [schemaChangeOpen, setSchemaChangeOpen] = useState(false);
+  const [schemaChangeSaving, setSchemaChangeSaving] = useState(false);
+  const [schemaChangeForm] = Form.useForm<SchemaChangeFormValues>();
+  const schemaChangeType = Form.useWatch('changeType', schemaChangeForm);
 
   const loadAsset = () => {
     if (!id) return;
@@ -179,8 +242,120 @@ export default function TableDetail() {
     downstreamFqn: edge.downstreamFqn,
     ...column,
   })));
+  const pipelineSourceRows: PipelineSourceRow[] = asset.layer === 'DWD'
+    ? lineage.upstream.map((edge, index) => ({
+      key: `${edge.upstreamFqn}-${edge.downstreamFqn}-${edge.jobRef || index}`,
+      upstreamFqn: edge.upstreamFqn,
+      targetFqn: edge.downstreamFqn,
+      jobRef: edge.jobRef,
+      syncedAt: edge.syncedAt,
+    }))
+    : [];
+  const pipelineJobRefs = Array.from(new Set(pipelineSourceRows.map((row) => row.jobRef).filter(Boolean)));
+  const hasPipelineFallback = asset.layer === 'DWD' && models.length === 0 && pipelineSourceRows.length > 0;
 
   const refreshModeling = () => loadModeling(asset.fqn, asset.layer);
+
+  const openMetadataEditor = () => {
+    metadataForm.setFieldsValue({
+      description: asset.description,
+      domain: asset.domain,
+      ownerName: asset.ownerName === '-' ? undefined : asset.ownerName,
+      tags: asset.tags,
+    });
+    setMetadataColumns(asset.columns.map((column) => ({
+      name: column.name,
+      type: column.type,
+      description: column.description,
+      classification: column.classification,
+      piiType: column.piiType,
+      suggestLevel: column.suggestLevel,
+      primaryKey: column.primaryKey,
+    })));
+    setMetadataOpen(true);
+  };
+
+  const updateMetadataColumn = (name: string, patch: Partial<EditableColumnMetadata>) => {
+    setMetadataColumns((items) => items.map((item) => (
+      item.name === name ? { ...item, ...patch } : item
+    )));
+  };
+
+  const submitMetadata = async () => {
+    const values = await metadataForm.validateFields();
+    const payload: AssetMetadataUpdateRequest = {
+      description: values.description,
+      domain: values.domain,
+      ownerName: values.ownerName,
+      tags: values.tags,
+      columns: metadataColumns.map((column) => ({
+        name: column.name,
+        description: column.description,
+        classification: column.classification,
+        piiType: column.piiType,
+        suggestLevel: column.suggestLevel,
+        primaryKey: column.primaryKey,
+      })),
+    };
+    setMetadataSaving(true);
+    try {
+      await CatalogAPI.updateAssetMetadata(asset.id, payload);
+      message.success('Schema 元数据已保存');
+      setMetadataOpen(false);
+      loadAsset();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : 'Schema 元数据保存失败');
+    } finally {
+      setMetadataSaving(false);
+    }
+  };
+
+  const openSchemaChange = (changeType: SchemaChangeType) => {
+    schemaChangeForm.setFieldsValue({
+      changeType,
+      nullable: true,
+      columnName: undefined,
+      dataType: undefined,
+      afterName: undefined,
+      afterType: undefined,
+      reason: undefined,
+    });
+    setSchemaChangeOpen(true);
+  };
+
+  const submitSchemaChange = async () => {
+    const values = await schemaChangeForm.validateFields();
+    const payload: SchemaChangeApprovalRequest = {
+      changeType: values.changeType,
+      columnName: values.columnName,
+      dataType: values.dataType,
+      afterName: values.afterName,
+      afterType: values.afterType,
+      nullable: values.nullable,
+      reason: values.reason,
+      beforeColumns: asset.columns.map((column) => ({
+        name: column.name,
+        type: column.type,
+        description: column.description,
+        classification: column.classification,
+      })),
+      impactSummary: {
+        assets: Math.max(1, downstreamFqns.length + 1),
+        apis: subscription.apiCount,
+        subscribers: subscription.approvedSubscriptionCount,
+      },
+    };
+    setSchemaChangeSaving(true);
+    try {
+      const approval = await SecurityAPI.applySchemaChange(asset.fqn, payload);
+      message.success(`Schema 变更申请已提交：${approval.id}`);
+      setSchemaChangeOpen(false);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : 'Schema 变更申请提交失败');
+    } finally {
+      setSchemaChangeSaving(false);
+    }
+  };
 
   const handleCompile = async (model: DataModel) => {
     const key = `compile-${model.id}`;
@@ -245,6 +420,55 @@ export default function TableDetail() {
   };
   const freshnessRequiresRun = hasMaintenanceRisk(maintenance, 'FRESHNESS_SLA_BREACHED')
     || hasMaintenanceRisk(maintenance, 'FRESHNESS_UNKNOWN');
+
+  const renderPipelineFallback = () => (
+    <div className="ol-dwd-source-panel">
+      <div className="ol-inline-notice" role="status">
+        <InfoCircleOutlined />
+        <div className="ol-inline-notice__content">
+          <span className="ol-inline-notice__title">流水线来源</span>
+          <span className="ol-inline-notice__desc">
+            当前 DWD 表由流水线产出，暂未绑定建模模型；如需字段映射、编译校验和发布状态，请通过建模向导或回填流程生成 modeling.data_model 记录。
+          </span>
+        </div>
+      </div>
+      <Table<PipelineSourceRow>
+        size="middle"
+        className="ol-dwd-source-table"
+        rowKey="key"
+        dataSource={pipelineSourceRows}
+        pagination={false}
+        columns={[
+          { title: '上游表', dataIndex: 'upstreamFqn', render: (v: string) => <Text code>{v}</Text> },
+          { title: '目标表', dataIndex: 'targetFqn', render: (v: string) => <Text code>{v}</Text> },
+          {
+            title: '最近运行',
+            dataIndex: 'jobRef',
+            render: (v?: string) => v
+              ? <Button size="small" type="link" onClick={() => navigate(`/orchestration/runs/${v}`)}>{v}</Button>
+              : '-',
+          },
+          { title: '血缘同步', dataIndex: 'syncedAt', render: (v?: string) => fmtTime(v) },
+        ]}
+      />
+      <Space className="ol-dwd-action-bar" wrap size={8}>
+        <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => navigate(pipelineFilterPath(asset.fqn))}>
+          查看关联流水线
+        </Button>
+        {pipelineJobRefs.length === 1 && (
+          <Button size="small" icon={<HistoryOutlined />} onClick={() => navigate(`/orchestration/runs/${pipelineJobRefs[0]}`)}>
+            查看最近运行
+          </Button>
+        )}
+        <Button size="small" icon={<BranchesOutlined />} onClick={() => navigate(`/catalog/lineage?fqn=${encodeURIComponent(asset.fqn)}`)}>
+          查看血缘
+        </Button>
+        <Button size="small" icon={<ReloadOutlined />} onClick={refreshModeling}>
+          刷新模型状态
+        </Button>
+      </Space>
+    </div>
+  );
 
   const renderOptimizeTab = () => {
     if (maintenanceLoading && !maintenance) {
@@ -506,13 +730,22 @@ export default function TableDetail() {
 
   const tabs = [
     { key: 'schema', label: 'Schema', children: (
-      <SectionCard title="字段定义" icon={<TableOutlined />} subtitle={`${asset.columns.length} 列`} flatBody>
-        <Table size="middle" rowKey="name" dataSource={asset.columns} pagination={false}
+      <SectionCard
+        title="字段定义"
+        icon={<TableOutlined />}
+        subtitle={`${asset.columns.length} 列`}
+        extra={<Button size="small" icon={<EditOutlined />} onClick={openMetadataEditor}>编辑元数据</Button>}
+        flatBody
+      >
+        <Table<AssetColumn> size="middle" rowKey="name" dataSource={asset.columns} pagination={false}
           columns={[
             { title: '字段', dataIndex: 'name', render: (v: string) => <Text strong style={{ fontSize: 13 }}>{v}</Text> },
             { title: '类型', dataIndex: 'type', render: (t: string) => <Text code style={{ fontSize: 12 }}>{t}</Text> },
-            { title: '描述', dataIndex: 'description' },
+            { title: '描述', dataIndex: 'description', ellipsis: true, render: (v?: string) => v || '-' },
             { title: '密级', dataIndex: 'classification', width: 120, render: (c: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+            { title: 'PII', dataIndex: 'piiType', width: 110, render: (v?: string) => v ? <Tag>{v}</Tag> : '-' },
+            { title: '建议密级', dataIndex: 'suggestLevel', width: 110, render: (c?: string) => c ? <ClassificationBadge level={c as any} /> : '-' },
+            { title: '键', dataIndex: 'primaryKey', width: 80, render: (v?: boolean) => v ? <Tag color="blue">PK</Tag> : '-' },
             { title: '血缘', dataIndex: 'upstreamFqn', render: (u?: string) => u ? <Space><ArrowRightOutlined style={{ color: 'var(--ol-ink-4)' }} /><Text code style={{ fontSize: 12 }}>{u}</Text></Space> : '-' },
           ]} />
       </SectionCard>
@@ -528,6 +761,8 @@ export default function TableDetail() {
           {modelingError && <Alert type="error" showIcon message="DWD 模型加载失败" description={modelingError} />}
           {modelingLoading ? (
             <StateView state="loading" rows={4} />
+          ) : hasPipelineFallback ? (
+            renderPipelineFallback()
           ) : models.length === 0 ? (
             <StateView
               state="empty"
@@ -635,7 +870,7 @@ export default function TableDetail() {
               ]}
             />
           )}
-          <Button icon={<ReloadOutlined />} onClick={refreshModeling}>刷新模型状态</Button>
+          {!hasPipelineFallback && <Button icon={<ReloadOutlined />} onClick={refreshModeling}>刷新模型状态</Button>}
         </Space>
       </SectionCard>
     ) },
@@ -806,8 +1041,8 @@ export default function TableDetail() {
           ),
           <Button key="profile" icon={<DatabaseOutlined />} onClick={() => navigate(`/catalog/assets/${asset.id}?from=lakehouse`)}>资产画像</Button>,
           <Button key="api" onClick={() => navigate(`/dataservice/apis/new?sourceFqn=${asset.fqn}`)}>发布为 API</Button>,
-          <Button key="add-col" disabled title="暂未接入 Schema 变更接口">加列</Button>,
-          <Button key="del" danger disabled title="暂未接入 Schema 变更审批接口">删除字段</Button>,
+          <Button key="add-col" onClick={() => openSchemaChange('ADD_COLUMN')}>申请加列</Button>,
+          <Button key="del" danger onClick={() => openSchemaChange('DROP_COLUMN')}>申请删除字段</Button>,
         ]}
         meta={[
           { label: '行数', value: asset.rows == null ? '-' : asset.rows.toLocaleString() },
@@ -820,6 +1055,206 @@ export default function TableDetail() {
           { label: '被订阅', value: subscription.popularity },
         ]}
       />
+      <Modal
+        title="编辑 Schema 元数据"
+        open={metadataOpen}
+        width={1040}
+        okText="保存元数据"
+        cancelText="取消"
+        confirmLoading={metadataSaving}
+        onOk={submitMetadata}
+        onCancel={() => setMetadataOpen(false)}
+      >
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <Form<AssetMetadataFormValues>
+            form={metadataForm}
+            layout="vertical"
+            className="ol-schema-metadata-form"
+          >
+            <div className="ol-schema-metadata-grid">
+              <Form.Item name="description" label="表描述">
+                <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder="填写表用途、口径或业务含义" />
+              </Form.Item>
+              <Form.Item name="domain" label="业务域">
+                <Input placeholder="例如：交易、用户、营销" />
+              </Form.Item>
+              <Form.Item name="ownerName" label="负责人">
+                <Input placeholder="负责人展示名" />
+              </Form.Item>
+              <Form.Item name="tags" label="标签">
+                <Select mode="tags" placeholder="输入后回车添加标签" tokenSeparators={[',', '，']} />
+              </Form.Item>
+            </div>
+          </Form>
+
+          <Table<EditableColumnMetadata>
+            size="small"
+            rowKey="name"
+            dataSource={metadataColumns}
+            pagination={false}
+            scroll={{ x: 980 }}
+            columns={[
+              {
+                title: '字段',
+                dataIndex: 'name',
+                width: 180,
+                fixed: 'left',
+                render: (value: string, row) => (
+                  <Space direction="vertical" size={0}>
+                    <Text strong>{value}</Text>
+                    <Text code style={{ fontSize: 12 }}>{row.type}</Text>
+                  </Space>
+                ),
+              },
+              {
+                title: '描述',
+                dataIndex: 'description',
+                width: 260,
+                render: (value: string | undefined, row) => (
+                  <Input.TextArea
+                    value={value}
+                    autoSize={{ minRows: 1, maxRows: 3 }}
+                    placeholder="字段业务含义"
+                    onChange={(event) => updateMetadataColumn(row.name, { description: event.target.value })}
+                  />
+                ),
+              },
+              {
+                title: '密级',
+                dataIndex: 'classification',
+                width: 120,
+                render: (value: Classification | undefined, row) => (
+                  <Select
+                    allowClear
+                    value={value}
+                    options={classificationOptions}
+                    placeholder="密级"
+                    style={{ width: '100%' }}
+                    onChange={(next) => updateMetadataColumn(row.name, { classification: next })}
+                  />
+                ),
+              },
+              {
+                title: 'PII 类型',
+                dataIndex: 'piiType',
+                width: 150,
+                render: (value: string | undefined, row) => (
+                  <Select
+                    allowClear
+                    showSearch
+                    value={value}
+                    options={piiTypeOptions}
+                    placeholder="PII"
+                    style={{ width: '100%' }}
+                    onChange={(next) => updateMetadataColumn(row.name, { piiType: next })}
+                  />
+                ),
+              },
+              {
+                title: '建议密级',
+                dataIndex: 'suggestLevel',
+                width: 120,
+                render: (value: Classification | undefined, row) => (
+                  <Select
+                    allowClear
+                    value={value}
+                    options={classificationOptions}
+                    placeholder="建议"
+                    style={{ width: '100%' }}
+                    onChange={(next) => updateMetadataColumn(row.name, { suggestLevel: next })}
+                  />
+                ),
+              },
+              {
+                title: '主键',
+                dataIndex: 'primaryKey',
+                width: 90,
+                align: 'center',
+                render: (value: boolean | undefined, row) => (
+                  <Switch
+                    size="small"
+                    checked={Boolean(value)}
+                    onChange={(checked) => updateMetadataColumn(row.name, { primaryKey: checked })}
+                  />
+                ),
+              },
+            ]}
+          />
+        </Space>
+      </Modal>
+      <Modal
+        title="提交 Schema 变更申请"
+        open={schemaChangeOpen}
+        width={720}
+        okText="提交审批"
+        cancelText="取消"
+        confirmLoading={schemaChangeSaving}
+        onOk={submitSchemaChange}
+        onCancel={() => setSchemaChangeOpen(false)}
+        destroyOnHidden
+      >
+        <Form<SchemaChangeFormValues>
+          form={schemaChangeForm}
+          layout="vertical"
+          preserve={false}
+          initialValues={{ changeType: 'ADD_COLUMN', nullable: true }}
+        >
+          <Form.Item name="changeType" label="变更类型" rules={[{ required: true, message: '请选择变更类型' }]}>
+            <Select options={schemaChangeTypeOptions} />
+          </Form.Item>
+
+          {schemaChangeType === 'ADD_COLUMN' ? (
+            <>
+              <Form.Item name="columnName" label="新增字段名" rules={[{ required: true, message: '请填写新增字段名' }]}>
+                <Input placeholder="例如 customer_level" />
+              </Form.Item>
+              <Form.Item name="dataType" label="字段类型" rules={[{ required: true, message: '请填写字段类型' }]}>
+                <Input placeholder="例如 VARCHAR、BIGINT、DECIMAL(18,2)" />
+              </Form.Item>
+              <Form.Item name="nullable" label="是否允许为空" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </>
+          ) : (
+            <Form.Item name="columnName" label="目标字段" rules={[{ required: true, message: '请选择目标字段' }]}>
+              <Select
+                showSearch
+                placeholder="选择当前字段"
+                options={asset.columns.map((column) => ({
+                  label: `${column.name} · ${column.type}`,
+                  value: column.name,
+                }))}
+              />
+            </Form.Item>
+          )}
+
+          {schemaChangeType === 'RENAME_COLUMN' && (
+            <Form.Item name="afterName" label="新字段名" rules={[{ required: true, message: '请填写新字段名' }]}>
+              <Input placeholder="例如 customer_id" />
+            </Form.Item>
+          )}
+
+          {schemaChangeType === 'CHANGE_TYPE' && (
+            <Form.Item name="afterType" label="新字段类型" rules={[{ required: true, message: '请填写新字段类型' }]}>
+              <Input placeholder="例如 VARCHAR(128)" />
+            </Form.Item>
+          )}
+
+          <Form.Item name="reason" label="变更原因" rules={[{ required: true, message: '请填写变更原因' }]}>
+            <Input.TextArea rows={3} placeholder="说明变更背景、兼容性和预期上线窗口" />
+          </Form.Item>
+
+          <div className="ol-inline-notice" role="status">
+            <InfoCircleOutlined />
+            <div className="ol-inline-notice__content">
+              <span className="ol-inline-notice__title">审批申请</span>
+              <span className="ol-inline-notice__desc">
+                只提交审批单，不会立即修改 Iceberg 表结构；影响摘要包含下游资产 {Math.max(1, downstreamFqns.length + 1)} 个、API {subscription.apiCount} 个、已批准订阅 {subscription.approvedSubscriptionCount} 个。
+              </span>
+            </div>
+          </div>
+        </Form>
+      </Modal>
     </>
   );
 }

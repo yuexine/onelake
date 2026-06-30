@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, Tabs, Drawer, Timeline, Input, Typography, App as AntdApp, Select, Modal, Form, Checkbox, InputNumber, Popconfirm } from 'antd';
 import { AuditOutlined, CheckOutlined, CloseOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
-import { SecurityAPI } from '../../api';
+import { CatalogAPI, SecurityAPI } from '../../api';
 import type { AccessGrant, ApprovalRequest } from '../../types';
 import { StatusBadge, PageHeader, SectionCard, StateView, IntentBadge, riskColor } from '../../components';
 
@@ -21,6 +21,17 @@ type ApprovalPayload = {
   riskLevel?: 'LOW' | 'MEDIUM' | 'HIGH';
   impactSummary?: { assets?: number; apis?: number; subscribers?: number };
   approvalChain?: ApprovalRequest['chain'];
+  changeType?: 'ADD_COLUMN' | 'DROP_COLUMN' | 'RENAME_COLUMN' | 'CHANGE_TYPE';
+  columnName?: string;
+  dataType?: string;
+  afterName?: string;
+  afterType?: string;
+  nullable?: boolean;
+  executionMode?: string;
+  executionStatus?: 'SUCCEEDED' | 'FAILED' | string;
+  executionSql?: string;
+  executionError?: string;
+  beforeColumns?: Array<{ name: string; type?: string; description?: string; classification?: string }>;
   permissions?: {
     query?: boolean;
     download?: boolean;
@@ -77,6 +88,28 @@ function permissionText(payload?: ApprovalPayload) {
   if (permissions.download) items.push('download');
   if (permissions.api) items.push('api');
   return items.join(' / ');
+}
+
+function schemaChangeText(payload?: ApprovalPayload) {
+  if (!payload?.changeType) return '-';
+  const labels: Record<string, string> = {
+    ADD_COLUMN: '新增字段',
+    DROP_COLUMN: '删除字段',
+    RENAME_COLUMN: '重命名字段',
+    CHANGE_TYPE: '修改类型',
+  };
+  const base = labels[payload.changeType] || payload.changeType;
+  if (payload.changeType === 'ADD_COLUMN') return `${base} ${payload.columnName || '-'} ${payload.dataType || ''}`.trim();
+  if (payload.changeType === 'RENAME_COLUMN') return `${base} ${payload.columnName || '-'} -> ${payload.afterName || '-'}`;
+  if (payload.changeType === 'CHANGE_TYPE') return `${base} ${payload.columnName || '-'} -> ${payload.afterType || '-'}`;
+  return `${base} ${payload.columnName || '-'}`;
+}
+
+function requestSummary(row: ApprovalRow) {
+  if (row.requestType === 'SCHEMA_CHANGE') {
+    return schemaChangeText(row.payload);
+  }
+  return permissionText(row.payload);
 }
 
 function grantPermissions(grant: AccessGrant) {
@@ -202,19 +235,40 @@ export default function Approvals() {
     setSelectedRowKeys((keys) => keys.filter((key) => !ids.includes(key)));
   };
 
+  const executeSchemaChange = (row: ApprovalRow) => {
+    setActionLoading(`execute-${row.id}`);
+    return CatalogAPI.executeSchemaChange(row.id)
+      .then((result) => {
+        loadProcessed(0, processedSize, processedStatus);
+        message.success(result.message || 'Schema 变更已执行');
+        return result;
+      })
+      .catch((e) => {
+        message.error(e.message || 'Schema 变更执行失败');
+        throw e;
+      })
+      .finally(() => setActionLoading(undefined));
+  };
+
   const approveOne = (row: ApprovalRow) => {
     setActionLoading(`approve-${row.id}`);
     SecurityAPI.approveApproval(row.id, comment || undefined)
-      .then((grant) => {
+      .then(async (grant) => {
         if (grant?.assetFqn) {
           removePendingRows([row.id]);
           loadProcessed(0, processedSize, processedStatus);
           loadGrants();
+          message.success(`已通过，授权已生效：${grant.assetFqn}`);
+        } else if (row.requestType === 'SCHEMA_CHANGE') {
+          await CatalogAPI.executeSchemaChange(row.id);
+          removePendingRows([row.id]);
+          loadProcessed(0, processedSize, processedStatus);
+          message.success('Schema 变更已通过并执行');
         } else {
           loadPending();
+          message.success('一审已通过，等待二审复核');
         }
         setDrawerId(undefined);
-        message.success(grant?.assetFqn ? `已通过，授权已生效：${grant.assetFqn}` : '一审已通过，等待二审复核');
       })
       .catch((e) => message.error(e.message || '审批通过失败'))
       .finally(() => setActionLoading(undefined));
@@ -337,8 +391,8 @@ export default function Approvals() {
       <a className="ol-link" onClick={() => setDrawerId(r.id)}><Text code style={{ fontSize: 12 }}>{v}</Text></a>
     ) },
     { title: '申请人', dataIndex: 'applicantName', width: 120 },
-    { title: '权限', width: 130, render: (_: unknown, row: ApprovalRow) => (
-      <Text style={{ fontSize: 12 }}>{permissionText(row.payload)}</Text>
+    { title: '内容', width: 180, render: (_: unknown, row: ApprovalRow) => (
+      <Text style={{ fontSize: 12 }}>{requestSummary(row)}</Text>
     ) },
     { title: '原因', dataIndex: 'reason', ellipsis: true, render: (r?: string) => (
       <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>{r || '-'}</span>
@@ -557,9 +611,17 @@ export default function Approvals() {
               loading={actionLoading === `approve-${current.id}`}
               onClick={() => approveOne(current)}
             >
-              通过并授权
+              {current.requestType === 'ACCESS' ? '通过并授权' : current.requestType === 'SCHEMA_CHANGE' ? '通过并执行' : '通过'}
             </Button>
           </Space>
+        ) : current?.requestType === 'SCHEMA_CHANGE' && current.status === 'APPROVED' && current.payload?.executionStatus !== 'SUCCEEDED' ? (
+          <Button
+            type="primary"
+            loading={actionLoading === `execute-${current.id}`}
+            onClick={() => executeSchemaChange(current)}
+          >
+            执行变更
+          </Button>
         ) : undefined}
       >
         {current && (
@@ -583,15 +645,54 @@ export default function Approvals() {
                   <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>申请理由</Text>
                   <div style={{ marginTop: 4, fontSize: 13 }}>{current.reason || '-'}</div>
                 </div>
-                <div>
-                  <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>权限范围 / 有效期</Text>
-                  <div style={{ marginTop: 4 }}>
-                    <Space split={<span className="ol-divider-v" />} wrap>
-                      <Text style={{ fontSize: 12 }}>{permissionText(current.payload)}</Text>
-                      <Text style={{ fontSize: 12 }}>{current.payload?.durationDays ? `${current.payload.durationDays} 天` : '长期'}</Text>
-                    </Space>
+                {current.requestType === 'SCHEMA_CHANGE' ? (
+                  <div>
+                    <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>Schema 变更内容</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Space split={<span className="ol-divider-v" />} wrap>
+                        <Text style={{ fontSize: 12 }}>{schemaChangeText(current.payload)}</Text>
+                        <Text style={{ fontSize: 12 }}>
+                          {current.payload?.nullable == null ? '空值策略未指定' : current.payload.nullable ? '允许为空' : '不允许为空'}
+                        </Text>
+                        <Text style={{ fontSize: 12 }}>{current.payload?.executionMode || 'APPROVAL_ONLY'}</Text>
+                      </Space>
+                    </div>
+                    {current.payload?.beforeColumns?.length ? (
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          当前字段快照 {current.payload.beforeColumns.length} 列，审批通过后仍需由 Schema 执行器应用 DDL。
+                        </Text>
+                      </div>
+                    ) : null}
+                    {(current.payload?.executionStatus || current.payload?.executionSql || current.payload?.executionError) && (
+                      <div style={{ marginTop: 10 }}>
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                          <Space size={6} wrap>
+                            <Tag color={current.payload.executionStatus === 'SUCCEEDED' ? 'success' : current.payload.executionStatus === 'FAILED' ? 'error' : 'processing'} style={{ margin: 0 }}>
+                              {current.payload.executionStatus || 'PENDING_EXECUTION'}
+                            </Tag>
+                            {current.payload.executionError && <Text type="danger" style={{ fontSize: 12 }}>{current.payload.executionError}</Text>}
+                          </Space>
+                          {current.payload.executionSql && (
+                            <pre style={{ margin: 0, padding: 10, background: 'var(--ol-fill-soft)', border: '1px solid var(--ol-line-soft)', borderRadius: 6, fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                              {current.payload.executionSql}
+                            </pre>
+                          )}
+                        </Space>
+                      </div>
+                    )}
                   </div>
-                </div>
+                ) : (
+                  <div>
+                    <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>权限范围 / 有效期</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Space split={<span className="ol-divider-v" />} wrap>
+                        <Text style={{ fontSize: 12 }}>{permissionText(current.payload)}</Text>
+                        <Text style={{ fontSize: 12 }}>{current.payload?.durationDays ? `${current.payload.durationDays} 天` : '长期'}</Text>
+                      </Space>
+                    </div>
+                  </div>
+                )}
                 {current.payload?.sql && (
                   <div>
                     <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>来源 SQL</Text>

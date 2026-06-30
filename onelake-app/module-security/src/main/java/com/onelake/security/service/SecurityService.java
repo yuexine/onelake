@@ -312,6 +312,37 @@ public class SecurityService {
         return approvalRepo.save(req);
     }
 
+    /** 物理 Schema 变更申请（仅进入审批中心，不直接执行 DDL）。 */
+    @Transactional
+    public ApprovalRequest applySchemaChange(String assetFqn, Map<String, Object> payload) {
+        UUID tenantId = TenantContext.getTenantId();
+        UUID applicantId = TenantContext.getUserId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (applicantId == null) throw new BizException(40100, "用户上下文缺失");
+        String targetRef = cleanRequired(assetFqn, "变更资产不能为空");
+        ApprovalRequest existing = approvalRepo
+            .findFirstByTenantIdAndApplicantIdAndRequestTypeAndTargetRefAndStatusOrderByCreatedAtDesc(
+                tenantId,
+                applicantId,
+                "SCHEMA_CHANGE",
+                targetRef,
+                "PENDING"
+            )
+            .orElse(null);
+        if (existing != null) {
+            return existing;
+        }
+
+        ApprovalRequest req = new ApprovalRequest();
+        req.setTenantId(tenantId);
+        req.setRequestType("SCHEMA_CHANGE");
+        req.setApplicantId(applicantId);
+        req.setTargetRef(targetRef);
+        req.setPayload(JsonUtil.toJson(enrichSchemaChangePayload(payload)));
+        req.setStatus("PENDING");
+        return approvalRepo.save(req);
+    }
+
     /** 审批通过 → 生成 AccessGrant。 */
     @Transactional
     public AccessGrant approve(UUID approvalId, UUID approverId, String comment) {
@@ -321,6 +352,15 @@ public class SecurityService {
             throw new BizException(40900, "审批单已处理");
         }
         Map<String, Object> payload = payloadMap(req.getPayload());
+        if (!"ACCESS".equals(req.getRequestType())) {
+            markPendingSteps(payload, "APPROVED", approverId, comment);
+            req.setPayload(JsonUtil.toJson(payload));
+            req.setStatus("APPROVED");
+            req.setApproverId(approverId);
+            req.setComment(comment);
+            req.setDecidedAt(Instant.now());
+            return null;
+        }
         if (requiresSecondApproval(payload) && !firstApprovalDone(payload)) {
             markApprovalStep(payload, "ASSET_OWNER", approverId, comment);
             req.setPayload(JsonUtil.toJson(payload));
@@ -570,6 +610,44 @@ public class SecurityService {
             "subscribers", 0
         ));
         return enriched;
+    }
+
+    private Map<String, Object> enrichSchemaChangePayload(Map<String, Object> payload) {
+        Map<String, Object> enriched = new LinkedHashMap<>(payload == null ? Map.of() : payload);
+        Object changeTypeValue = enriched.get("changeType");
+        String changeType = cleanRequired(changeTypeValue == null ? null : String.valueOf(changeTypeValue), "Schema 变更类型不能为空")
+            .toUpperCase(Locale.ROOT);
+        if (!Set.of("ADD_COLUMN", "DROP_COLUMN", "RENAME_COLUMN", "CHANGE_TYPE").contains(changeType)) {
+            throw new BizException(40050, "Schema 变更类型不支持: " + changeType);
+        }
+        String riskLevel = switch (changeType) {
+            case "DROP_COLUMN", "CHANGE_TYPE" -> "HIGH";
+            case "RENAME_COLUMN" -> "MEDIUM";
+            default -> "LOW";
+        };
+        enriched.put("changeType", changeType);
+        enriched.putIfAbsent("riskLevel", riskLevel);
+        enriched.putIfAbsent("reason", "Schema 变更申请");
+        enriched.putIfAbsent("approvalChain", List.of(new LinkedHashMap<>(Map.of(
+            "role",
+            "DATA_OWNER",
+            "status",
+            "PENDING"
+        ))));
+        enriched.putIfAbsent("impactSummary", Map.of(
+            "assets", 1,
+            "apis", 0,
+            "subscribers", 0
+        ));
+        enriched.put("executionMode", "APPROVAL_ONLY");
+        return enriched;
+    }
+
+    private String cleanRequired(String value, String message) {
+        if (value == null || value.isBlank()) {
+            throw new BizException(40050, message);
+        }
+        return value.trim();
     }
 
     private String resolveRiskLevel(Map<String, Object> payload, Map<String, Object> permissions) {

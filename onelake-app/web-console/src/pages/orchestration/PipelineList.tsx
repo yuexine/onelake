@@ -117,9 +117,29 @@ function nodeTargetFqn(node: DagNode) {
   return String((node as any).targetFqn || node.config?.targetFqn || node.config?.targetModelFqn || '');
 }
 
+function normalizePipelineFqn(value: string) {
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.startsWith('onelake.') ? trimmed.slice('onelake.'.length) : trimmed;
+}
+
+function fqnMatches(candidate: string, targetFqn: string) {
+  if (!candidate || !targetFqn) return false;
+  return normalizePipelineFqn(candidate) === normalizePipelineFqn(targetFqn);
+}
+
 function dagContainsTargetFqn(dag: Dag, targetFqn: string) {
   if (!targetFqn) return true;
-  return dagNodes(dag).some((node) => nodeTargetFqn(node) === targetFqn);
+  const definition = Array.isArray(dag.definition) ? {} : dag.definition || {};
+  const definitionTargets = [
+    definition.targetFqn,
+    ...(
+      Array.isArray(definition.targetFqns)
+        ? definition.targetFqns
+        : []
+    ),
+  ].map((item) => String(item || ''));
+  return definitionTargets.some((candidate) => fqnMatches(candidate, targetFqn))
+    || dagNodes(dag).some((node) => fqnMatches(nodeTargetFqn(node), targetFqn));
 }
 
 function pipelineOpenPath(dag: Dag) {

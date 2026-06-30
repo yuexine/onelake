@@ -615,6 +615,73 @@ body {
   font-size: 12px;
 }
 
+.ol-inline-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ol-space-sm);
+  min-width: 0;
+  padding: 8px 12px;
+  background: var(--ol-fill-soft);
+  border: 1px solid var(--ol-line-soft);
+  border-radius: var(--ol-radius-md);
+  color: var(--ol-ink-2);
+}
+
+.ol-inline-notice > .anticon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--ol-info);
+  font-size: 14px;
+}
+
+.ol-inline-notice__content {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ol-space-sm);
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.ol-inline-notice__title {
+  flex: 0 0 auto;
+  color: var(--ol-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ol-inline-notice__desc {
+  min-width: 0;
+  color: var(--ol-ink-3);
+  font-size: 12px;
+}
+
+.ol-dwd-source-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ol-space-md);
+  padding: var(--ol-space-md);
+}
+
+.ol-dwd-source-table .ant-table {
+  border: 1px solid var(--ol-line-soft);
+  border-radius: var(--ol-radius-md);
+  overflow: hidden;
+}
+
+.ol-dwd-source-table .ant-table-thead > tr > th {
+  color: var(--ol-ink-3);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ol-dwd-action-bar {
+  align-items: center;
+}
+
+.ol-dwd-action-bar .ant-btn {
+  min-width: 0;
+}
+
 @media (max-width: 640px) {
   .ol-filter-context {
     max-width: 100%;
@@ -622,6 +689,11 @@ body {
 
   .ol-filter-context__code {
     max-width: 48vw;
+  }
+
+  .ol-inline-notice__content {
+    flex-direction: column;
+    gap: 2px;
   }
 }
 
@@ -836,9 +908,26 @@ a:focus-visible {
   z-index: 10;
 }
 
+.ol-schema-metadata-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 2fr) repeat(3, minmax(150px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.ol-schema-metadata-form .ant-form-item {
+  margin-bottom: 0;
+}
+
 /* Responsive utility */
 @media (max-width: 1280px) {
   .ol-page { gap: var(--ol-space-md); }
+}
+
+@media (max-width: 1180px) {
+  .ol-schema-metadata-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 1100px) {
@@ -884,6 +973,10 @@ a:focus-visible {
 }
 
 @media (max-width: 960px) {
+  .ol-schema-metadata-grid {
+    grid-template-columns: 1fr;
+  }
+
   .ol-tenant-name {
     display: none;
   }

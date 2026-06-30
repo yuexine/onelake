@@ -2,16 +2,19 @@ package com.onelake.catalog.api;
 
 import com.onelake.catalog.dto.AssetDTO;
 import com.onelake.catalog.dto.AssetDetailDTO;
+import com.onelake.catalog.dto.AssetMetadataUpdateRequest;
 import com.onelake.catalog.dto.AssetMaintenanceAssessmentDTO;
 import com.onelake.catalog.dto.AssetMaintenanceRequest;
 import com.onelake.catalog.dto.AssetMaintenanceResultDTO;
 import com.onelake.catalog.dto.ImpactReportDTO;
 import com.onelake.catalog.dto.LineageGraphDTO;
+import com.onelake.catalog.dto.SchemaChangeExecutionResultDTO;
 import com.onelake.catalog.dto.TableCreateRequest;
 import com.onelake.catalog.service.CatalogAssetDetailService;
 import com.onelake.catalog.service.CatalogColumnRefreshService;
 import com.onelake.catalog.service.CatalogLineageService;
 import com.onelake.catalog.service.CatalogMaintenanceService;
+import com.onelake.catalog.service.CatalogSchemaChangeService;
 import com.onelake.catalog.service.CatalogService;
 import com.onelake.catalog.service.CatalogSyncService;
 import com.onelake.catalog.service.CatalogTableService;
@@ -43,6 +46,7 @@ public class CatalogController {
     private final CatalogSyncService syncService;
     private final CatalogColumnRefreshService columnRefreshService;
     private final CatalogMaintenanceService maintenanceService;
+    private final CatalogSchemaChangeService schemaChangeService;
     private final NotificationService notificationService;
 
     @Operation(
@@ -64,6 +68,17 @@ public class CatalogController {
     }
 
     @Operation(
+        summary = "更新资产元数据",
+        description = "用途：更新表描述、业务域、负责人展示名和字段描述/密级/PII 等治理元数据，不执行物理 DDL。前端对接：CatalogAPI.updateAssetMetadata，由 TableDetail Schema 页调用。"
+    )
+    @PatchMapping("/assets/{id}/metadata")
+    @PreAuthorize("hasAnyRole('ADMIN','DE')")
+    public ApiResponse<AssetDTO> updateMetadata(@PathVariable UUID id,
+                                                @RequestBody AssetMetadataUpdateRequest request) {
+        return ApiResponse.ok(catalogService.updateMetadata(id, request));
+    }
+
+    @Operation(
         summary = "查询资产列表",
         description = "用途：按可选湖仓层级、关键字或业务术语查询目录资产。前端对接：CatalogAPI.listAssets，由 CatalogSearch、Tables、SqlWorkbench、QualityRules 等页面使用。"
     )
@@ -82,6 +97,16 @@ public class CatalogController {
     @PreAuthorize("hasAnyRole('ADMIN','DE')")
     public ApiResponse<AssetDTO> createTable(@RequestBody TableCreateRequest request) {
         return ApiResponse.ok(tableService.createTable(request));
+    }
+
+    @Operation(
+        summary = "执行已审批 Schema 变更",
+        description = "用途：根据已通过的 SCHEMA_CHANGE 审批单执行 Iceberg ALTER TABLE，并回写 Catalog 字段快照。前端对接：CatalogAPI.executeSchemaChange，由审批中心通过后调用。"
+    )
+    @PostMapping("/schema-changes/{approvalId}/execute")
+    @PreAuthorize("hasAnyRole('ADMIN','DE')")
+    public ApiResponse<SchemaChangeExecutionResultDTO> executeSchemaChange(@PathVariable UUID approvalId) {
+        return ApiResponse.ok(schemaChangeService.executeApproved(approvalId));
     }
 
     @Operation(

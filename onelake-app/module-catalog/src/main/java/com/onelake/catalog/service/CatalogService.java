@@ -1,8 +1,12 @@
 package com.onelake.catalog.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.onelake.catalog.domain.entity.Asset;
 import com.onelake.catalog.domain.entity.LineageEdge;
 import com.onelake.catalog.dto.AssetDTO;
+import com.onelake.catalog.dto.AssetMetadataUpdateRequest;
 import com.onelake.catalog.repository.AssetRepository;
 import com.onelake.catalog.repository.LineageEdgeRepository;
 import com.onelake.common.context.TenantContext;
@@ -24,6 +28,7 @@ import java.util.Locale;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.time.Instant;
 
 @Service
 @RequiredArgsConstructor
@@ -75,6 +80,42 @@ public class CatalogService {
             .toList();
         Map<UUID, Long> liveRowCounts = rowCountResolver.resolve(filtered);
         return filtered.stream().map(asset -> toDTO(asset, liveRowCounts.get(asset.getId()))).toList();
+    }
+
+    @Transactional
+    public AssetDTO updateMetadata(UUID id, AssetMetadataUpdateRequest request) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) {
+            throw new BizException(40100, "租户上下文缺失");
+        }
+        Asset asset = assetRepo.findById(id)
+            .filter(item -> tenantId.equals(item.getTenantId()))
+            .orElseThrow(() -> new BizException(40400, "资产不存在"));
+        if (request == null) {
+            throw new BizException(40070, "资产元数据更新请求不能为空");
+        }
+
+        if (request.description() != null) {
+            asset.setDescription(cleanNullable(request.description()));
+        }
+        if (request.domain() != null) {
+            asset.setDomain(cleanNullable(request.domain()));
+        }
+        if (request.ownerName() != null) {
+            asset.setOwnerName(cleanNullable(request.ownerName()));
+        }
+        if (request.tags() != null) {
+            asset.setTags(JsonUtil.toJson(normalizeTags(request.tags())));
+        }
+        if (request.columns() != null) {
+            asset.setColumns(mergeColumnMetadata(asset.getColumns(), request.columns()));
+            asset.setClassification(maxColumnClassification(asset.getColumns()));
+        }
+        asset.setSyncedAt(Instant.now());
+
+        Asset saved = assetRepo.save(asset);
+        Map<UUID, Long> liveRowCounts = rowCountResolver.resolve(List.of(saved));
+        return toDTO(saved, liveRowCounts.get(saved.getId()));
     }
 
     /** 影响分析：以下游 fqn 为根，BFS 找出所有下游资产。 */
@@ -199,6 +240,7 @@ public class CatalogService {
                     item.path("classification").asText(null),
                     item.path("piiType").asText(null),
                     item.path("suggestLevel").asText(null),
+                    item.has("primaryKey") && item.path("primaryKey").asBoolean(false),
                     termsByColumn.getOrDefault(name.toLowerCase(Locale.ROOT), Collections.emptyList())
                 ));
             });
@@ -224,6 +266,121 @@ public class CatalogService {
 
     private String normalize(String value) {
         return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String cleanNullable(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isBlank() ? null : trimmed;
+    }
+
+    private List<String> normalizeTags(List<String> tags) {
+        if (tags == null) return Collections.emptyList();
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        for (String tag : tags) {
+            String value = cleanNullable(tag);
+            if (value != null) {
+                normalized.add(value);
+            }
+        }
+        return new ArrayList<>(normalized);
+    }
+
+    private String mergeColumnMetadata(String existingColumns, List<AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest> updates) {
+        Map<String, AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest> updateByName = new LinkedHashMap<>();
+        for (AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest update : updates) {
+            if (update == null || cleanNullable(update.name()) == null) {
+                throw new BizException(40070, "字段元数据必须包含字段名");
+            }
+            String key = update.name().trim().toLowerCase(Locale.ROOT);
+            if (updateByName.put(key, update) != null) {
+                throw new BizException(40070, "字段元数据重复: " + update.name());
+            }
+        }
+
+        ArrayNode result = JsonUtil.mapper().createArrayNode();
+        JsonNode existing = parseColumnArray(existingColumns);
+        Set<String> seen = new LinkedHashSet<>();
+        for (JsonNode item : existing) {
+            if (!item.isObject()) {
+                continue;
+            }
+            String name = item.path("name").asText("");
+            if (name.isBlank()) {
+                continue;
+            }
+            String key = name.toLowerCase(Locale.ROOT);
+            seen.add(key);
+            ObjectNode next = ((ObjectNode) item).deepCopy();
+            AssetMetadataUpdateRequest.ColumnMetadataUpdateRequest update = updateByName.get(key);
+            if (update != null) {
+                putOptionalText(next, "description", update.description());
+                putClassification(next, "classification", update.classification());
+                putOptionalText(next, "piiType", update.piiType());
+                putClassification(next, "suggestLevel", update.suggestLevel());
+                if (update.primaryKey() == null || !update.primaryKey()) {
+                    next.remove("primaryKey");
+                } else {
+                    next.put("primaryKey", true);
+                }
+            }
+            result.add(next);
+        }
+        for (String requested : updateByName.keySet()) {
+            if (!seen.contains(requested)) {
+                throw new BizException(40070, "字段不存在，不能更新元数据: " + requested);
+            }
+        }
+        return JsonUtil.toJson(result);
+    }
+
+    private JsonNode parseColumnArray(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return JsonUtil.mapper().createArrayNode();
+        }
+        JsonNode node = JsonUtil.parse(raw);
+        if (!node.isArray()) {
+            throw new BizException(40070, "资产字段元数据格式异常");
+        }
+        return node;
+    }
+
+    private void putOptionalText(ObjectNode node, String field, String value) {
+        String text = cleanNullable(value);
+        if (text == null) {
+            node.remove(field);
+        } else {
+            node.put(field, text);
+        }
+    }
+
+    private void putClassification(ObjectNode node, String field, String value) {
+        String normalized = cleanNullable(value);
+        if (normalized == null) {
+            node.remove(field);
+            return;
+        }
+        String upper = normalized.toUpperCase(Locale.ROOT);
+        if (!Set.of("L1", "L2", "L3", "L4").contains(upper)) {
+            throw new BizException(40070, field + " 必须是 L1/L2/L3/L4");
+        }
+        node.put(field, upper);
+    }
+
+    private String maxColumnClassification(String columnsJson) {
+        JsonNode node = parseColumnArray(columnsJson);
+        String max = null;
+        for (JsonNode item : node) {
+            String classification = cleanNullable(item.path("classification").asText(null));
+            if (classification == null) {
+                continue;
+            }
+            String upper = classification.toUpperCase(Locale.ROOT);
+            if (max == null || upper.compareTo(max) > 0) {
+                max = upper;
+            }
+        }
+        return max;
     }
 
     private Set<String> assetFqnsByTerm(UUID tenantId, String query) {

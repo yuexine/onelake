@@ -248,6 +248,74 @@ class SecurityServiceTest {
     }
 
     @Test
+    void applySchemaChangeCreatesApprovalOnlyRequest() {
+        when(approvalRepo.findFirstByTenantIdAndApplicantIdAndRequestTypeAndTargetRefAndStatusOrderByCreatedAtDesc(
+            TENANT_ID,
+            USER_ID,
+            "SCHEMA_CHANGE",
+            "dwd.user_order_wide",
+            "PENDING"
+        )).thenReturn(Optional.empty());
+        when(approvalRepo.save(any(ApprovalRequest.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ApprovalRequest approval = service.applySchemaChange("dwd.user_order_wide", Map.of(
+            "changeType", "DROP_COLUMN",
+            "columnName", "legacy_flag",
+            "reason", "字段已废弃"
+        ));
+
+        assertThat(approval.getRequestType()).isEqualTo("SCHEMA_CHANGE");
+        assertThat(approval.getTargetRef()).isEqualTo("dwd.user_order_wide");
+        assertThat(approval.getPayload()).contains("DROP_COLUMN", "legacy_flag", "HIGH", "APPROVAL_ONLY");
+    }
+
+    @Test
+    void applySchemaChangeReusesExistingPendingSchemaChange() {
+        ApprovalRequest existing = new ApprovalRequest();
+        existing.setTenantId(TENANT_ID);
+        existing.setApplicantId(USER_ID);
+        existing.setRequestType("SCHEMA_CHANGE");
+        existing.setTargetRef("dwd.user_order_wide");
+        existing.setStatus("PENDING");
+        when(approvalRepo.findFirstByTenantIdAndApplicantIdAndRequestTypeAndTargetRefAndStatusOrderByCreatedAtDesc(
+            TENANT_ID,
+            USER_ID,
+            "SCHEMA_CHANGE",
+            "dwd.user_order_wide",
+            "PENDING"
+        )).thenReturn(Optional.of(existing));
+
+        ApprovalRequest approval = service.applySchemaChange("dwd.user_order_wide", Map.of("changeType", "ADD_COLUMN"));
+
+        assertThat(approval).isSameAs(existing);
+        verify(approvalRepo, never()).save(any(ApprovalRequest.class));
+    }
+
+    @Test
+    void approveSchemaChangeDoesNotCreateAccessGrant() {
+        UUID approvalId = UUID.randomUUID();
+        UUID approver = UUID.randomUUID();
+        ApprovalRequest approval = new ApprovalRequest();
+        approval.setTenantId(TENANT_ID);
+        approval.setApplicantId(USER_ID);
+        approval.setRequestType("SCHEMA_CHANGE");
+        approval.setTargetRef("dwd.user_order_wide");
+        approval.setStatus("PENDING");
+        approval.setPayload("""
+            {"changeType":"ADD_COLUMN","approvalChain":[{"role":"DATA_OWNER","status":"PENDING"}]}
+            """);
+        when(approvalRepo.findById(approvalId)).thenReturn(Optional.of(approval));
+
+        AccessGrant grant = service.approve(approvalId, approver, "ok");
+
+        assertThat(grant).isNull();
+        assertThat(approval.getStatus()).isEqualTo("APPROVED");
+        assertThat(approval.getApproverId()).isEqualTo(approver);
+        assertThat(approval.getPayload()).contains("DATA_OWNER", "APPROVED");
+        verify(grantRepo, never()).save(any(AccessGrant.class));
+    }
+
+    @Test
     void processedApprovalsUsesRequestedProcessedStatus() {
         ApprovalRequest approval = new ApprovalRequest();
         approval.setTenantId(TENANT_ID);

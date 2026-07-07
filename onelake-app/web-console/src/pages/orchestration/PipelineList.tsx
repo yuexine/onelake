@@ -9,7 +9,8 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard } from '../../components';
 import { ModelingAPI, OrchestrationAPI, PipelineAPI } from '../../api';
-import type { Dag, DagNode, DataModel, JobRun } from '../../types';
+import type { Dag, DataModel, JobRun } from '../../types';
+import { dagContainsTargetFqn, dagNodes, pipelineTaskContainsTargetFqn } from '../../utils/pipelineTargetMatching';
 
 const { Text } = Typography;
 
@@ -81,28 +82,6 @@ function TriggerState({ dag }: { dag: Dag }) {
   );
 }
 
-function parseOperatorGraph(value: unknown): { nodes?: DagNode[] } | undefined {
-  if (!value) return undefined;
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value) as { nodes?: DagNode[] };
-    } catch {
-      return undefined;
-    }
-  }
-  if (typeof value === 'object') return value as { nodes?: DagNode[] };
-  return undefined;
-}
-
-function dagNodes(dag: Dag): DagNode[] {
-  if (Array.isArray(dag.definition)) return dag.definition;
-  const definition = dag.definition || {};
-  const directNodes = Array.isArray(definition.nodes) ? definition.nodes : [];
-  const graph = parseOperatorGraph(definition.operatorGraph);
-  const graphNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
-  return [...directNodes, ...graphNodes];
-}
-
 function isDwdGovernancePipeline(dag: Dag) {
   const definition = Array.isArray(dag.definition) ? {} : dag.definition || {};
   if (definition.pipelineMode === 'SPARK_GOVERNANCE') return true;
@@ -111,35 +90,6 @@ function isDwdGovernancePipeline(dag: Dag) {
     || node.config?.governanceMode === 'SPARK_GOVERNANCE'
     || node.config?.modelKind === 'DWD_TABLE_GOVERNANCE'
   ));
-}
-
-function nodeTargetFqn(node: DagNode) {
-  return String((node as any).targetFqn || node.config?.targetFqn || node.config?.targetModelFqn || '');
-}
-
-function normalizePipelineFqn(value: string) {
-  const trimmed = value.trim().toLowerCase();
-  return trimmed.startsWith('onelake.') ? trimmed.slice('onelake.'.length) : trimmed;
-}
-
-function fqnMatches(candidate: string, targetFqn: string) {
-  if (!candidate || !targetFqn) return false;
-  return normalizePipelineFqn(candidate) === normalizePipelineFqn(targetFqn);
-}
-
-function dagContainsTargetFqn(dag: Dag, targetFqn: string) {
-  if (!targetFqn) return true;
-  const definition = Array.isArray(dag.definition) ? {} : dag.definition || {};
-  const definitionTargets = [
-    definition.targetFqn,
-    ...(
-      Array.isArray(definition.targetFqns)
-        ? definition.targetFqns
-        : []
-    ),
-  ].map((item) => String(item || ''));
-  return definitionTargets.some((candidate) => fqnMatches(candidate, targetFqn))
-    || dagNodes(dag).some((node) => fqnMatches(nodeTargetFqn(node), targetFqn));
 }
 
 function pipelineOpenPath(dag: Dag) {
@@ -155,6 +105,8 @@ export default function PipelineList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
+  const [targetTaskLoading, setTargetTaskLoading] = useState(false);
+  const [taskMatchedPipelineIds, setTaskMatchedPipelineIds] = useState<Set<string>>(() => new Set());
   const notifiedTargetFqnRef = useRef('');
 
   const loadPipelines = () => {
@@ -171,9 +123,48 @@ export default function PipelineList() {
   }, []);
 
   const targetFqnFilter = searchParams.get('targetFqn') || '';
+
+  useEffect(() => {
+    let cancelled = false;
+    setTaskMatchedPipelineIds(new Set());
+    if (!targetFqnFilter || pipelines.length === 0) {
+      setTargetTaskLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setTargetTaskLoading(true);
+    Promise.all(pipelines.map(async (pipeline) => {
+      try {
+        const tasks = await PipelineAPI.listTasks(pipeline.id);
+        return tasks.some((task) => pipelineTaskContainsTargetFqn(task, targetFqnFilter))
+          ? pipeline.id
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    }))
+      .then((matches) => {
+        if (!cancelled) {
+          setTaskMatchedPipelineIds(new Set(matches.filter((id): id is string => Boolean(id))));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTargetTaskLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pipelines, targetFqnFilter]);
+
   const visiblePipelines = useMemo(
-    () => pipelines.filter((pipeline) => dagContainsTargetFqn(pipeline, targetFqnFilter)),
-    [pipelines, targetFqnFilter],
+    () => pipelines.filter((pipeline) => (
+      dagContainsTargetFqn(pipeline, targetFqnFilter)
+      || taskMatchedPipelineIds.has(pipeline.id)
+    )),
+    [pipelines, targetFqnFilter, taskMatchedPipelineIds],
   );
 
   const clearTargetFqnFilter = () => {
@@ -190,24 +181,24 @@ export default function PipelineList() {
 
   const targetFqnFilterNotice = useMemo(() => {
     if (!targetFqnFilter) return '';
-    if (loading) return '正在按目标表筛选流水线';
+    if (loading || targetTaskLoading) return '正在按目标表筛选流水线';
     if (visiblePipelines.length === 0) return '未找到目标表关联流水线';
     return `已按目标表筛选，显示 ${visiblePipelines.length} / ${pipelines.length} 条流水线`;
-  }, [loading, pipelines.length, targetFqnFilter, visiblePipelines.length]);
+  }, [loading, pipelines.length, targetFqnFilter, targetTaskLoading, visiblePipelines.length]);
 
   useEffect(() => {
     if (!targetFqnFilter) {
       notifiedTargetFqnRef.current = '';
       return;
     }
-    if (loading || error || notifiedTargetFqnRef.current === targetFqnFilter) return;
+    if (loading || targetTaskLoading || error || notifiedTargetFqnRef.current === targetFqnFilter) return;
     notifiedTargetFqnRef.current = targetFqnFilter;
     message.info({
       key: 'pipeline-target-fqn-filter',
       content: `${targetFqnFilterNotice}：${targetFqnFilter}`,
       duration: 3,
     });
-  }, [error, loading, message, targetFqnFilter, targetFqnFilterNotice]);
+  }, [error, loading, message, targetFqnFilter, targetFqnFilterNotice, targetTaskLoading]);
 
   const triggerPipeline = (dag: Dag) => {
     if (!dag.triggerable) {

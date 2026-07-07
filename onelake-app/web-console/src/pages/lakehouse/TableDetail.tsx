@@ -8,7 +8,8 @@ import { ArrowRightOutlined, BranchesOutlined, CheckCircleOutlined, CodeOutlined
 import { useEffect, useState, type ReactNode } from 'react';
 import { DetailPageLayout, ClassificationBadge, SectionCard, StateView } from '../../components';
 import type { AssetColumn, AssetDetail, AssetMaintenanceAssessment, AssetMaintenanceOperation, AssetMetadataUpdateRequest, Classification, DataModel, SchemaChangeApprovalRequest, SchemaChangeType } from '../../types';
-import { CatalogAPI, ModelingAPI, SecurityAPI } from '../../api';
+import { CatalogAPI, ModelingAPI, OrchestrationAPI, PipelineAPI, SecurityAPI } from '../../api';
+import { dagContainsTargetFqn, pipelineTaskContainsTargetFqn } from '../../utils/pipelineTargetMatching';
 import { normalizeCatalogAsset } from './assetAdapter';
 import {
   maintenanceFreshnessLabel,
@@ -393,6 +394,21 @@ export default function TableDetail() {
     targetFqn: asset.fqn,
   }).toString()}`;
 
+  const resolveTargetBusinessDags = async () => {
+    const dags = await OrchestrationAPI.listDags();
+    const definitionMatches = dags.filter((dag) => dagContainsTargetFqn(dag, asset.fqn));
+    if (definitionMatches.length > 0) return definitionMatches;
+    const taskMatches = await Promise.all(dags.map(async (dag) => {
+      try {
+        const tasks = await PipelineAPI.listTasks(dag.id);
+        return tasks.some((task) => pipelineTaskContainsTargetFqn(task, asset.fqn)) ? dag : undefined;
+      } catch {
+        return undefined;
+      }
+    }));
+    return taskMatches.filter((dag): dag is NonNullable<typeof dag> => Boolean(dag));
+  };
+
   const openTargetPipeline = async () => {
     const localModel = targetPipelineModel();
     if (localModel?.orchestrationDagId) {
@@ -409,7 +425,19 @@ export default function TableDetail() {
         navigate(`/orchestration/pipelines/${matched.orchestrationDagId}`);
         return;
       }
-      message.warning('未找到当前表已绑定的目标流水线，已按目标表过滤流水线列表');
+
+      const matchedDags = await resolveTargetBusinessDags();
+      if (matchedDags.length === 1) {
+        navigate(`/orchestration/pipelines/${matchedDags[0].id}`);
+        return;
+      }
+      if (matchedDags.length > 1) {
+        message.info('找到多个产出当前表的流水线，已按目标表过滤流水线列表');
+        navigate(targetPipelineFallbackPath());
+        return;
+      }
+
+      message.warning('未找到当前表绑定或产出的流水线，已按目标表过滤流水线列表');
       navigate(targetPipelineFallbackPath());
     } catch (e) {
       message.error(e instanceof Error ? e.message : '目标流水线定位失败');

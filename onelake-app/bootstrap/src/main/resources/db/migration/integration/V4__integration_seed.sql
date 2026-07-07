@@ -21,7 +21,7 @@ VALUES
   ('dddddddd-0005-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2', '消息-Kafka', 'KAFKA',
    '{"host":"kafka-broker-1","port":9092,"dbName":"events","username":"consumer"}'::jsonb,
    'VPC','PROD','OK','2026-06-14T02:10:00Z')
-ON CONFLICT (tenant_id, name) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ---------- 采集任务 ----------
 ALTER TABLE integration.sync_task
@@ -34,16 +34,30 @@ VALUES
   ('55555555-0003-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'dddddddd-0002-0000-0000-000000000001', 'user_cdc', 'CDC', 'ods.users', 'users', '', NULL, 'ENABLED', NULL),
   ('55555555-0004-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'dddddddd-0003-0000-0000-000000000001', 'logs_file', 'FILE', 'ods.access_log', 'access_log', '', NULL, 'ENABLED', NULL),
   ('55555555-0005-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'dddddddd-0004-0000-0000-000000000001', 'risk_events', 'FULL', 'ods.risk_events', 'risk_events', '0 4 * * 1', NULL, 'DRAFT', NULL)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (tenant_id, name) DO UPDATE SET
+  source_id = EXCLUDED.source_id,
+  mode = EXCLUDED.mode,
+  target_table = EXCLUDED.target_table,
+  source_table = EXCLUDED.source_table,
+  schedule_cron = EXCLUDED.schedule_cron,
+  rate_limit = EXCLUDED.rate_limit,
+  status = EXCLUDED.status,
+  airbyte_connection_id = EXCLUDED.airbyte_connection_id;
 
 -- ---------- 运行实例 ----------
 INSERT INTO integration.sync_run (id, task_id, external_job_id, status, rows_read, rows_written, started_at, finished_at, error_code, error_msg)
-VALUES
-  ('66666666-1042-0000-0000-000000000001', '55555555-0001-0000-0000-000000000001', 'ab-1042', 'SUCCEEDED', 123456, 123456, '2026-06-14T02:00:01Z', '2026-06-14T02:00:49Z', NULL, NULL),
-  ('66666666-1041-0000-0000-000000000001', '55555555-0001-0000-0000-000000000001', 'ab-1041', 'FAILED',    0,      0,      '2026-06-13T02:00:01Z', '2026-06-13T02:00:13Z', 'AUTH_401', '账号密码过期'),
-  ('66666666-1040-0000-0000-000000000001', '55555555-0001-0000-0000-000000000001', 'ab-1040', 'SUCCEEDED', 122800, 122800, '2026-06-12T02:00:01Z', '2026-06-12T02:00:45Z', NULL, NULL),
-  ('66666666-1038-0000-0000-000000000001', '55555555-0002-0000-0000-000000000001', 'ab-1038', 'SUCCEEDED',  89500,  89500, '2026-06-14T02:00:01Z', '2026-06-14T02:00:30Z', NULL, NULL),
-  ('66666666-1037-0000-0000-000000000001', '55555555-0003-0000-0000-000000000001', 'flink-9381', 'RUNNING', 1843201, 1843201, '2026-06-13T08:00:00Z', NULL, NULL, NULL)
+SELECT v.id, st.id, v.external_job_id, v.status, v.rows_read, v.rows_written, v.started_at, v.finished_at, v.error_code, v.error_msg
+FROM (
+  VALUES
+    ('66666666-1042-0000-0000-000000000001'::uuid, 'orders_sync', 'ab-1042', 'SUCCEEDED', 123456::bigint, 123456::bigint, '2026-06-14T02:00:01Z'::timestamptz, '2026-06-14T02:00:49Z'::timestamptz, NULL, NULL),
+    ('66666666-1041-0000-0000-000000000001'::uuid, 'orders_sync', 'ab-1041', 'FAILED', 0::bigint, 0::bigint, '2026-06-13T02:00:01Z'::timestamptz, '2026-06-13T02:00:13Z'::timestamptz, 'AUTH_401', '账号密码过期'),
+    ('66666666-1040-0000-0000-000000000001'::uuid, 'orders_sync', 'ab-1040', 'SUCCEEDED', 122800::bigint, 122800::bigint, '2026-06-12T02:00:01Z'::timestamptz, '2026-06-12T02:00:45Z'::timestamptz, NULL, NULL),
+    ('66666666-1038-0000-0000-000000000001'::uuid, 'order_items_sync', 'ab-1038', 'SUCCEEDED', 89500::bigint, 89500::bigint, '2026-06-14T02:00:01Z'::timestamptz, '2026-06-14T02:00:30Z'::timestamptz, NULL, NULL),
+    ('66666666-1037-0000-0000-000000000001'::uuid, 'user_cdc', 'flink-9381', 'RUNNING', 1843201::bigint, 1843201::bigint, '2026-06-13T08:00:00Z'::timestamptz, NULL, NULL, NULL)
+) AS v(id, task_name, external_job_id, status, rows_read, rows_written, started_at, finished_at, error_code, error_msg)
+JOIN integration.sync_task st
+  ON st.tenant_id = '11111111-1111-1111-1111-111111111111'
+ AND st.name = v.task_name
 ON CONFLICT DO NOTHING;
 
 -- ---------- CDC 任务 ----------

@@ -11,4 +11,4 @@ CREATE TABLE IF NOT EXISTS integration.cdc_task (
     started_at   TIMESTAMP WITH TIME ZONE,
     created_at   TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
-CREATE INDEX idx_cdc_tenant ON integration.cdc_task (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_cdc_tenant ON integration.cdc_task (tenant_id);

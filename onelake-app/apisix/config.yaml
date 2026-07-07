@@ -5,7 +5,7 @@ apisix:
   node_listen: 9080
   control:
     ip: 0.0.0.0
-    port: 9180
+    port: 9090
   admin_key:
     -
       name: "admin-key"
@@ -16,11 +16,18 @@ deployment:
   role: traditional
   role_traditional:
     config_provider: etcd
-
-etcd:
-  host:
-    - "http://127.0.0.1:2379"
-  prefix: "/apisix"
+  admin:
+    allow_admin:
+      - 0.0.0.0/0
+    admin_key:
+      -
+        name: "admin-key"
+        key: "edd1c9f034335f136f87ad84b625c8f1"
+        role: admin
+  etcd:
+    host:
+      - "http://etcd:2379"
+    prefix: "/apisix"
 
 plugin_attr:
   prometheus:

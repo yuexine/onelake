@@ -6,7 +6,7 @@
 onelake-app/
 ├── pom.xml                                 # 父 POM，依赖版本锁定（§3.2）
 ├── Makefile                                # up/down/seed/migrate/backend/dev（§5.2）
-├── docker-compose.yml                      # 13 个数据面组件（§6.1）
+├── docker-compose.yml                      # Compose 数据面组件（§6.1，完整部署见 docs/本地开发环境完整部署指南.md）
 ├── .gitignore
 │
 ├── module-common/                          # 公共模块（§6.7/6.9/6.13）

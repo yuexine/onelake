@@ -91,7 +91,7 @@ services:
 <aside>
 ⚙️
 
-统一用根 `Makefile` 编排:`make dp-up`（拉起数据面）、`make dp-down`、`make trino-init`（建 namespace）、`make dbt-build`、`make dagster-dev`。与技术初始化文档第五章本地开发流程衔接。
+本地当前使用 `onelake-app/Makefile` 编排：`make up`（拉起 Compose 数据面）、`make down`、`make migrate`、`make ods-dwd-baseline`、`make ods-dwd-verify`、`make dagster-up`。完整部署步骤见 `docs/本地开发环境完整部署指南.md`。
 
 </aside>
 
@@ -345,12 +345,14 @@ Airbyte 落 `ods`,dbt 逐层加工到 `dwd/dws/ads`,Trino 统一查询,Superset/
 
 ## 九、本地开发与调试流程
 
-1. `make dp-up` 拉起数据面 → `make trino-init` 建 namespace。
-2. Airbyte UI（8000）配置或由控制面 API 创建 source/destination/connection。
-3. dbt 开发循环:`dbt run -s <模型>` → `dbt test`,Trino UI（8080）验证结果。
-4. `make dagster-dev`（3000）手动 Materialize 资产,观察 dbt/airbyte 资产状态。
-5. 调试回写:给 Dagster run 打 `onelake/sync_run_id` tag,确认控制面 `sync_run` 状态被 reconcile 更新。
-6. 端到端验证:控制面触发 → ods 有数据 → dbt 加工 → ads 可查 → catalog 出现资产。
+1. `cd onelake-app && docker compose up -d --build` 首次构建并拉起 Compose 数据面；日常可用 `make up`。
+2. `make seed && make migrate` 初始化 Keycloak/MinIO 和控制面多 schema。
+3. 首次启动 OpenMetadata 前执行 `docker compose run --rm openmetadata ./bootstrap/openmetadata-ops.sh migrate`。
+4. Airbyte 不在 Compose 中；需要采集链路时用 `AIRBYTE_LOW_RESOURCE_MODE=true make airbyte-up`，UI/API 在 `8000`。
+5. dbt 开发循环:`dbt run -s <模型>` → `dbt test`,Trino 在宿主机 `18080` 验证结果。
+6. Dagster UI 在 `3000`，手动 Materialize 资产或观察 Sensor。
+7. 调试回写:给 Dagster run 打 `onelake/sync_run_id` tag,确认控制面 `sync_run` 状态被 reconcile 更新。
+8. 端到端验证:控制面触发 → ods 有数据 → dbt 加工 → ads 可查 → catalog 出现资产。
 
 ## 十、落地清单（DoD）
 

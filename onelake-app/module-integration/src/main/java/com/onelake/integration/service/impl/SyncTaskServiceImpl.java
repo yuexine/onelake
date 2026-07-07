@@ -566,14 +566,15 @@ public class SyncTaskServiceImpl implements SyncTaskService {
             dsRepo.save(source);
         }
         try {
-        return airbyte.ensureConnection(
-            airbyteSourceId,
-            airbyteDestinationId,
-            "onelake-" + task.getName(),
-            task.getSourceTable(),
-            task.getTargetTable(),
-            fieldMappingList(task.getFieldMapping())
-        );
+            return airbyte.ensureConnection(
+                workspaceId,
+                airbyteSourceId,
+                airbyteDestinationId,
+                "onelake-" + task.getName(),
+                task.getSourceTable(),
+                task.getTargetTable(),
+                fieldMappingList(task.getFieldMapping())
+            );
         } catch (DataplaneException e) {
             throw new BizException(50010, e.getMessage());
         }

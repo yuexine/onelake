@@ -10,4 +10,4 @@ CREATE TABLE IF NOT EXISTS integration.file_source (
     enabled     BOOLEAN DEFAULT true,
     created_at  TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
-CREATE INDEX idx_file_src_tenant ON integration.file_source (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_file_src_tenant ON integration.file_source (tenant_id);

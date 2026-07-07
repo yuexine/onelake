@@ -71,7 +71,7 @@ mvn -pl bootstrap test \
 
 ```bash
 cd onelake-app
-make up                 # postgres/redis/minio/hive-metastore/trino/keycloak/openmetadata/postgrest/apisix/dagster/airbyte/superset/jupyterhub
+make up                 # postgres/redis/minio/hive-metastore/trino/keycloak/openmetadata/postgrest/apisix/dagster/superset/jupyterhub 等 Compose 服务；Airbyte 单独 make airbyte-up
 make seed               # Keycloak realm "onelake" + 角色（DE/ADMIN/CONSUMER/SEC/OPS）+ MinIO bucket
 make migrate            # Flyway 应用全部 9 schema 迁移
 ```
@@ -82,12 +82,12 @@ make migrate            # Flyway 应用全部 9 schema 迁移
 | PostgreSQL | 5432 | `psql -h localhost -U onelake -d onelake -c '\dn'`（应见 9 schema） |
 | Redis | 6379 | `redis-cli ping` |
 | Keycloak | 8081 | `curl http://localhost:8081/realms/onelake/.well-known/openid-configuration` |
-| Trino | 8080（host 18080） | `curl http://localhost:8080/v1/info` |
+| Trino | 18080 | `curl http://localhost:18080/v1/info` |
 | Superset | 8088 | `curl http://localhost:8088/health` |
-| JupyterHub | 8000 | `curl http://localhost:8000/hub/api/` |
+| JupyterHub | 18000 | `curl http://localhost:18000/` |
 | Dagster | 3000 | `curl http://localhost:3000/graphql -d '{"query":"{repositories{locations{name}}}"}'` |
 
-### 3.2 启动控制面（Spring Boot :9080 通过 APISIX 代理）
+### 3.2 启动控制面（Spring Boot :8080，APISIX :9080 代理）
 
 ```bash
 make backend           # mvn -pl bootstrap spring-boot:run

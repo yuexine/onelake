@@ -2,14 +2,22 @@
 -- 详见 docs/RUNSTATUS_ENUM_AUDIT.md §2.3
 -- 只改字符串值，不破坏外键或约束
 
--- orchestration.job_run
-UPDATE orchestration.job_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+-- orchestration.job_run / modeling.model_run / integration.sync_run may not
+-- exist yet when the per-schema migration script runs common first.
+DO $$
+BEGIN
+    IF to_regclass('orchestration.job_run') IS NOT NULL THEN
+        UPDATE orchestration.job_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+    END IF;
 
--- modeling.model_run
-UPDATE modeling.model_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+    IF to_regclass('modeling.model_run') IS NOT NULL THEN
+        UPDATE modeling.model_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+    END IF;
 
--- integration.sync_run（种子数据中可能存在 SUCCESS）
-UPDATE integration.sync_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+    IF to_regclass('integration.sync_run') IS NOT NULL THEN
+        UPDATE integration.sync_run SET status = 'SUCCEEDED' WHERE status = 'SUCCESS';
+    END IF;
+END $$;
 
 -- quality.run_result（若存在）
 DO $$

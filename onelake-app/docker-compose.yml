@@ -150,18 +150,27 @@ services:
       MYSQL_PASSWORD: openmetadata
       MYSQL_DATABASE: openmetadata_db
     volumes: ["ommysqldata:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uopenmetadata -popenmetadata"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   openmetadata:
     image: openmetadata/server:1.5.6
     container_name: onelake-openmetadata
-    depends_on: [openmetadata-es, openmetadata-mysql]
+    depends_on:
+      openmetadata-es:
+        condition: service_started
+      openmetadata-mysql:
+        condition: service_healthy
     environment:
-      OPENMETADATA_ELASTICSEARCH_HOST: openmetadata-es
-      OPENMETADATA_ELASTICSEARCH_PORT: "9200"
-      OPENMETADATA_DB_HOST: openmetadata-mysql
-      OPENMETADATA_DB_USER: openmetadata
-      OPENMETADATA_DB_PASSWORD: openmetadata
-      OPENMETADATA_DB_SCHEMA: openmetadata_db
+      ELASTICSEARCH_HOST: openmetadata-es
+      ELASTICSEARCH_PORT: "9200"
+      DB_HOST: openmetadata-mysql
+      DB_USER: openmetadata
+      DB_USER_PASSWORD: openmetadata
+      OM_DATABASE: openmetadata_db
     ports: ["8585:8585"]
 
   postgrest:
@@ -171,9 +180,24 @@ services:
       PGRST_DB_URI: postgres://onelake:onelake@postgres:5432/onelake
       PGRST_DB_SCHEMA: dataservice_api
       PGRST_DB_ANON_ROLE: web_anon
-      PGRST_JWT_SECRET: onelake-dev-secret-change-me
+      PGRST_JWT_SECRET: onelake-dev-secret-change-me-please-rotate
     ports: ["3001:3000"]
     depends_on: [postgres]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.21
+    container_name: onelake-etcd
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=etcd=http://etcd:2380
+      - --initial-cluster-token=onelake-etcd
+      - --initial-cluster-state=new
 
   apisix:
     image: apache/apisix:latest
@@ -181,8 +205,7 @@ services:
     ports: ["9080:9080", "9180:9180"]
     volumes:
       - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
-      - apisixdata:/usr/local/apisix:rw
-    depends_on: [postgrest]
+    depends_on: [postgrest, etcd]
 
   dagster-postgres:
     image: postgres:16
@@ -285,17 +308,17 @@ services:
       dockerfile: Dockerfile
     image: onelake/jupyterhub:4.1
     container_name: onelake-jupyterhub
-    ports: ["8000:8000"]
+    ports: ["18000:8000"]
     environment:
       KEYCLOAK_ISSUER: http://keycloak:8080/realms/onelake
-      OAUTH_CALLBACK_URL: http://localhost:8000/hub/oauth_callback
+      OAUTH_CALLBACK_URL: http://localhost:18000/hub/oauth_callback
       OAUTH_CLIENT_ID: jupyterhub
       OAUTH_CLIENT_SECRET: jupyterhub-dev-secret
       ONELAKE_CONTROL_PLANE_URL: http://backend:8080
       TRINO_HOST: trino
     depends_on: [keycloak]
     volumes:
-      - jupyterdata:/srv/jupyterhub
+      - jupyterdata:/srv/jupyterhub/data
       - ./jupyter/onelake:/opt/onelake/sdk:ro
 
   # ──────────────────────────────────────────────

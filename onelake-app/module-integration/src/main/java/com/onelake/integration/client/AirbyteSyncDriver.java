@@ -268,11 +268,21 @@ public class AirbyteSyncDriver {
                                    String sourceTable,
                                    String targetTable,
                                    List<Map<String, Object>> fieldMapping) {
+        return ensureConnection(workspaceId, sourceId, destinationId, name, sourceTable, targetTable, fieldMapping);
+    }
+
+    public String ensureConnection(String connectionWorkspaceId,
+                                   String sourceId,
+                                   String destinationId,
+                                   String name,
+                                   String sourceTable,
+                                   String targetTable,
+                                   List<Map<String, Object>> fieldMapping) {
         String requestedName = name == null || name.isBlank()
             ? "onelake-" + sourceId.substring(0, Math.min(8, sourceId.length()))
             : name;
         // 1. 查找已有
-        JsonNode listResp = post("/connections/list", workspaceScopedBody());
+        JsonNode listResp = post("/connections/list", workspaceScopedBody(connectionWorkspaceId));
         if (listResp != null && listResp.has("connections")) {
             for (JsonNode c : listResp.path("connections")) {
                 String sId = c.path("sourceId").asText("");
@@ -409,10 +419,14 @@ public class AirbyteSyncDriver {
     }
 
     private Map<String, Object> workspaceScopedBody() {
-        if (!StringUtils.hasText(workspaceId)) {
+        return workspaceScopedBody(workspaceId);
+    }
+
+    private Map<String, Object> workspaceScopedBody(String scopedWorkspaceId) {
+        if (!StringUtils.hasText(scopedWorkspaceId)) {
             return Map.of();
         }
-        return Map.of("workspaceId", workspaceId);
+        return Map.of("workspaceId", scopedWorkspaceId);
     }
 
     private Map<String, Object> syncCatalog(String sourceId,

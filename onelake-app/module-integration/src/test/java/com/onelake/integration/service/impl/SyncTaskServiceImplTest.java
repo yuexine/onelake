@@ -251,19 +251,20 @@ class SyncTaskServiceImplTest {
             "port", 5432,
             "database", "orders",
             "username", "reader",
+            "airbyteWorkspaceId", "workspace-1",
             "airbyteSourceId", "ab-src",
             "airbyteDestinationId", "ab-dst"
         )));
         when(taskRepo.findById(taskId)).thenReturn(Optional.of(task));
         when(dsRepo.findById(sourceId)).thenReturn(Optional.of(ds));
-        when(airbyte.ensureConnection(eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList()))
+        when(airbyte.ensureConnection(eq("workspace-1"), eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList()))
             .thenReturn("conn-new");
 
         SyncTaskDTO dto = service.enable(taskId);
 
         assertThat(dto.status()).isEqualTo("ENABLED");
         assertThat(dto.airbyteConnectionId()).isEqualTo("conn-new");
-        verify(airbyte).ensureConnection(eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList());
+        verify(airbyte).ensureConnection(eq("workspace-1"), eq("ab-src"), eq("ab-dst"), eq("onelake-orders-cdc"), eq("public.orders"), eq("ods.orders"), anyList());
     }
 
     @Test

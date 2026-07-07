@@ -1,7 +1,7 @@
 COMPOSE := docker compose -f docker-compose.yml
 MVN := mvn -q
 
-.PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down down ps logs seed migrate ods-dwd-baseline ods-dwd-verify backend debug frontend dev clean help fmt
+.PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down apisix-routes mall-mysql-ods-load down ps logs seed migrate ods-dwd-baseline ods-dwd-verify backend debug frontend dev clean help fmt
 
 help:
 	@echo "OneLake 控制面 - 本地开发 Makefile"
@@ -10,6 +10,8 @@ help:
 	@echo "  make dagster-up  构建并启动 Dagster webserver/daemon/code-location"
 	@echo "  make airbyte-up  使用 abctl 启动本地 Airbyte（默认 http://localhost:8000）"
 	@echo "  make airbyte-status / airbyte-credentials / airbyte-down"
+	@echo "  make apisix-routes 初始化本地 APISIX 控制面 API 路由"
+	@echo "  make mall-mysql-ods-load 将本地商城 MySQL 测试数据装载到 Iceberg ODS"
 	@echo "  make down        停止并清理数据面"
 	@echo "  make ps          查看容器状态"
 	@echo "  make logs        跟踪数据面日志"
@@ -26,7 +28,7 @@ help:
 up:
 	$(COMPOSE) up -d
 	@echo "waiting for postgres..." && sleep 5
-	@echo "Compose 数据面已启动。访问: MinIO=9001  Trino=8080  Keycloak=8081  OpenMetadata=8585  Dagster=3000"
+	@echo "Compose 数据面已启动。访问: MinIO=9001  Trino=18080  Keycloak=8081  OpenMetadata=8585  Dagster=3000  JupyterHub=18000"
 	@echo "Airbyte 不再由 docker-compose 管理，请使用: make airbyte-up"
 
 up-core:
@@ -52,6 +54,12 @@ airbyte-credentials:
 airbyte-down:
 	./scripts/airbyte-local.sh uninstall
 
+apisix-routes:
+	./scripts/apisix-routes.sh
+
+mall-mysql-ods-load:
+	./scripts/mall-mysql-ods-load.sh
+
 down:
 	$(COMPOSE) down
 
@@ -64,6 +72,7 @@ logs:
 seed:
 	./scripts/keycloak-realm.sh
 	./scripts/minio-bucket.sh warehouse
+	./scripts/apisix-routes.sh
 
 migrate:
 	MVN="$(MVN)" ./scripts/flyway-migrate.sh

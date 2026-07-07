@@ -1,6 +1,6 @@
 # JupyterHub 镜像：含 papermill + 算法库 + trino/spark client + onelake Python SDK
 # 一行说明：JupyterHub 4.x 多用户 + JupyterLab + PySpark/Trino + 算法库
-FROM jupyterhub:4.1
+FROM jupyterhub/jupyterhub:4.1
 
 USER root
 
@@ -38,6 +38,8 @@ RUN pip install --no-cache-dir \
       psycopg2-binary==2.9.* \
       redis==5.0.* \
       python-dotenv==1.0.*
+
+RUN pip install --no-cache-dir oauthenticator==16.*
 
 # onelake Python SDK（由 P4b 实现后，挂载 onelake-app/jupyter/onelake 到 /opt/onelake/sdk）
 # 通过 editable install 或 PYTHONPATH 让用户 cell 中可 `from onelake import dataset, publish`

@@ -11,7 +11,7 @@
 | 维度 | 设计要求 | 实施结果 | 状态 |
 |------|---------|---------|------|
 | 控制面 | `onelake-app` 模块化单体（8 业务模块 + bootstrap） | **10 个 Maven 子模块**（2026-06-29 加入 `module-analytics`） | ✅ 完成 |
-| 数据面 | Compose 组件 + Airbyte 本地部署 | `docker-compose.yml` 覆盖 Compose 组件；Airbyte 改由 `abctl` 管理且本地入口已可访问；2026-06-29 加入 `jupyterhub` + Superset 嵌入开关 | ⚠ 待端到端联调 |
+| 数据面 | Compose 组件 + Airbyte 本地部署 | `docker-compose.yml` 覆盖 Compose 组件；Airbyte 改由 `abctl` 管理；2026-06-29 本地 Compose 全组件已启动并验证，Airbyte 子集群当前单独存在 503/CrashLoop 排障项 | ⚠ Airbyte 待恢复 |
 | 数据库 | 单 PG + 9 schema（含 dataservice_api） | **9 个 schema Flyway 脚本**（2026-06-29 加入 `analytics` 含 dataset / dashboard / dashboard_publication / notebook / notebook_template / notebook_run / query_log） | ✅ 完成 |
 | 前端 | React 18 + TS + Ant Design Pro | 工作台 + 集成模块完整 / 其余占位骨架；2026-06-29 加入完整"数据分析"一级菜单（11 段）：数据集 / 大屏中心（自研 ScreenDesigner + Superset 嵌入）/ Notebook / 组件模板库 | ⚠ 部分 |
 | dbt | ODS→DWD→ADS 分层 + 质量门禁 | 工程骨架 + 示例模型 + 脱敏宏 | ✅ 完成 |
@@ -30,7 +30,7 @@
 | `onelake-app/pom.xml` | §3.2 父 POM 依赖版本锁定 | ✅ |
 | `onelake-app/Makefile` | §5.2 up/down/seed/migrate/backend/frontend/dev | ✅ |
 | `onelake-app/docker-compose.yml` | §6.1 数据面 Compose 组件；Dagster 为 webserver/daemon/code-location 多容器 | ✅ |
-| `onelake-app/scripts/airbyte-local.sh` | Airbyte 本地 `abctl` 管理入口 | ✅ `airbyte-abctl` / `ingress-nginx` 已 deployed，`http://localhost:8000` 返回 200 |
+| `onelake-app/scripts/airbyte-local.sh` | Airbyte 本地 `abctl` 管理入口 | ⚠ `airbyte-abctl` / `ingress-nginx` 已 deployed；2026-06-29 复验 `http://localhost:8000/api/v1/health` 返回 503，多个 Airbyte workload pod CrashLoop |
 | `onelake-app/.gitignore` | 通用 | ✅ |
 | `scripts/postgres-init.sql` | §7.1 pgcrypto + web_anon 角色 | ✅ |
 | `scripts/keycloak-realm.sh` | §5.2 seed 目标 + §八 校验 #2 | ✅ |
@@ -272,7 +272,7 @@
 | 校验项 | 状态 |
 |--------|------|
 | **Maven 全模块编译验证** | ✅ **BUILD SUCCESS**（10 个模块全部通过 `mvn install -DskipTests`） |
-| ① `docker compose up -d` 全部组件健康 | ⚠ 待用户实机启动验证（compose 已就绪） |
+| ① `docker compose up -d --build` 全部 Compose 组件健康 | ✅ 2026-06-29 已实机验证：后端/前端/OpenMetadata/APISIX/PostgREST/Dagster/Superset/Trino/JupyterHub 等可访问；Airbyte 不属于 Compose |
 | ② Keycloak onelake realm + 5 角色 + onelake-app 客户端 | ✅ `scripts/keycloak-realm.sh` |
 | ③ `make migrate` Flyway 8 schema 建表 | ✅ 8 个 V1__*.sql 已就绪 |
 | ④ Airbyte → ODS → sync_run 回写 | ✅ 已完成真实本地实证：Postgres 源表 3 行经 Airbyte job `2` 同步到 `onelake_lake.ods_airbyte.codex_orders`，`sync_run` 回写 `rowsRead=3`、`rowsWritten=3` |

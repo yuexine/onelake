@@ -45,6 +45,7 @@
         <redisson.version>3.32.0</redisson.version>
         <lombok.version>1.18.34</lombok.version>
         <jsqlparser.version>4.9</jsqlparser.version>
+        <argLine></argLine>
     </properties>
 
     <dependencyManagement>
@@ -182,6 +183,13 @@
                     <groupId>org.flywaydb</groupId>
                     <artifactId>flyway-maven-plugin</artifactId>
                     <version>10.17.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>@{argLine} -Dnet.bytebuddy.experimental=true</argLine>
+                    </configuration>
                 </plugin>
             </plugins>
         </pluginManagement>

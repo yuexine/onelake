@@ -13,5 +13,5 @@ CREATE TABLE IF NOT EXISTS common.alert (
     created_at    TIMESTAMPTZ DEFAULT now(),
     acked_at      TIMESTAMPTZ
 );
-CREATE INDEX idx_alert_tenant_status ON common.alert (tenant_id, status);
-CREATE INDEX idx_alert_level ON common.alert (level, status);
+CREATE INDEX IF NOT EXISTS idx_alert_tenant_status ON common.alert (tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_alert_level ON common.alert (level, status);

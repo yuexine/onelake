@@ -5,7 +5,7 @@
 > preserve the current architecture boundaries, and push each change to a
 > verifiable state.
 >
-> Updated: 2026-06-15. If docs and code disagree, trust the current code first,
+> Updated: 2026-06-29. If docs and code disagree, trust the current code first,
 > then update the affected docs.
 
 ## 1. Working Principles
@@ -29,8 +29,8 @@
 | Area | Current Baseline |
 | --- | --- |
 | Backend | Java 17, Spring Boot 3.3.2, Maven multi-module modular monolith under `onelake-app/`. |
-| Modules | `module-common`, `module-integration`, `module-orchestration`, `module-catalog`, `module-modeling`, `module-quality`, `module-security`, `module-dataservice`, and `bootstrap`. |
-| Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, and Superset. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
+| Modules | `module-common`, `module-integration`, `module-orchestration`, `module-catalog`, `module-modeling`, `module-quality`, `module-security`, `module-dataservice`, `module-analytics`, and `bootstrap`. |
+| Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, Superset, JupyterHub, Spark, Flink, Kafka/Zookeeper, and etcd. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
 | Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. |
 | Frontend | React 18, Vite 5, TypeScript, Ant Design 5, Pro Components, React Router, React Query, Zustand, X6, Monaco, ECharts under `onelake-app/web-console`. |
 | Product Scope | MVP control-plane skeleton plus full frontend prototype coverage for the OneLake data platform. |
@@ -42,10 +42,11 @@
 | --- | --- |
 | Project map | `docs/PROJECT_STRUCTURE.md`, `docs/IMPLEMENTATION_STATUS.md` |
 | Technical initialization | `docs/技术初始化文档.md` |
+| Full local deployment | `docs/本地开发环境完整部署指南.md` |
 | Product and function scope | `docs/详细功能清单产品详细设计.md` |
 | Frontend prototype and interaction | `docs/数据平台 · 原型设计与交互说明文档.md`, `docs/FRONTEND_VERIFICATION.md` |
 | Backend boot/config | `onelake-app/pom.xml`, `onelake-app/bootstrap/src/main/resources/application.yml`, `onelake-app/Makefile` |
-| Data plane | `onelake-app/docker-compose.yml`, `onelake-app/scripts/`, `onelake-app/trino/`, `onelake-app/apisix/` |
+| Data plane | `onelake-app/docker-compose.yml`, `onelake-app/scripts/`, `onelake-app/trino/`, `onelake-app/apisix/`, `docs/本地开发环境完整部署指南.md` |
 | Frontend app | `onelake-app/web-console/package.json`, `onelake-app/web-console/vite.config.ts`, `onelake-app/web-console/src/App.tsx`, `onelake-app/web-console/src/routes.tsx` |
 
 Read module-specific docs/code on demand. Do not load every large product
@@ -57,6 +58,7 @@ document unless the task genuinely needs broad product context.
 docs/
   PROJECT_STRUCTURE.md                  # Codebase map and module index
   IMPLEMENTATION_STATUS.md              # Current implementation status
+  本地开发环境完整部署指南.md
   FRONTEND_VERIFICATION.md              # Frontend prototype verification
   技术初始化文档.md
   数据平台 · 原型设计与交互说明文档.md
@@ -75,6 +77,7 @@ onelake-app/
   module-quality/                       # Rules, results, scores, alerts
   module-security/                      # Secrets, masking, grants, RBAC, approvals
   module-dataservice/                   # API publishing, app keys, subscriptions, quotas
+  module-analytics/                     # Dataset, Superset embed, screen designer, notebooks
   dbt/                                  # Trino/dbt models
   scripts/                              # Postgres, Keycloak, MinIO init scripts
   trino/                                # Trino/Hive/Iceberg config
@@ -100,6 +103,7 @@ make seed        # Initialize Keycloak realm and MinIO bucket
 make migrate     # Run Flyway migrations
 make ods-dwd-baseline  # Prepare fixed ODS->DWD sample source/ODS data
 make ods-dwd-verify    # Verify fixed ODS->DWD sample baseline
+make mall-mysql-ods-load # Load local mall MySQL test tables into Iceberg ODS
 make backend     # Run Spring Boot backend in foreground
 make debug       # Run backend with JDWP on 5005
 make frontend    # pnpm install + gen API SDK + Vite dev server
@@ -126,32 +130,42 @@ Useful URLs when services are actually running:
 | OpenAPI JSON | `http://localhost:8080/v3/api-docs` |
 | MinIO Console | `http://localhost:9001/` |
 | Keycloak | `http://localhost:8081/` |
+| Trino | `http://localhost:18080/` |
+| Spark Master / Worker | `http://localhost:18081/`, `http://localhost:18082/` |
+| Flink | `http://localhost:8082/` |
 | OpenMetadata | `http://localhost:8585/` |
 | APISIX Admin | `http://localhost:9180/` |
 | PostgREST | `http://localhost:3001/` |
 | Dagster | `http://localhost:3000/` |
-| Airbyte | `http://localhost:8000/` after `make airbyte-up` |
+| JupyterHub | `http://localhost:18000/` |
+| Airbyte UI | `http://localhost:8000/` after `make airbyte-up` |
+| Airbyte API fallback | `http://localhost:18001/api/v1/health` via `kubectl port-forward` |
 | Superset | `http://localhost:8088/` |
 
 ## 6. Known Runtime Notes
 
-- `docker-compose.yml` maps Trino to host port `8080`, while
-  `bootstrap/src/main/resources/application.yml` configures the Spring Boot
-  backend on port `8080`. Treat this as a current full-stack startup conflict.
-  Before reporting "full stack ready", either move Trino's host port and align
-  dbt `TRINO_PORT`, or make the backend port configurable and update frontend/API
-  generation commands accordingly.
+- The current full local deployment runbook is
+  `docs/本地开发环境完整部署指南.md`. Use it for end-to-end environment
+  lifecycle requests.
+- `docker-compose.yml` maps Trino to host port `18080`, leaving Spring Boot on
+  `8080`. JupyterHub maps to host `18000` because Airbyte reserves `8000`.
 - `web-console/package.json` has `gen:api` pointing at
   `http://localhost:8080/v3/api-docs`; this requires a reachable backend OpenAPI
   endpoint before running `make frontend` successfully.
-- Vite proxies `/api` to APISIX `http://localhost:9080` and `/auth` to Keycloak
-  `http://localhost:8081`. Validate whether a frontend issue is proxy,
-  gateway, backend, or mock/prototype data before changing UI code.
+- Vite proxies `/api` to `VITE_API_PROXY_TARGET` and defaults to
+  `http://localhost:8080`; set `VITE_API_PROXY_TARGET=http://localhost:9080`
+  to verify the APISIX path. Run `make apisix-routes` after APISIX starts so
+  `/api/*` forwards to the local backend.
 - Data-plane startup can be heavy. Report container health and reachable URLs
   separately from local app readiness.
 - Airbyte is no longer started by Docker Compose. Use `make airbyte-up`, which
   delegates to `abctl local install --port 8000`; use `make airbyte-status` and
-  `make airbyte-credentials` for readiness and login credentials.
+  `make airbyte-credentials` for readiness and login credentials. Airbyte runs
+  inside a separate kind cluster and can return `503` while pods are
+  `CrashLoopBackOff`; check it separately from Compose readiness. The backend
+  default Airbyte API endpoint is `http://localhost:18001/api/v1`, which expects
+  a local `kubectl port-forward` to the Airbyte server service when the abctl
+  ingress on `8000` is unstable.
 
 ## 7. Verification Strategy
 

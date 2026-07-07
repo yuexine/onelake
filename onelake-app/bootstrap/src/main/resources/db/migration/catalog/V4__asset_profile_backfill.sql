@@ -18,36 +18,52 @@ FROM latest_sync
 WHERE asset.tenant_id = latest_sync.tenant_id
   AND asset.om_fqn = latest_sync.target_table;
 
-WITH latest_quality AS (
-  SELECT DISTINCT ON (rule.tenant_id, rule.target_fqn)
-    rule.tenant_id,
-    rule.target_fqn,
-    result.pass_rate
-  FROM quality.rule rule
-  JOIN quality.run_result result ON result.rule_id = rule.id
-  ORDER BY rule.tenant_id, rule.target_fqn, result.checked_at DESC
-)
-UPDATE catalog.asset asset
-SET quality_score = latest_quality.pass_rate
-FROM latest_quality
-WHERE asset.tenant_id = latest_quality.tenant_id
-  AND asset.om_fqn = latest_quality.target_fqn;
+DO $$
+BEGIN
+  IF to_regclass('quality.rule') IS NOT NULL
+     AND to_regclass('quality.run_result') IS NOT NULL THEN
+    EXECUTE $sql$
+      WITH latest_quality AS (
+        SELECT DISTINCT ON (rule.tenant_id, rule.target_fqn)
+          rule.tenant_id,
+          rule.target_fqn,
+          result.pass_rate
+        FROM quality.rule rule
+        JOIN quality.run_result result ON result.rule_id = rule.id
+        ORDER BY rule.tenant_id, rule.target_fqn, result.checked_at DESC
+      )
+      UPDATE catalog.asset asset
+      SET quality_score = latest_quality.pass_rate
+      FROM latest_quality
+      WHERE asset.tenant_id = latest_quality.tenant_id
+        AND asset.om_fqn = latest_quality.target_fqn
+    $sql$;
+  END IF;
+END $$;
 
-WITH api_usage AS (
-  SELECT
-    api.tenant_id,
-    api.source_fqn,
-    COUNT(sub.id) FILTER (WHERE sub.status = 'APPROVED')::int AS subscriptions
-  FROM dataservice.api_definition api
-  LEFT JOIN dataservice.subscription sub ON sub.api_id = api.id
-  WHERE api.source_fqn IS NOT NULL AND api.source_fqn <> ''
-  GROUP BY api.tenant_id, api.source_fqn
-)
-UPDATE catalog.asset asset
-SET popularity = COALESCE(api_usage.subscriptions, 0)
-FROM api_usage
-WHERE asset.tenant_id = api_usage.tenant_id
-  AND asset.om_fqn = api_usage.source_fqn;
+DO $$
+BEGIN
+  IF to_regclass('dataservice.api_definition') IS NOT NULL
+     AND to_regclass('dataservice.subscription') IS NOT NULL THEN
+    EXECUTE $sql$
+      WITH api_usage AS (
+        SELECT
+          api.tenant_id,
+          api.source_fqn,
+          COUNT(sub.id) FILTER (WHERE sub.status = 'APPROVED')::int AS subscriptions
+        FROM dataservice.api_definition api
+        LEFT JOIN dataservice.subscription sub ON sub.api_id = api.id
+        WHERE api.source_fqn IS NOT NULL AND api.source_fqn <> ''
+        GROUP BY api.tenant_id, api.source_fqn
+      )
+      UPDATE catalog.asset asset
+      SET popularity = COALESCE(api_usage.subscriptions, 0)
+      FROM api_usage
+      WHERE asset.tenant_id = api_usage.tenant_id
+        AND asset.om_fqn = api_usage.source_fqn
+    $sql$;
+  END IF;
+END $$;
 
 UPDATE catalog.asset
 SET

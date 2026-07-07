@@ -86,7 +86,7 @@ onelake:
         jobs-medium-threshold: ${CATALOG_LINEAGE_JOBS_MED:5}
   dataplane:
     airbyte:
-      base-url: ${AIRBYTE_URL:http://localhost:8000/api/v1}
+      base-url: ${AIRBYTE_URL:http://localhost:18001/api/v1}
       auth:
         client-id: ${AIRBYTE_CLIENT_ID:}
         client-secret: ${AIRBYTE_CLIENT_SECRET:}
@@ -146,7 +146,7 @@ onelake:
         admin-password: ${SUPERSET_ADMIN_PASSWORD:admin}
         guest-token-jwt-secret: ${SUPERSET_GUEST_TOKEN_JWT_SECRET:onelake-superset-guest}
       jupyterhub:
-        base-url: ${JUPYTERHUB_URL:http://localhost:8000}
+        base-url: ${JUPYTERHUB_URL:http://localhost:18000}
         admin-token: ${JUPYTERHUB_ADMIN_TOKEN:}
         notebook-token-ttl-seconds: ${JUPYTERHUB_NOTEBOOK_TOKEN_TTL:3600}
       notebook:

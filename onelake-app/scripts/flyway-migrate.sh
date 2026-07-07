@@ -35,3 +35,4 @@ run_schema modeling modeling
 run_schema quality quality
 run_schema security security
 run_schema dataservice dataservice,dataservice_api
+run_schema analytics analytics

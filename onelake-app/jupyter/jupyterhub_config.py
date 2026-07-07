@@ -16,7 +16,7 @@ c.JupyterHub.hub_ip = '0.0.0.0'
 c.JupyterHub.allow_origin = '*'
 
 # DB 持久化（hub state）
-c.JupyterHub.db_url = 'sqlite:///data/jupyterhub.sqlite'
+c.JupyterHub.db_url = 'sqlite:////srv/jupyterhub/data/jupyterhub.sqlite'
 
 # ============ 认证：Keycloak OAuth ============
 from oauthenticator.generic import GenericOAuthenticator  # noqa: E402

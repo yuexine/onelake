@@ -42,8 +42,14 @@ public class JobRun {
     @Column(nullable = false, length = 16)
     private DagStatus status = DagStatus.QUEUED;
 
+    private Instant logicalDate;
+    private Instant dataIntervalStart;
+    private Instant dataIntervalEnd;
+    private UUID backfillId;
+
     private Instant startedAt;
     private Instant finishedAt;
     private UUID triggeredBy;
     private String triggeredByName;
+    private Instant updatedAt = Instant.now();
 }

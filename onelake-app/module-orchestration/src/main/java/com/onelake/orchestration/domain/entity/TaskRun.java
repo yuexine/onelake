@@ -44,6 +44,21 @@ public class TaskRun {
     @Column(nullable = false, length = 16)
     private TaskRunStatus status = TaskRunStatus.QUEUED;
 
+    @Column(nullable = false)
+    private int attempt = 1;
+
+    @Column(nullable = false)
+    private int maxRetries = 0;
+
+    @Column(length = 512)
+    private String logRef;
+
+    @Column(length = 256)
+    private String dagsterStepKey;
+
+    private Instant dataIntervalStart;
+    private Instant dataIntervalEnd;
+
     private Long rowsWritten;
     private Long scanBytes;
 

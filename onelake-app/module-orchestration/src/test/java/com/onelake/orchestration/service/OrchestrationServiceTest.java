@@ -7,13 +7,17 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.dto.PipelineCompileResult;
+import com.onelake.orchestration.dto.TaskRunCallbackRequest;
+import com.onelake.orchestration.dto.TaskRunCallbackResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -420,6 +424,208 @@ class OrchestrationServiceTest {
         verifyNoInteractions(dagster);
     }
 
+    @Test
+    void applyTaskRunCallbackRefreshesRunningIdempotently() {
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        Dag dag = dag();
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        Instant startedAt = Instant.parse("2026-07-09T01:00:00Z");
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
+                .thenReturn(Optional.of(taskRun));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.RUNNING,
+                        startedAt,
+                        null,
+                        null,
+                        null,
+                        12L,
+                        34L,
+                        "s3://logs/run/spark_node.log",
+                        2,
+                        "spark_node_step"));
+
+        assertThat(result.applied()).isTrue();
+        assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(taskRun.getStartedAt()).isEqualTo(startedAt);
+        assertThat(taskRun.getRowsWritten()).isEqualTo(12L);
+        assertThat(taskRun.getScanBytes()).isEqualTo(34L);
+        assertThat(taskRun.getLogRef()).isEqualTo("s3://logs/run/spark_node.log");
+        assertThat(taskRun.getAttempt()).isEqualTo(2);
+        assertThat(taskRun.getDagsterStepKey()).isEqualTo("spark_node_step");
+        verify(taskRunRepo).save(taskRun);
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(any());
+    }
+
+    @Test
+    void applyTaskRunCallbackKeepsTerminalTaskRunImmutable() {
+        JobRun run = jobRun(DAG_ID);
+        Dag dag = dag();
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.SUCCEEDED);
+        taskRun.setRowsWritten(10L);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(taskRun));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.FAILED,
+                        null,
+                        Instant.parse("2026-07-09T01:05:00Z"),
+                        "late failure",
+                        null,
+                        0L,
+                        null,
+                        "new-log",
+                        3,
+                        "new-step"));
+
+        assertThat(result.applied()).isFalse();
+        assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(taskRun.getRowsWritten()).isEqualTo(10L);
+        assertThat(taskRun.getLogRef()).isNull();
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
+    void applyTaskRunCallbackRejectsStatusRankRollback() {
+        JobRun run = jobRun(DAG_ID);
+        Dag dag = dag();
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
+                .thenReturn(Optional.of(taskRun));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.QUEUED,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        "rollback-log",
+                        null,
+                        null));
+
+        assertThat(result.applied()).isFalse();
+        assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(taskRun.getLogRef()).isNull();
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
+    void applyTaskRunCallbackPersistsTerminalFields() {
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        Dag dag = dag();
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        Instant startedAt = Instant.parse("2026-07-09T01:00:00Z");
+        Instant finishedAt = Instant.parse("2026-07-09T01:02:00Z");
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
+                .thenReturn(Optional.of(taskRun));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.SUCCEEDED,
+                        startedAt,
+                        finishedAt,
+                        null,
+                        "table:dwd.spark_node",
+                        88L,
+                        4096L,
+                        "s3://logs/run/spark_node.log",
+                        1,
+                        "spark_node_step"));
+
+        assertThat(result.applied()).isTrue();
+        assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(taskRun.getStartedAt()).isEqualTo(startedAt);
+        assertThat(taskRun.getFinishedAt()).isEqualTo(finishedAt);
+        assertThat(taskRun.getArtifactPath()).isEqualTo("table:dwd.spark_node");
+        assertThat(taskRun.getRowsWritten()).isEqualTo(88L);
+        assertThat(taskRun.getScanBytes()).isEqualTo(4096L);
+        assertThat(taskRun.getLogRef()).isEqualTo("s3://logs/run/spark_node.log");
+        assertThat(taskRun.getDagsterStepKey()).isEqualTo("spark_node_step");
+        verify(taskRunRepo).save(taskRun);
+    }
+
+    @Test
+    void applyTaskRunCallbackShortCircuitsQueuedDownstreamFromFailedSeed() {
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        Dag dag = dag();
+        TaskRun failed = taskRun("extract", TaskRunStatus.RUNNING);
+        TaskRun downstream = taskRun("load", TaskRunStatus.QUEUED);
+        PipelineTaskEdge edge = pipelineEdge("extract", "load");
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(failed, downstream));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "extract",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.FAILED,
+                        null,
+                        Instant.parse("2026-07-09T01:02:00Z"),
+                        "boom",
+                        null,
+                        null,
+                        null,
+                        "s3://logs/run/extract.log",
+                        1,
+                        "extract_step"));
+
+        assertThat(result.applied()).isTrue();
+        assertThat(failed.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(failed.getErrorMsg()).isEqualTo("boom");
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
+        assertThat(downstream.getErrorMsg()).isEqualTo("Upstream task failed: extract");
+        assertThat(downstream.getFinishedAt()).isNotNull();
+        verify(taskRunRepo).save(failed);
+        verify(taskRunRepo).save(downstream);
+    }
+
+    @Test
+    void terminalRunSyncKeepsCallbackTerminalRowsAndCompensatesPendingRows() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.FAILED);
+        run.setFinishedAt(Instant.parse("2026-07-09T01:03:00Z"));
+        TaskRun callbackTerminal = taskRun("extract", TaskRunStatus.SUCCEEDED);
+        callbackTerminal.setFinishedAt(Instant.parse("2026-07-09T01:01:00Z"));
+        TaskRun pending = taskRun("load", TaskRunStatus.QUEUED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(callbackTerminal, pending));
+
+        service.listRuns(pageable);
+
+        assertThat(callbackTerminal.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(callbackTerminal.getFinishedAt()).isEqualTo(Instant.parse("2026-07-09T01:01:00Z"));
+        assertThat(pending.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(pending.getFinishedAt()).isEqualTo(run.getFinishedAt());
+        assertThat(pending.getErrorMsg()).isEqualTo("Dagster graph run reported FAILED before node callback completed");
+        verify(taskRunRepo, never()).save(callbackTerminal);
+        verify(taskRunRepo).save(pending);
+    }
+
     private Dag dag() {
         Dag dag = new Dag();
         dag.setId(DAG_ID);
@@ -477,6 +683,16 @@ class OrchestrationServiceTest {
         edge.setTargetKey(targetKey);
         edge.setEdgeLayer(EdgeLayer.PIPELINE);
         return edge;
+    }
+
+    private TaskRun taskRun(String taskKey, TaskRunStatus status) {
+        TaskRun taskRun = new TaskRun();
+        taskRun.setId(UUID.randomUUID());
+        taskRun.setTenantId(TENANT_ID);
+        taskRun.setJobRunId(RUN_ID);
+        taskRun.setTaskKey(taskKey);
+        taskRun.setStatus(status);
+        return taskRun;
     }
 
     private List<DagStatus> captureRunStatuses() {

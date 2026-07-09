@@ -6,6 +6,7 @@ import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.dto.PipelineValidationResult;
 import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
@@ -20,6 +21,7 @@ import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -43,6 +46,7 @@ class PipelineStatusMachineTest {
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
     @Mock private TaskRunRepository taskRunRepo;
+    @Mock private JobRunRepository runRepo;
     @Mock private PipelineCompileService compileService;
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
@@ -54,7 +58,7 @@ class PipelineStatusMachineTest {
     @BeforeEach
     void setup() {
         service = new PipelineService(dagRepo, taskRepo, edgeRepo, taskRunRepo,
-                compileService, outboxProvider);
+                runRepo, compileService, outboxProvider);
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -144,6 +148,20 @@ class PipelineStatusMachineTest {
 
         assertThatThrownBy(() -> service.updatePipelineStatus(dagId, "ARCHIVED"))
                 .isInstanceOf(BizException.class);
+    }
+
+    @Test
+    void listTaskRunsRejectsRunOutsideCurrentPipeline() {
+        Dag dag = dag("PUBLISHED");
+        UUID otherRunId = UUID.randomUUID();
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(otherRunId, Set.of(dagId))).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.listTaskRuns(dagId, otherRunId))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("运行实例不存在");
+
+        verifyNoInteractions(taskRunRepo);
     }
 
     private Dag dag(String status) {

@@ -88,6 +88,7 @@ onelake:
     # 流水线执行灰度开关：LEGACY 走旧单 op；GRAPH 走节点级图执行器。
     pipeline-execution-mode: ${ONELAKE_PIPELINE_EXECUTION_MODE:LEGACY}
     callback-base-url: ${ONELAKE_ORCHESTRATION_CALLBACK_BASE_URL:}
+    internal-token: ${ONELAKE_ORCHESTRATION_INTERNAL_TOKEN:}
     max-parallel: ${ONELAKE_ORCHESTRATION_MAX_PARALLEL:4}
   dataplane:
     airbyte:

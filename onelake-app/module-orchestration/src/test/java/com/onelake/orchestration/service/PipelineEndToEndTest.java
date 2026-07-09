@@ -106,7 +106,7 @@ class PipelineEndToEndTest {
     void setup() {
         compileService = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
         pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, taskRunRepo,
-                compileService, outboxProvider);
+                runRepo, compileService, outboxProvider);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
                 new SparkRunConfigBuilder(), outboxProvider);

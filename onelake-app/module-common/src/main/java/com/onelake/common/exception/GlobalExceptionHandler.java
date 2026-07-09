@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -29,6 +30,11 @@ public class GlobalExceptionHandler {
             .reduce((a, b) -> a + "; " + b)
             .orElse("参数校验失败");
         return ResponseEntity.badRequest().body(ApiResponse.fail(40000, msg));
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiResponse<Void>> unreadable(HttpMessageNotReadableException e) {
+        return ResponseEntity.badRequest().body(ApiResponse.fail(40000, "请求体格式错误"));
     }
 
     @ExceptionHandler(AccessDeniedException.class)

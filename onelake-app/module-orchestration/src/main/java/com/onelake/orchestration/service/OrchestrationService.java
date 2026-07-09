@@ -20,6 +20,8 @@ import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.dto.PipelineCompileResult;
+import com.onelake.orchestration.dto.TaskRunCallbackRequest;
+import com.onelake.orchestration.dto.TaskRunCallbackResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
@@ -467,6 +469,63 @@ public class OrchestrationService {
         return toRunDTO(refreshRunStatus(run), dagById.get(run.getDagId()));
     }
 
+    /**
+     * 应用 Dagster 节点级状态回调。
+     *
+     * <p>租户身份从 runId 反查到 JobRun/Dag，不接受请求体传入的租户信息；
+     * 方法只更新 task_run，不直接推进 JobRun 聚合状态，后者仍以 Dagster run 刷新为准。
+     */
+    @Transactional
+    public TaskRunCallbackResult applyTaskRunCallback(UUID runId, String taskKey,
+                                                      TaskRunCallbackRequest request) {
+        if (request == null || request.status() == null) {
+            throw new BizException(40020, "task_run 回调 status 不能为空");
+        }
+        if (!StringUtils.hasText(taskKey)) {
+            throw new BizException(40021, "taskKey 不能为空");
+        }
+        JobRun run = runRepo.findById(runId)
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        Dag dag = dagRepo.findById(run.getDagId())
+                .orElseThrow(() -> new BizException(40400, "DAG 不存在"));
+        TaskRunStatus requested = request.status();
+        List<TaskRun> lockedTaskRuns = null;
+        TaskRun taskRun;
+        if (shouldShortCircuitDownstream(requested)) {
+            // 失败类回调会连带短路下游；先按固定顺序锁住整批行，避免并发回调覆盖下游状态。
+            lockedTaskRuns = new ArrayList<>(taskRunRepo.findByJobRunIdForUpdate(runId));
+            taskRun = lockedTaskRuns.stream()
+                    .filter(tr -> taskKey.equals(tr.getTaskKey()))
+                    .findFirst()
+                    .orElseThrow(() -> new BizException(40400, "task_run 不存在: " + taskKey));
+        } else {
+            // 非短路回调只锁住当前节点行，防止迟到 RUNNING 回调覆盖已经提交的终态回调。
+            taskRun = taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(runId, taskKey)
+                    .orElseThrow(() -> new BizException(40400, "task_run 不存在: " + taskKey));
+        }
+        if (dag.getTenantId() != null && taskRun.getTenantId() != null
+                && !dag.getTenantId().equals(taskRun.getTenantId())) {
+            throw new BizException(40400, "task_run 不存在: " + taskKey);
+        }
+
+        TaskRunStatus current = taskRun.getStatus();
+        // 单调状态机：终态不可变，且低 rank 回调不允许把节点状态倒退。
+        if (isTerminalTaskRunStatus(current) || taskRunStatusRank(requested) < taskRunStatusRank(current)) {
+            return new TaskRunCallbackResult(false, current);
+        }
+
+        applyTaskRunCallbackFields(run, taskRun, requested, request);
+        taskRun.setStatus(requested);
+        taskRun.setUpdatedAt(Instant.now());
+        taskRunRepo.save(taskRun);
+
+        if (shouldShortCircuitDownstream(requested)) {
+            // 失败/跳过类终态一到达，就以当前节点为种子实时短路仍在 QUEUED 的下游。
+            propagateUpstreamFailures(run, lockedTaskRuns, new HashSet<>(Set.of(taskKey)));
+        }
+        return new TaskRunCallbackResult(true, taskRun.getStatus());
+    }
+
     private void validateDag(String name, Map<String, Object> definition) {
         if (name == null || name.isBlank()) {
             throw new BizException(40020, "DAG 名称不能为空");
@@ -573,7 +632,8 @@ public class OrchestrationService {
     private void compensateGraphTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
         TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
                 ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
-        List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+        // GRAPH 模式可能同时收到节点回调和 run 终态兜底；锁住整批 task_run 后再补偿。
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(run.getId());
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
         if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
             propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
@@ -650,6 +710,67 @@ public class OrchestrationService {
                 || status == TaskRunStatus.CANCELLED
                 || status == TaskRunStatus.UPSTREAM_FAILED
                 || status == TaskRunStatus.SKIPPED;
+    }
+
+    private int taskRunStatusRank(TaskRunStatus status) {
+        if (status == null) {
+            return -1;
+        }
+        // 仅表达“进度单调性”，不区分不同终态之间的优先级；终态保护由调用方先判断。
+        return switch (status) {
+            case QUEUED -> 0;
+            case RUNNING -> 1;
+            case SUCCEEDED, FAILED, CANCELLED, UPSTREAM_FAILED, SKIPPED -> 2;
+        };
+    }
+
+    private boolean shouldShortCircuitDownstream(TaskRunStatus status) {
+        return status == TaskRunStatus.FAILED
+                || status == TaskRunStatus.UPSTREAM_FAILED
+                || status == TaskRunStatus.SKIPPED;
+    }
+
+    private void applyTaskRunCallbackFields(JobRun run, TaskRun taskRun, TaskRunStatus requested,
+                                            TaskRunCallbackRequest request) {
+        Instant now = Instant.now();
+        // 可选字段只在回调携带时覆盖，避免较早的空值回调冲掉已写入的观测信息。
+        if (request.attempt() != null) {
+            if (request.attempt() < 1) {
+                throw new BizException(40022, "attempt 必须大于等于 1");
+            }
+            taskRun.setAttempt(request.attempt());
+        }
+        if (request.logRef() != null) {
+            taskRun.setLogRef(truncate(request.logRef(), 512));
+        }
+        if (request.dagsterStepKey() != null) {
+            taskRun.setDagsterStepKey(truncate(request.dagsterStepKey(), 128));
+        }
+        if (request.rowsWritten() != null) {
+            taskRun.setRowsWritten(request.rowsWritten());
+        }
+        if (request.scanBytes() != null) {
+            taskRun.setScanBytes(request.scanBytes());
+        }
+        if (request.artifactPath() != null) {
+            taskRun.setArtifactPath(truncate(request.artifactPath(), 512));
+        }
+        if (request.errorMsg() != null) {
+            taskRun.setErrorMsg(truncate(request.errorMsg(), 4000));
+        }
+        if (request.startedAt() != null) {
+            taskRun.setStartedAt(request.startedAt());
+        } else if ((requested == TaskRunStatus.RUNNING || isTerminalTaskRunStatus(requested))
+                && taskRun.getStartedAt() == null) {
+            // Dagster 未传 startedAt 时，用 JobRun 开始时间作为节点运行的保守起点。
+            taskRun.setStartedAt(run.getStartedAt() == null ? now : run.getStartedAt());
+        }
+        if (request.finishedAt() != null) {
+            taskRun.setFinishedAt(request.finishedAt());
+        } else if (isTerminalTaskRunStatus(requested) && taskRun.getFinishedAt() == null) {
+            // 终态回调必须让 task_run 可观测地收口；缺失 finishedAt 时用服务端时间兜底。
+            taskRun.setFinishedAt(now);
+        }
     }
 
     private boolean needsTaskRunSummary(TaskRun tr) {

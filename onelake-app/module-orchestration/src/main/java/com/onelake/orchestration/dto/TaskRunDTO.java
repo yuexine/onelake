@@ -11,6 +11,9 @@ public record TaskRunDTO(
         UUID jobRunId,
         String taskKey,
         TaskRunStatus status,
+        Integer attempt,
+        String logRef,
+        String dagsterStepKey,
         Long rowsWritten,
         Long scanBytes,
         String errorMsg,
@@ -21,6 +24,7 @@ public record TaskRunDTO(
     public static TaskRunDTO of(TaskRun t) {
         return new TaskRunDTO(
                 t.getId(), t.getJobRunId(), t.getTaskKey(), t.getStatus(),
+                t.getAttempt(), t.getLogRef(), t.getDagsterStepKey(),
                 t.getRowsWritten(), t.getScanBytes(), t.getErrorMsg(), t.getArtifactPath(),
                 t.getStartedAt(), t.getFinishedAt()
         );

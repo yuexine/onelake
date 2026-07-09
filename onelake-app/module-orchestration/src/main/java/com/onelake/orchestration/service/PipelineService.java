@@ -23,6 +23,7 @@ import com.onelake.orchestration.dto.PipelineValidationResult.TaskValidation;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.TaskRunDTO;
 import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
@@ -67,6 +68,7 @@ public class PipelineService {
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
     private final TaskRunRepository taskRunRepo;
+    private final JobRunRepository runRepo;
     private final PipelineCompileService compileService;
     private final org.springframework.beans.factory.ObjectProvider<OutboxPublisher> outboxPublisher;
 
@@ -335,6 +337,9 @@ public class PipelineService {
     @Transactional
     public List<TaskRunDTO> listTaskRuns(UUID dagId, UUID runId) {
         getPipeline(dagId);
+        // task_run 会暴露日志引用等运行观测字段，必须先确认 run 属于当前 pipeline。
+        runRepo.findByIdAndDagIdIn(runId, Set.of(dagId))
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
         return taskRunRepo.findByJobRunId(runId).stream()
                 .map(TaskRunDTO::of)
                 .toList();

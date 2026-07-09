@@ -2,12 +2,14 @@ package com.onelake.common.security;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
@@ -28,10 +30,11 @@ import java.util.stream.Collectors;
 public class SecurityConfig {
 
     @Bean
-    SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain filterChain(HttpSecurity http, InternalApiTokenFilter internalApiTokenFilter) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .addFilterBefore(internalApiTokenFilter, BearerTokenAuthenticationFilter.class)
             .authorizeHttpRequests(reg -> reg
                 .requestMatchers(
                     "/actuator/health",
@@ -40,6 +43,7 @@ public class SecurityConfig {
                     "/v3/api-docs/**",
                     "/swagger-ui/**",
                     "/swagger-ui.html",
+                    "/api/v1/internal/**",
                     "/api/v1/dataservice/apis/runtime/**",
                     "/api/v1/analytics/share/**",
                     "/error"
@@ -47,6 +51,12 @@ public class SecurityConfig {
                 .anyRequest().authenticated())
             .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter())));
         return http.build();
+    }
+
+    @Bean
+    InternalApiTokenFilter internalApiTokenFilter(
+            @Value("${onelake.orchestration.internal-token:}") String internalToken) {
+        return new InternalApiTokenFilter(internalToken);
     }
 
     /**

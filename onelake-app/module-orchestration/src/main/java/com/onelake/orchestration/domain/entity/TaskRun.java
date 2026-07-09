@@ -53,7 +53,7 @@ public class TaskRun {
     @Column(length = 512)
     private String logRef;
 
-    @Column(length = 256)
+    @Column(length = 128)
     private String dagsterStepKey;
 
     private Instant dataIntervalStart;

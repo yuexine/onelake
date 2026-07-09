@@ -5,7 +5,7 @@
 > preserve the current architecture boundaries, and push each change to a
 > verifiable state.
 >
-> Updated: 2026-06-29. If docs and code disagree, trust the current code first,
+> Updated: 2026-07-09. If docs and code disagree, trust the current code first,
 > then update the affected docs.
 
 ## 1. Working Principles
@@ -33,7 +33,7 @@
 | Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, Superset, JupyterHub, Spark, Flink, Kafka/Zookeeper, and etcd. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
 | Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. |
 | Frontend | React 18, Vite 5, TypeScript, Ant Design 5, Pro Components, React Router, React Query, Zustand, X6, Monaco, ECharts under `onelake-app/web-console`. |
-| Product Scope | MVP control-plane skeleton plus full frontend prototype coverage for the OneLake data platform. |
+| Product Scope | Modular control-plane implementation with broad frontend prototype coverage. Some pages are real API backed, some are hybrid/fallback, and some remain prototype-only; see `docs/FRONTEND_VERIFICATION.md`. |
 | Runtime Logs | Use root `.run-logs/` for long-running local process logs. Existing frontend log path: `.run-logs/web-console-vite.log`. |
 
 ## 3. Must-Read Context
@@ -56,8 +56,8 @@ document unless the task genuinely needs broad product context.
 
 ```text
 docs/
-  PROJECT_STRUCTURE.md                  # Codebase map and module index
-  IMPLEMENTATION_STATUS.md              # Current implementation status
+  PROJECT_STRUCTURE.md                  # Current codebase map and module index
+  IMPLEMENTATION_STATUS.md              # Current code-aligned implementation status
   本地开发环境完整部署指南.md
   FRONTEND_VERIFICATION.md              # Frontend prototype verification
   技术初始化文档.md
@@ -151,7 +151,9 @@ Useful URLs when services are actually running:
   `8080`. JupyterHub maps to host `18000` because Airbyte reserves `8000`.
 - `web-console/package.json` has `gen:api` pointing at
   `http://localhost:8080/v3/api-docs`; this requires a reachable backend OpenAPI
-  endpoint before running `make frontend` successfully.
+  endpoint before running `make frontend` successfully. It currently writes to
+  `web-console/src/api`; because `src/api/index.ts` is also the hand-written
+  API facade, review generated output before accepting any overwrite.
 - Vite proxies `/api` to `VITE_API_PROXY_TARGET` and defaults to
   `http://localhost:8080`; set `VITE_API_PROXY_TARGET=http://localhost:9080`
   to verify the APISIX path. Run `make apisix-routes` after APISIX starts so
@@ -166,6 +168,15 @@ Useful URLs when services are actually running:
   default Airbyte API endpoint is `http://localhost:18001/api/v1`, which expects
   a local `kubectl port-forward` to the Airbyte server service when the abctl
   ingress on `8000` is unstable.
+- Flyway runtime scope has 10 schemas configured:
+  `common,integration,orchestration,catalog,modeling,quality,security,dataservice,dataservice_api,analytics`.
+  Migration directories exist for the 9 schemas that own tables; `dataservice_api`
+  is the PostgREST/API-view schema.
+- ODS -> DWD execution is currently Spark pipeline based. `module-modeling`
+  owns DWD model definition, validation, compilation, and publication; runtime,
+  scheduling, backfill, and observation live in `module-orchestration` through
+  Spark-only `pipeline_task`, `job_run`, and `task_run` paths. Treat old
+  dbt-on-Trino run documents as historical ADR/background unless updated.
 
 ## 7. Verification Strategy
 

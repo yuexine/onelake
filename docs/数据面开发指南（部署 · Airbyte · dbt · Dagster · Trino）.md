@@ -1,366 +1,145 @@
-<aside>
-🌊
+# 数据面开发指南：部署、Airbyte、Spark、Dagster、Trino、dbt
 
-本文回答「数据面的开发在哪里」。数据面 **不在 onelake-app（Java 控制面）里写逻辑**,它由三类产物组成:**开源组件（部署配置） + dbt（SQL 转换） + Dagster（Python 编排）**。控制面只通过 API/事件去驱动数据面运行。
+> 修订日期：2026-07-09
+>
+> 本文回答“数据面的开发在哪里”。当前 OneLake 控制面不搬运业务数据，负责创建配置、触发运行、记录状态和消费事件；真实执行交给 Airbyte、Spark/Dagster、Trino、Iceberg、Superset、JupyterHub 等数据面组件。
 
-</aside>
+## 1. 边界
 
-## 一、数据面开发边界与产物
+| 层 | 当前产物 | 位置 |
+| --- | --- | --- |
+| 部署编排 | Compose 核心数据面 | `onelake-app/docker-compose.yml` |
+| Airbyte | abctl/kind 本地部署 | `onelake-app/scripts/airbyte-local.sh` |
+| 调度/执行 | Dagster webserver/daemon/user-code | `onelake-app/dagster/` |
+| Spark | Spark master/worker + pipeline job | `docker-compose.yml`、`dagster/definitions.py` |
+| 查询 | Trino on Iceberg/Hive Metastore | `onelake-app/trino/` |
+| 对象存储 | MinIO warehouse | Compose + `scripts/minio-bucket.sh` |
+| API 网关 | APISIX 本地路由 | `onelake-app/apisix/`、`scripts/apisix-routes.sh` |
+| dbt | 样例模型、宏、生成产物 | `onelake-app/dbt/` |
 
-| 环节 | 开发产物 | 代码/配置位置 | 语言/形式 |
-| --- | --- | --- | --- |
-| 部署编排 | MinIO/Iceberg/Trino/Airbyte/Dagster/OpenMetadata/Keycloak/Superset | deploy/docker-compose.yml（本地）、Helm（生产） | 声明式 YAML |
-| 数据采集（EL） | Airbyte Source/Destination/Connection | 控制面 API 创建 或 octavia/（GitOps） | 配置,非编码 |
-| 数据转换/建模 | dbt 模型、测试、宏 | dbt/（models/macros/tests） | SQL + Jinja |
-| 调度编排 | Dagster assets/jobs/schedules/sensors | dagster/onelake_dp/ | Python |
-| 查询/存储层 | Trino catalog、Iceberg namespace/表 | deploy/trino/catalog/、建表 SQL | properties / SQL |
+## 2. 当前主线
 
-```mermaid
-flowchart LR
-  CP["控制面 onelake-app<br>module-integration"] -->|"REST 驱动"| AB["Airbyte"]
-  CP -->|"打 tag 触发"| DAG["Dagster"]
-  AB -->|"EL 入湖"| ICE["Iceberg/MinIO"]
-  DAG -->|"dbt build"| ICE
-  DAG -->|"reconcile 回写"| CP
-  ICE --> TR["Trino"]
-  DAG -->|"资产元数据"| OM["OpenMetadata"]
-```
+### 2.1 数据采集
 
-## 二、第三方依赖（数据面侧）
+控制面 `module-integration` 创建数据源、探测 schema/table/columns、管理 Airbyte source/destination/connection，触发并 reconcile Airbyte job。
 
-数据面用 Python 工具链,与 Java 控制面隔离:
-
-```
-# dagster/requirements.txt
-dagster==1.7.*
-dagster-webserver==1.7.*
-dagster-dbt==0.23.*
-dagster-airbyte==0.23.*
-dbt-core==1.8.*
-dbt-trino==1.8.*
-requests==2.32.*
-octavia-cli==0.50.*   # Airbyte GitOps（可选）
-```
-
-## 三、部署编排（docker-compose 骨架）
-
-数据面所有组件用一份 compose 拉起;控制面的 PostgreSQL 单库复用,数据面 catalog 元数据走 Iceberg REST Catalog。
-
-```yaml
-# deploy/docker-compose.dataplane.yml
-services:
-  minio:
-    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio12345
-    ports: ["9000:9000", "9001:9001"]
-
-  iceberg-rest:
-    image: tabulario/iceberg-rest:1.6.0
-    environment:
-      CATALOG_WAREHOUSE: s3://onelake/
-      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
-      CATALOG_S3_ENDPOINT: http://minio:9000
-    ports: ["8181:8181"]
-    depends_on: [minio]
-
-  trino:
-    image: trinodb/trino:451
-    ports: ["18080:8080"]
-    volumes: ["./trino/catalog:/etc/trino/catalog"]
-    depends_on: [iceberg-rest]
-
-  airbyte:
-    image: airbyte/airbyte:0.63.0   # abctl/compose 部署的聚合入口
-    ports: ["8000:8000"]
-
-  dagster:
-    build: ../dagster
-    command: dagster dev -h 0.0.0.0 -p 3000
-    ports: ["3000:3000"]
-    volumes: ["../dagster:/opt/dagster/app", "../dbt:/opt/dagster/dbt"]
-    depends_on: [trino, airbyte]
-
-  openmetadata:
-    image: openmetadata/server:1.4.1
-    ports: ["8585:8585"]
-```
-
-<aside>
-⚙️
-
-本地当前使用 `onelake-app/Makefile` 编排：`make up`（拉起 Compose 数据面）、`make down`、`make migrate`、`make ods-dwd-baseline`、`make ods-dwd-verify`、`make dagster-up`。完整部署步骤见 `docs/本地开发环境完整部署指南.md`。
-
-</aside>
-
-## 四、Airbyte 连接器声明
-
-两种方式,二选一:
-
-1. **控制面 API（推荐,与 module-integration 一致）**:由 `AirbyteSyncDriver.ensureConnection()` 调 `/sources/create`、`/destinations/create`、`/connections/create` 动态创建,连接器配置随数据源元数据存于 `integration.datasource`。
-2. **Octavia GitOps（声明式版本化）**:把连接器定义纳入仓库,适合固定管道。
-
-```
-octavia/
-├── sources/
-│   └── crm_mysql/configuration.yaml
-├── destinations/
-│   └── iceberg/configuration.yaml
-└── connections/
-    └── crm_to_ods.yaml
-```
-
-```yaml
-# octavia/connections/crm_to_ods.yaml
-definition_type: connection
-resource_name: crm_to_ods
-source_id: crm_mysql
-destination_id: iceberg
-configuration:
-  namespace_definition: customformat
-  namespace_format: ods
-  schedule_type: manual          # 由 Dagster/控制面触发,不让 Airbyte 自调度
-  sync_catalog:
-    streams:
-      - stream: { name: orders }
-        config: { sync_mode: incremental, destination_sync_mode: append_dedup, cursor_field: [updated_at], primary_key: [[id]] }
-```
-
-## 五、dbt 项目（转换与建模）
-
-分层对齐湖仓: **staging（贴源 ods） → intermediate（明细 dwd） → marts（汇总 dws/应用 ads）**。
-
-```
-dbt/
-├── dbt_project.yml
-├── profiles.yml
-├── models/
-│   ├── staging/
-│   │   └── crm/
-│   │       ├── _crm__sources.yml
-│   │       ├── _crm__models.yml      # 列描述 + 测试
-│   │       └── stg_crm__orders.sql
-│   ├── intermediate/
-│   │   └── int_orders_enriched.sql
-│   └── marts/
-│       └── sales/
-│           └── fct_orders.sql
-├── macros/
-├── tests/
-└── seeds/
-```
-
-<aside>
-⚠️
-
-**渲染约定**:因本页对双花括号有渲染限制,下方 dbt 代码中 Jinja 表达式 `{ {  } }` 用 `[[ ]]` 代替、语句块 `{ % % }` 用 `[% %]` 代替。**落地到真实 dbt 文件时,请把 `[[ ]]` 换回双花括号、`[% %]` 换回 `{ % % }`**。
-
-</aside>
-
-**dbt_project.yml**
-
-```yaml
-name: onelake
-profile: onelake
-version: "1.0.0"
-models:
-  onelake:
-    staging:      { +materialized: view,        +schema: ods }
-    intermediate: { +materialized: table,       +schema: dwd }
-    marts:        { +materialized: incremental,  +schema: dws }
-```
-
-**profiles.yml（dbt-trino 适配器）**
-
-```yaml
-onelake:
-  target: dev
-  outputs:
-    dev:
-      type: trino
-      method: none
-      host: trino
-      port: 8080
-      user: "[[ env_var('TRINO_USER', 'admin') ]]"
-      catalog: iceberg
-      schema: dwd
-      threads: 4
-```
-
-**贴源 staging 模型** `models/staging/crm/stg_crm__orders.sql`
-
-```sql
-[[ config(materialized='view') ]]
-with source as (
-    select * from [[ source('crm', 'orders') ]]
-)
-select
-    id          as order_id,
-    customer_id,
-    amount,
-    status,
-    updated_at
-from source
-```
-
-**增量事实表** `models/marts/sales/fct_orders.sql`
-
-```sql
-[[ config(materialized='incremental', unique_key='order_id', incremental_strategy='merge') ]]
-with orders as (
-    select * from [[ ref('stg_crm__orders') ]]
-)
-select
-    order_id,
-    customer_id,
-    amount,
-    status,
-    updated_at
-from orders
-[% if is_incremental() %]
-where updated_at > (select coalesce(max(updated_at), date '1970-01-01') from [[ this ]])
-[% endif %]
-```
-
-**源定义与测试** `models/staging/crm/_crm__sources.yml`
-
-```yaml
-version: 2
-sources:
-  - name: crm
-    schema: ods
-    tables:
-      - name: orders
-        columns:
-          - name: id
-            tests: [unique, not_null]
-```
-
-开发循环命令:
+Airbyte 启动：
 
 ```bash
-dbt deps          # 安装 packages
-dbt run -s staging.crm+   # 跑 crm 链路
-dbt test          # 跑数据测试
-dbt docs generate && dbt docs serve   # 血缘文档
+cd onelake-app
+AIRBYTE_LOW_RESOURCE_MODE=true make airbyte-up
+make airbyte-status
+make airbyte-credentials
 ```
 
-## 六、Dagster 编排骨架
+关键边界：
 
-用 `dagster-dbt` 把 dbt 模型映射为资产、`dagster-airbyte` 把同步映射为资产,统一调度并回写控制面。
+- Airbyte UI/API `8000` 是 abctl ingress。
+- 后端默认 `AIRBYTE_URL=http://localhost:18001/api/v1`，需要 port-forward。
+- 发布采集任务需要 workspace、source/destination definition 或已有 Airbyte resource id。
 
-```
-dagster/
-├── requirements.txt
-├── Dockerfile
-└── onelake_dp/
-    ├── __init__.py        # Definitions 聚合
-    ├── assets.py          # dbt + airbyte 资产
-    ├── jobs.py
-    ├── schedules.py
-    └── sensors.py         # 回写控制面
-```
+### 2.2 ODS -> DWD
 
-**assets.py**
+当前运行主线是 Spark-only pipeline：
 
-```python
-from pathlib import Path
-from dagster import Definitions, ScheduleDefinition, define_asset_job
-from dagster_dbt import DbtCliResource, dbt_assets
-from dagster_airbyte import AirbyteResource, load_assets_from_airbyte_instance
+- `module-modeling`：DWD 模型定义、字段映射、校验、编译、发布。
+- `module-orchestration`：pipeline task/edge、job run、task run、资源画像、回填、Spark run config。
+- `dagster/definitions.py`：`onelake_pipeline_run` 执行 Spark SQL/PySpark/Quality Gate task。
 
-DBT_DIR = Path("/opt/dagster/dbt")
+旧的 dbt-on-Trino、`onelake_dbt_model_run`、`dagster-dbt` 主闭环属于历史方案，不再作为当前运行事实。
 
-@dbt_assets(manifest=DBT_DIR / "target" / "manifest.json")
-def onelake_dbt_assets(context, dbt: DbtCliResource):
-    yield from dbt.cli(["build"], context=context).stream()
+### 2.3 SQL 与数据服务
 
-airbyte = AirbyteResource(host="airbyte", port="8000")
-airbyte_assets = load_assets_from_airbyte_instance(airbyte)
+SQL Workbench 使用 Trino JDBC，默认宿主端口：
 
-dbt_job = define_asset_job("dbt_job", selection="*")
-daily = ScheduleDefinition(job=dbt_job, cron_schedule="0 3 * * *")
-
-defs = Definitions(
-    assets=[onelake_dbt_assets, *airbyte_assets],
-    schedules=[daily],
-    resources={"dbt": DbtCliResource(project_dir=str(DBT_DIR))},
-)
+```text
+jdbc:trino://localhost:18080/iceberg
 ```
 
-**sensors.py（数据面 → 控制面回写,闭环关键）**
+数据服务模块目前支持：
 
-```python
-import requests
-from dagster import run_status_sensor, RunStatusSensorContext, DagsterRunStatus
+- PostgREST/APISIX 发布路径。
+- SQL API 草稿与调试路径。
+- AppKey/订阅/配额/调用日志实体。
 
-CONTROL_PLANE = "http://onelake-app:8080/api/integration"
+完整 Trino-backed 外部 API 网关仍是后续生产化项。
 
-@run_status_sensor(run_status=DagsterRunStatus.SUCCESS)
-def report_to_control_plane(context: RunStatusSensorContext):
-    # 控制面触发时把 sync_run_id 作为 run tag 传入
-    run_id = context.dagster_run.tags.get("onelake/sync_run_id")
-    if run_id:
-        requests.post(f"{CONTROL_PLANE}/sync-runs/{run_id}/reconcile", timeout=10)
+## 3. Compose 服务和端口
+
+| 服务 | 端口 |
+| --- | --- |
+| Postgres | `5432` |
+| Redis | `6379` |
+| MinIO API/Console | `9000/9001` |
+| Hive Metastore | `9083` |
+| Trino | `18080` |
+| Spark Master/Worker UI | `18081/18082` |
+| Keycloak | `8081` |
+| OpenMetadata | `8585` |
+| PostgREST | `3001` |
+| APISIX gateway/admin | `9080/9180` |
+| Dagster | `3000` |
+| Superset | `8088` |
+| JupyterHub | `18000` |
+| Kafka/Zookeeper | `9092/2181` |
+| Flink UI | `8082` |
+
+## 4. Dagster
+
+本地 Dagster 是多容器形态：
+
+```bash
+cd onelake-app
+make dagster-up
 ```
 
-启动:`dagster dev -h 0.0.0.0 -p 3000`,UI 在 3000 端口,可手动 Materialize 或观察 Sensor。
+当前 user-code 主要 job：
 
-## 七、Trino catalog 与 Iceberg 表
+| Job | 用途 |
+| --- | --- |
+| `onelake_sync_task_schedule_reconcile` | 接收控制面的采集任务调度登记/撤销意图 |
+| `onelake_pipeline_run` | Spark-only pipeline 运行 |
+| `onelake_notebook_run` | Notebook/papermill 运行 |
 
-**deploy/trino/catalog/iceberg.properties**
+Dagster user-code 镜像当前装载 Spark/papermill/notebook 运行依赖，不应在文档中再写成 `dagster-dbt/dagster-airbyte` asset 主工程。
 
+## 5. dbt 当前定位
+
+`onelake-app/dbt/` 仍有价值，但定位是：
+
+1. 样例模型和宏。
+2. DWD 编译/生成产物的参考结构。
+3. 静态校验和历史 ADR 背景。
+
+直接在宿主机运行 dbt 时注意 `profiles.yml` 默认端口是 `8080`；本地 Compose Trino 是 `18080`：
+
+```bash
+cd onelake-app/dbt
+TRINO_PORT=18080 dbt run
 ```
-connector.name=iceberg
-iceberg.catalog.type=rest
-iceberg.rest-catalog.uri=http://iceberg-rest:8181
-fs.s3.enabled=true
-s3.endpoint=http://minio:9000
-s3.path-style-access=true
-s3.aws-access-key=minio
-s3.aws-secret-key=minio12345
+
+不要把 `dbt build` 写成当前 ODS -> DWD 运行验收主路径。
+
+## 6. APISIX
+
+本地路由初始化：
+
+```bash
+cd onelake-app
+make apisix-routes
 ```
 
-**初始化 namespace（make trino-init）**
+当前脚本注册 `/api/*` 到宿主机后端 `8080`。Vite 默认不走 APISIX；只有设置 `VITE_API_PROXY_TARGET=http://localhost:9080` 时前端经 APISIX 验证。
 
-```sql
-CREATE SCHEMA IF NOT EXISTS iceberg.ods WITH (location = 's3://onelake/ods');
-CREATE SCHEMA IF NOT EXISTS iceberg.dwd WITH (location = 's3://onelake/dwd');
-CREATE SCHEMA IF NOT EXISTS iceberg.dws WITH (location = 's3://onelake/dws');
-CREATE SCHEMA IF NOT EXISTS iceberg.ads WITH (location = 's3://onelake/ads');
-```
+## 7. 验证策略
 
-Airbyte 落 `ods`,dbt 逐层加工到 `dwd/dws/ads`,Trino 统一查询,Superset/PostgREST 消费。
+验证必须分层报告：
 
-## 八、数据面与控制面衔接点
-
-| 方向 | 触发点 | 机制 |
+| 层 | 命令/方式 | 说明 |
 | --- | --- | --- |
-| 控制面 → 数据面 | 触发同步 | module-integration 调 Airbyte API,并给 Dagster run 打 sync_run_id tag |
-| 数据面 → 控制面 | 运行完成 | Dagster run_status_sensor 调 /sync-runs/{id}/reconcile 回写状态 |
-| 数据面 → 控制面 | 新表落库 | reconcile 成功后控制面发 integration.table.loaded → catalog/quality |
-| 数据面 → 目录 | 资产元数据 | Dagster/OpenMetadata 采集器登记表与血缘 |
+| 进程 | `make ps` | 只确认容器启动 |
+| 探活 | HTTP/CLI curl、Trino CLI、Dagster GraphQL | 确认服务可访问 |
+| 控制面 | Spring Boot health/OpenAPI/API smoke | 确认控制面可用 |
+| 业务链路 | Airbyte run、Spark pipeline、SQL query、API publish | 确认端到端 |
 
-## 九、本地开发与调试流程
-
-1. `cd onelake-app && docker compose up -d --build` 首次构建并拉起 Compose 数据面；日常可用 `make up`。
-2. `make seed && make migrate` 初始化 Keycloak/MinIO 和控制面多 schema。
-3. 首次启动 OpenMetadata 前执行 `docker compose run --rm openmetadata ./bootstrap/openmetadata-ops.sh migrate`。
-4. Airbyte 不在 Compose 中；需要采集链路时用 `AIRBYTE_LOW_RESOURCE_MODE=true make airbyte-up`，UI/API 在 `8000`。
-5. dbt 开发循环:`dbt run -s <模型>` → `dbt test`,Trino 在宿主机 `18080` 验证结果。
-6. Dagster UI 在 `3000`，手动 Materialize 资产或观察 Sensor。
-7. 调试回写:给 Dagster run 打 `onelake/sync_run_id` tag,确认控制面 `sync_run` 状态被 reconcile 更新。
-8. 端到端验证:控制面触发 → ods 有数据 → dbt 加工 → ads 可查 → catalog 出现资产。
-
-## 十、落地清单（DoD）
-
-- [ ]  deploy/docker-compose.dataplane.yml + Makefile 目标齐全
-- [ ]  Trino iceberg catalog + 四层 namespace 初始化脚本
-- [ ]  dbt 项目骨架（staging/intermediate/marts + sources + tests + profiles）
-- [ ]  dbt-trino 连通 Iceberg,`dbt build` 通过
-- [ ]  Dagster Definitions:dbt 资产 + airbyte 资产 + schedule
-- [ ]  Dagster sensor 回写 /sync-runs/{id}/reconcile 打通闭环
-- [ ]  Airbyte 连接声明（API 动态 或 octavia GitOps）二选一确定
-- [ ]  端到端冒烟:源 → ods → dws/ads → Trino 可查 → catalog 登记
+`make up` 不能单独作为“全栈就绪”的证据。

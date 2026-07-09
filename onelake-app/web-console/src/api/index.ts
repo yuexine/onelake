@@ -58,6 +58,7 @@ import type {
   PipelineStatus,
   PipelineTaskType,
   TaskRun,
+  TaskRunLogOptions,
   TaskRerunMode,
   TaskRerunResult,
 } from '../types';
@@ -373,6 +374,14 @@ export const PipelineAPI = {
       `/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/rerun`,
       { mode },
     )),
+  // New callers pass log options explicitly; keep the numeric-tail wrapper below
+  // for older task-log consumers that have not moved to the options object.
+  getTaskLog: (id: string, runId: string, taskKey: string, options: TaskRunLogOptions = {}) =>
+    unwrap<string>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
+      params: { tail: options.tail },
+      responseType: 'text',
+      headers: { Accept: 'text/plain' },
+    })),
   readTaskRunLog: (id: string, runId: string, taskKey: string, tail = 300) =>
     unwrap<string>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
       params: { tail },

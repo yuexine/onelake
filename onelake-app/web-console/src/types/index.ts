@@ -269,6 +269,10 @@ export interface TaskRun {
   finishedAt?: string;
 }
 
+export interface TaskRunLogOptions {
+  tail?: number;
+}
+
 export interface TaskRerunResult {
   runId: UUID;
   rerunTasks: string[];

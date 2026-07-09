@@ -237,6 +237,39 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void graphRefreshReconcilesFinishedRunWhenDagsterStillReportsStarted() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.RUNNING);
+        Instant startedAt = Instant.parse("2026-07-09T02:00:00Z");
+        Instant finishedAt = Instant.parse("2026-07-09T02:03:00Z");
+        run.setStartedAt(startedAt);
+        run.setFinishedAt(finishedAt);
+        TaskRun done = taskRun("fast_done", TaskRunStatus.SUCCEEDED);
+        TaskRun left = taskRun("slow_left", TaskRunStatus.CANCELLED);
+        TaskRun right = taskRun("slow_right", TaskRunStatus.CANCELLED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(dagster.getRunStatus("dagster-run-1"))
+                .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "STARTED", startedAt, null));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(done, left, right));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("CANCELLED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.CANCELLED);
+        assertThat(run.getFinishedAt()).isEqualTo(finishedAt);
+        verify(runRepo).save(run);
+        verify(taskRunRepo, times(2)).findByJobRunIdForUpdate(RUN_ID);
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
     void listRunsKeepsTerminalRunLocalWithoutDagsterRefresh() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());

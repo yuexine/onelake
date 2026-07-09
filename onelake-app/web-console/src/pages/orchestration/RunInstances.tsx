@@ -5,17 +5,26 @@
  * plus expandable row showing per-task task_run status from PipelineAPI.listTaskRuns.
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
-import { Alert, App as AntApp, Descriptions, Drawer, Select, Space, Button, Popconfirm, Table, Tabs, Tag, Typography } from 'antd';
-import { ArrowLeftOutlined, BranchesOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, StopOutlined, UpOutlined } from '@ant-design/icons';
+import { Alert, App as AntApp, Descriptions, Drawer, Dropdown, Select, Space, Button, Popconfirm, Table, Tabs, Tag, Typography } from 'antd';
+import { ArrowLeftOutlined, DownOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, StopOutlined, UpOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
 import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
+import { BizError } from '../../api/http';
 import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRerunMode, TaskRun } from '../../types';
 import { normalizeCatalogAssets } from '../lakehouse/assetAdapter';
 
 const { Text } = Typography;
 const DEFAULT_LOG_TAIL_LINES = 300;
 const LOG_TAIL_OPTIONS = [100, 300, 500, 1000];
+const RUN_LIST_POLL_INTERVAL_MS = 4000;
+const RUN_DETAIL_POLL_INTERVAL_MS = 2500;
+const TASK_RUN_POLL_INTERVAL_MS = 2500;
+
+interface UiError {
+  message: string;
+  noPermission: boolean;
+}
 
 function formatDate(value?: string) {
   if (!value) return '-';
@@ -45,6 +54,44 @@ function triggerActorTitle(run: JobRun) {
 
 function isRunTerminal(status?: string) {
   return ['SUCCEEDED', 'SUCCESS', 'FAILED', 'CANCELLED'].includes((status || '').toUpperCase());
+}
+
+function toNumberCode(value: unknown) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function toUiError(error: unknown, fallback: string): UiError {
+  const shape = error as {
+    code?: unknown;
+    message?: unknown;
+    response?: {
+      status?: number;
+      data?: {
+        code?: unknown;
+        message?: unknown;
+      };
+    };
+  };
+  const code = error instanceof BizError
+    ? error.code
+    : toNumberCode(shape?.response?.data?.code ?? shape?.code);
+  const status = shape?.response?.status;
+  const message = (
+    error instanceof Error && error.message
+      ? error.message
+      : typeof shape?.response?.data?.message === 'string' && shape.response.data.message.trim()
+        ? shape.response.data.message
+        : fallback
+  );
+  return {
+    message,
+    noPermission: status === 403 || code === 403 || code === 40300,
+  };
 }
 
 function filenameFromContentDisposition(header?: string) {
@@ -719,19 +766,19 @@ export default function RunInstances() {
   const dagIdFilter = searchParams.get('dagId') || searchParams.get('pipelineId') || '';
   const [runs, setRuns] = useState<JobRun[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UiError | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [detailRun, setDetailRun] = useState<JobRun | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<UiError | null>(null);
   const [cancelingRun, setCancelingRun] = useState(false);
   const [taskRefreshVersion, setTaskRefreshVersion] = useState(0);
   const [expandedRunIds, setExpandedRunIds] = useState<string[]>([]);
 
-  const loadRuns = (nextPage = page, nextSize = pageSize) => {
-    setLoading(true);
+  const loadRuns = (nextPage = page, nextSize = pageSize, options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     setError(null);
     const request = dagIdFilter
       ? OrchestrationAPI.listDagRuns(dagIdFilter, nextPage, nextSize)
@@ -744,25 +791,38 @@ export default function RunInstances() {
         setTotal(result.totalElements ?? 0);
       })
       .catch((e) => {
-        const msg = e.message || '运行实例加载失败';
-        setError(msg);
-        message.error(msg);
+        const nextError = toUiError(e, '运行实例加载失败');
+        // Silent polling should keep the last good table visible; transient
+        // backend/network failures are surfaced only on explicit loads.
+        if (options?.silent && runs.length > 0) {
+          return;
+        }
+        setError(nextError);
+        if (!options?.silent && !nextError.noPermission) {
+          message.error(nextError.message);
+        }
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!options?.silent) setLoading(false);
+      });
   };
 
-  const loadRunDetail = () => {
+  const loadRunDetail = (options?: { silent?: boolean }) => {
     if (!routeRunId) return;
-    setDetailLoading(true);
+    if (!options?.silent) setDetailLoading(true);
     setDetailError(null);
     OrchestrationAPI.getRun(routeRunId)
       .then(setDetailRun)
       .catch((e) => {
-        const msg = e.message || '运行详情加载失败';
-        setDetailError(msg);
-        message.error(msg);
+        const nextError = toUiError(e, '运行详情加载失败');
+        setDetailError(nextError);
+        if (!options?.silent && !nextError.noPermission) {
+          message.error(nextError.message);
+        }
       })
-      .finally(() => setDetailLoading(false));
+      .finally(() => {
+        if (!options?.silent) setDetailLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -779,6 +839,35 @@ export default function RunInstances() {
     () => (dagIdFilter ? runs.filter((run) => run.dagId === dagIdFilter) : runs),
     [dagIdFilter, runs],
   );
+  const hasNonTerminalVisibleRun = visibleRuns.some((run) => !isRunTerminal(run.status));
+  const detailRunIsActive = Boolean(detailRun && !isRunTerminal(detailRun.status));
+
+  useEffect(() => {
+    if (routeRunId || !hasNonTerminalVisibleRun) return undefined;
+    const timer = window.setInterval(() => {
+      loadRuns(page, pageSize, { silent: true });
+    }, RUN_LIST_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [routeRunId, hasNonTerminalVisibleRun, page, pageSize, dagIdFilter]);
+
+  useEffect(() => {
+    if (!routeRunId || !detailRunIsActive) return undefined;
+    const timer = window.setInterval(() => {
+      OrchestrationAPI.getRun(routeRunId)
+        .then((nextRun) => {
+          const reachedTerminal = detailRun && !isRunTerminal(detailRun.status) && isRunTerminal(nextRun.status);
+          setDetailRun(nextRun);
+          setDetailError(null);
+          // TaskRunsPanel has its own lightweight task_run polling; refresh the
+          // static topology/catalog bundle only once when the run settles.
+          if (reachedTerminal) {
+            setTaskRefreshVersion((version) => version + 1);
+          }
+        })
+        .catch((e) => setDetailError(toUiError(e, '运行详情刷新失败')));
+    }, RUN_DETAIL_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [routeRunId, detailRunIsActive]);
 
   const handleCancelRun = async () => {
     if (!routeRunId || !detailRun) return;
@@ -834,7 +923,7 @@ export default function RunInstances() {
               {detailRun?.dagId && (
                 <Button onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}`)}>打开流水线</Button>
               )}
-              {detailRun && (
+              {detailRun && !isRunTerminal(detailRun.status) && (
                 <Popconfirm
                   title="取消运行"
                   description="确认取消当前运行？"
@@ -852,7 +941,7 @@ export default function RunInstances() {
                   </Button>
                 </Popconfirm>
               )}
-              <Button icon={<ReloadOutlined />} onClick={loadRunDetail} loading={detailLoading}>刷新</Button>
+              <Button icon={<ReloadOutlined />} onClick={() => loadRunDetail()} loading={detailLoading}>刷新</Button>
             </Space>
           )}
         />
@@ -865,9 +954,9 @@ export default function RunInstances() {
         {detailError && (
           <SectionCard title="运行概览" icon={<HistoryOutlined />}>
             <StateView
-              state="error"
-              title="运行详情加载失败"
-              description={detailError}
+              state={detailError.noPermission ? 'no-permission' : 'error'}
+              title={detailError.noPermission ? '无权查看运行详情' : '运行详情加载失败'}
+              description={detailError.message}
               onRetry={loadRunDetail}
             />
           </SectionCard>
@@ -900,6 +989,7 @@ export default function RunInstances() {
                 <TaskRunsPanel
                   runId={detailRun.id}
                   dagId={detailRun.dagId}
+                  runStatus={detailRun.status}
                   refreshVersion={taskRefreshVersion}
                   onRunChanged={loadRunDetail}
                 />
@@ -933,15 +1023,16 @@ export default function RunInstances() {
       />
 
       <SectionCard title="运行历史" icon={<HistoryOutlined />} flatBody>
-        {error && (
-          <Alert
-            type="error"
-            showIcon
-            message={error}
-            action={<Button size="small" onClick={() => loadRuns()}>重试</Button>}
-            style={{ margin: 12 }}
+        {loading && visibleRuns.length === 0 ? (
+          <StateView state="loading" rows={6} />
+        ) : error ? (
+          <StateView
+            state={error.noPermission ? 'no-permission' : 'error'}
+            title={error.noPermission ? '无权查看运行实例' : '运行实例加载失败'}
+            description={error.message}
+            onRetry={() => loadRuns()}
           />
-        )}
+        ) : (
         <Table
           rowKey="id"
           dataSource={visibleRuns}
@@ -1018,6 +1109,7 @@ export default function RunInstances() {
             ) },
           ]}
         />
+        )}
       </SectionCard>
     </div>
   );
@@ -1071,7 +1163,7 @@ function ExpandedTaskRunsPanel({ run, onCollapse, onRunChanged }: { run: JobRun;
           padding: 12,
         }}
       >
-        <TaskRunsPanel runId={run.id} dagId={run.dagId} onRunChanged={onRunChanged} />
+        <TaskRunsPanel runId={run.id} dagId={run.dagId} runStatus={run.status} onRunChanged={onRunChanged} />
       </div>
     </div>
   );
@@ -1138,7 +1230,7 @@ function TaskRunLogPanel({
   const [logText, setLogText] = useState('');
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UiError | null>(null);
   const [downloading, setDownloading] = useState(false);
   const canReadLog = Boolean(row.run?.logRef);
 
@@ -1153,14 +1245,13 @@ function TaskRunLogPanel({
     if (!canReadLog) return;
     setLoading(true);
     setError(null);
-    PipelineAPI.readTaskRunLog(dagId, runId, row.taskKey, tailLines)
+    PipelineAPI.getTaskLog(dagId, runId, row.taskKey, { tail: tailLines })
       .then((text) => {
         setLogText(text || '');
         setLoaded(true);
       })
       .catch((e) => {
-        const msg = e.message || '节点日志加载失败';
-        setError(msg);
+        setError(toUiError(e, '节点日志加载失败'));
       })
       .finally(() => setLoading(false));
   }, [canReadLog, dagId, row.taskKey, runId, tailLines]);
@@ -1187,10 +1278,9 @@ function TaskRunLogPanel({
 
   if (!row.run) {
     return (
-      <Alert
-        type="info"
-        showIcon
-        message="暂无节点日志"
+      <StateView
+        state="empty"
+        title="暂无节点日志"
         description="该节点还没有对应 task_run 记录。"
       />
     );
@@ -1198,10 +1288,9 @@ function TaskRunLogPanel({
 
   if (!canReadLog) {
     return (
-      <Alert
-        type="info"
-        showIcon
-        message="暂无节点日志"
+      <StateView
+        state="empty"
+        title="暂无节点日志"
         description="当前 task_run 尚未写入 log_ref。"
       />
     );
@@ -1232,17 +1321,17 @@ function TaskRunLogPanel({
       </div>
 
       {error && (
-        <Alert
-          type="error"
-          showIcon
-          message={error}
-          action={<Button size="small" onClick={loadLog}>重试</Button>}
+        <StateView
+          state={error.noPermission ? 'no-permission' : 'error'}
+          title={error.noPermission ? '无权查看节点日志' : '节点日志加载失败'}
+          description={error.message}
+          onRetry={loadLog}
         />
       )}
 
-      {loading && !loaded ? (
+      {!error && loading && !loaded ? (
         <StateView state="loading" rows={5} />
-      ) : (
+      ) : !error ? (
         <pre
           style={{
             margin: 0,
@@ -1262,7 +1351,7 @@ function TaskRunLogPanel({
         >
           {logText || '暂无日志内容'}
         </pre>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1333,11 +1422,13 @@ function TaskRunDrawer({
 function TaskRunsPanel({
   runId,
   dagId,
+  runStatus,
   refreshVersion,
   onRunChanged,
 }: {
   runId: string;
   dagId: string;
+  runStatus?: string;
   refreshVersion?: number;
   onRunChanged?: () => void;
 }) {
@@ -1346,22 +1437,30 @@ function TaskRunsPanel({
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
   const [edges, setEdges] = useState<PipelineTaskEdge[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UiError | null>(null);
   const [selectedRow, setSelectedRow] = useState<TaskRunDisplayRow | null>(null);
   const [drawerTab, setDrawerTab] = useState('overview');
   const [rerunningTask, setRerunningTask] = useState<string | null>(null);
 
-  const reloadTaskRuns = useCallback(async () => {
+  const hasLoadedTaskRuns = taskRuns !== null;
+
+  const reloadTaskRuns = useCallback(async (options?: { silent?: boolean }) => {
     try {
       const runs = await PipelineAPI.listTaskRuns(dagId, runId);
       setTaskRuns(runs);
       setError(null);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'task_run 加载失败';
-      setError(msg);
-      throw e;
+      const nextError = toUiError(e, 'task_run 加载失败');
+      // Background node polling should not replace a usable task table with a
+      // transient refresh error; explicit retries still surface the failure.
+      if (!(options?.silent && hasLoadedTaskRuns)) {
+        setError(nextError);
+      }
+      if (!options?.silent) {
+        throw e;
+      }
     }
-  }, [dagId, runId]);
+  }, [dagId, hasLoadedTaskRuns, runId]);
 
   const handleRerunTask = async (row: TaskRunDisplayRow, mode: TaskRerunMode) => {
     if (!canRerunTaskForMode(row, mode)) {
@@ -1385,6 +1484,7 @@ function TaskRunsPanel({
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     Promise.all([
       PipelineAPI.listTaskRuns(dagId, runId),
       PipelineAPI.listTasks(dagId),
@@ -1400,26 +1500,42 @@ function TaskRunsPanel({
         setEdges(edgeDefs);
         setAssets(catalogAssets);
       })
-      .catch((e) => !cancelled && setError(e.message || 'task_run 加载失败'));
+      .catch((e) => !cancelled && setError(toUiError(e, 'task_run 加载失败')));
     return () => {
       cancelled = true;
     };
   }, [runId, dagId, refreshVersion]);
 
+  const shouldPollTaskRuns = Boolean(runStatus && !isRunTerminal(runStatus));
+
+  useEffect(() => {
+    if (!shouldPollTaskRuns) return undefined;
+    const timer = window.setInterval(() => {
+      reloadTaskRuns({ silent: true }).catch(() => undefined);
+    }, TASK_RUN_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [shouldPollTaskRuns, reloadTaskRuns]);
+
   const assetByFqn = useMemo(() => buildAssetByFqn(assets), [assets]);
 
   if (error) {
-    return <Alert type="info" showIcon message={error} />;
+    return (
+      <StateView
+        state={error.noPermission ? 'no-permission' : 'error'}
+        title={error.noPermission ? '无权查看节点运行' : '节点运行加载失败'}
+        description={error.message}
+        onRetry={() => reloadTaskRuns().catch(() => undefined)}
+      />
+    );
   }
   if (!taskRuns) {
-    return <Text type="secondary">加载中…</Text>;
+    return <StateView state="loading" rows={5} />;
   }
   if (taskRuns.length === 0 && tasks.length === 0) {
     return (
-      <Alert
-        type="info"
-        showIcon
-        message="无 task_run 记录"
+      <StateView
+        state="empty"
+        title="无 task_run 记录"
         description="可能是 v1 路径的运行（未走 pipeline v2 节点级状态）。"
       />
     );
@@ -1650,6 +1766,12 @@ function TaskRunsPanel({
             const downstreamKey = `${row.taskKey}:DOWNSTREAM`;
             const singleDisabledTitle = canRerunSingle ? undefined : '仅失败或上游失败节点可重跑';
             const downstreamDisabledTitle = canRerunDownstream ? undefined : '仅失败节点或存在失败下游的已修复节点可从失败续跑';
+            const isRerunningThisRow = rerunningTask === singleKey || rerunningTask === downstreamKey;
+            const rerunDisabledTitle = row.synthetic
+              ? '该节点尚无 task_run，不能重跑'
+              : canRerunSingle || canRerunDownstream
+                ? undefined
+                : '当前节点状态不能重跑';
             return (
               <Space size={4} wrap>
                 <Button
@@ -1664,37 +1786,41 @@ function TaskRunsPanel({
                   size="small"
                   type="link"
                   icon={<FileTextOutlined />}
-                  disabled={!row.run?.logRef}
                   onClick={() => openTaskDrawer(row, 'log')}
                 >
-                  日志
+                  查看日志
                 </Button>
-                {!row.synthetic && (
-                  <>
+                <Dropdown
+                  trigger={['click']}
+                  disabled={row.synthetic || (!canRerunSingle && !canRerunDownstream) || Boolean(rerunningTask)}
+                  menu={{
+                    items: [
+                      {
+                        key: 'SINGLE',
+                        label: <span title={singleDisabledTitle}>SINGLE · 仅当前节点</span>,
+                        disabled: !canRerunSingle,
+                      },
+                      {
+                        key: 'DOWNSTREAM',
+                        label: <span title={downstreamDisabledTitle}>DOWNSTREAM · 节点及未成功下游</span>,
+                        disabled: !canRerunDownstream,
+                      },
+                    ],
+                    onClick: ({ key }) => handleRerunTask(row, key as TaskRerunMode),
+                  }}
+                >
                     <Button
                       size="small"
                       type="link"
-                      title={singleDisabledTitle}
+                      title={rerunDisabledTitle}
                       icon={<RedoOutlined />}
-                      loading={rerunningTask === singleKey}
-                      disabled={!canRerunSingle || (Boolean(rerunningTask) && rerunningTask !== singleKey)}
-                      onClick={() => handleRerunTask(row, 'SINGLE')}
+                      loading={isRerunningThisRow}
+                      disabled={row.synthetic || (!canRerunSingle && !canRerunDownstream) || (Boolean(rerunningTask) && !isRerunningThisRow)}
                     >
                       重跑
+                      <DownOutlined />
                     </Button>
-                    <Button
-                      size="small"
-                      type="link"
-                      title={downstreamDisabledTitle}
-                      icon={<BranchesOutlined />}
-                      loading={rerunningTask === downstreamKey}
-                      disabled={!canRerunDownstream || (Boolean(rerunningTask) && rerunningTask !== downstreamKey)}
-                      onClick={() => handleRerunTask(row, 'DOWNSTREAM')}
-                    >
-                      从失败续跑
-                    </Button>
-                  </>
-                )}
+                </Dropdown>
               </Space>
             );
           },

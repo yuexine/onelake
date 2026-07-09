@@ -944,6 +944,12 @@ public class OrchestrationService {
             }
             if (isTerminal(mapped)) {
                 run.setFinishedAt(status.finishedAt() == null ? Instant.now() : status.finishedAt());
+            } else {
+                DagStatus reconciled = reconcileFinishedGraphRunFromTaskRuns(run, mapped);
+                if (reconciled != null) {
+                    mapped = reconciled;
+                    run.setStatus(reconciled);
+                }
             }
             runRepo.save(run);
 
@@ -960,6 +966,28 @@ public class OrchestrationService {
             log.warn("Dagster run status refresh failed for {}: {}", run.getDagsterRunId(), e.getMessage());
         }
         return run;
+    }
+
+    private DagStatus reconcileFinishedGraphRunFromTaskRuns(JobRun run, DagStatus dagsterStatus) {
+        if (!isGraphPipelineExecutionMode()
+                || isTerminal(dagsterStatus)
+                || run.getFinishedAt() == null) {
+            return null;
+        }
+        // 修复历史 GRAPH 行：Dagster 偶发仍报 STARTED，但本地 run/task_run 已全部带终态时间。
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(run.getId());
+        if (taskRuns.isEmpty()) {
+            return null;
+        }
+        for (TaskRun tr : taskRuns) {
+            if (!isTerminalTaskRunStatus(tr.getStatus())) {
+                return null;
+            }
+        }
+        DagStatus reconciled = reconcileGraphRunStatusFromTaskRuns(taskRuns, DagStatus.SUCCEEDED);
+        log.warn("Dagster graph run {} is still {}, but all local task_runs are terminal; reconciling run {} to {}",
+                run.getDagsterRunId(), dagsterStatus, run.getId(), reconciled);
+        return reconciled;
     }
 
     /**

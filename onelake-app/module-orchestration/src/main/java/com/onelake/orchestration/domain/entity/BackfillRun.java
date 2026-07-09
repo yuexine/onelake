@@ -1,6 +1,6 @@
 package com.onelake.orchestration.domain.entity;
 
-import com.onelake.orchestration.domain.enums.BackfillStatus;
+import com.onelake.orchestration.domain.enums.BackfillRunStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -16,13 +16,13 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * 真回填批次持久化实体。
+ * 单个业务日期的回填派发明细。
  */
 @Entity
-@Table(name = "backfill", schema = "orchestration")
+@Table(name = "backfill_run", schema = "orchestration")
 @Getter
 @Setter
-public class Backfill {
+public class BackfillRun {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
@@ -32,37 +32,28 @@ public class Backfill {
     private UUID tenantId;
 
     @Column(nullable = false)
+    private UUID backfillId;
+
+    @Column(nullable = false)
     private UUID dagId;
 
     @Column(nullable = false)
-    private Instant rangeStart;
+    private Instant logicalDate;
 
     @Column(nullable = false)
-    private Instant rangeEnd;
+    private Instant dataIntervalStart;
 
-    @Column(nullable = false, length = 16)
-    private String grain = "DAY";
+    @Column(nullable = false)
+    private Instant dataIntervalEnd;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
-    private BackfillStatus status = BackfillStatus.QUEUED;
+    private BackfillRunStatus status = BackfillRunStatus.QUEUED;
 
-    @Column(nullable = false)
-    private Integer totalRuns = 0;
+    private UUID jobRunId;
 
-    @Column(nullable = false)
-    private Integer succeededRuns = 0;
-
-    @Column(nullable = false)
-    private Integer failedRuns = 0;
-
-    @Column(nullable = false)
-    private Integer maxParallel = 1;
-
-    private UUID createdBy;
-
-    @Column(length = 128)
-    private String createdByName;
+    @Column(length = 4000)
+    private String errorMsg;
 
     @Column(nullable = false)
     private Instant createdAt = Instant.now();

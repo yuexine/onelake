@@ -107,7 +107,7 @@ class OrchestrationPipelineTriggerTest {
             if (t.getId() == null) t.setId(UUID.randomUUID());
             return t;
         }).when(taskRunRepo).save(any(TaskRun.class));
-        org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList(), anyString()))
+        org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList(), anyString(), any()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of()));
         org.mockito.Mockito.lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.empty());
@@ -202,6 +202,51 @@ class OrchestrationPipelineTriggerTest {
         assertThat(statusByKey).containsEntry("spark_a", TaskRunStatus.RUNNING);
         assertThat(statusByKey).containsEntry("spark_b", TaskRunStatus.RUNNING);
         assertThat(statusByKey).containsEntry("quality_gate", TaskRunStatus.QUEUED);
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void triggerPipelineRunPersistsLogicalDateAndInjectsBizdateRuntimeParam() {
+        Dag dag = pipelineDag();
+        UUID backfillId = UUID.randomUUID();
+        Instant logicalDate = Instant.parse("2026-01-02T00:00:00Z");
+        Instant intervalEnd = Instant.parse("2026-01-03T00:00:00Z");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("spark_bizdate"));
+        PipelineTask task = task("spark_bizdate", true);
+        task.setConfig("{\"sql\":\"insert overwrite table dwd.orders partition(dt='${bizdate}') select 1\"}");
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-run-backfill");
+
+        service.triggerPipelineRun(
+                DAG_ID,
+                TriggerType.BACKFILL,
+                new OrchestrationService.PipelineRunOptions(
+                        logicalDate,
+                        logicalDate,
+                        intervalEnd,
+                        backfillId));
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun savedRun = runCaptor.getAllValues().get(0);
+        assertThat(savedRun.getLogicalDate()).isEqualTo(logicalDate);
+        assertThat(savedRun.getDataIntervalStart()).isEqualTo(logicalDate);
+        assertThat(savedRun.getDataIntervalEnd()).isEqualTo(intervalEnd);
+        assertThat(savedRun.getBackfillId()).isEqualTo(backfillId);
+
+        ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
+        verify(taskRunRepo, org.mockito.Mockito.atLeastOnce()).save(taskRunCaptor.capture());
+        TaskRun savedTaskRun = taskRunCaptor.getAllValues().get(0);
+        assertThat(savedTaskRun.getDataIntervalStart()).isEqualTo(logicalDate);
+        assertThat(savedTaskRun.getDataIntervalEnd()).isEqualTo(intervalEnd);
+
+        ArgumentCaptor<Map<String, String>> runtimeParamsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(sparkBuilder).build(any(), anyList(), anyString(), runtimeParamsCaptor.capture());
+        assertThat(runtimeParamsCaptor.getValue())
+                .containsEntry("bizdate", "2026-01-02")
+                .containsEntry("logical_date", "2026-01-02T00:00:00Z");
     }
 
     @Test

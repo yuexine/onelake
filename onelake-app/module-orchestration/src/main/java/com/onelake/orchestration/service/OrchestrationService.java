@@ -50,6 +50,8 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -201,6 +203,12 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger) {
+        return triggerPipelineRun(dagId, trigger, PipelineRunOptions.empty());
+    }
+
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, PipelineRunOptions options) {
+        PipelineRunOptions runOptions = options == null ? PipelineRunOptions.empty() : options;
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
@@ -235,6 +243,10 @@ public class OrchestrationService {
         run.setStartedAt(Instant.now());
         run.setTriggeredBy(TenantContext.getUserId());
         run.setTriggeredByName(currentTriggerActorName());
+        run.setLogicalDate(runOptions.logicalDate());
+        run.setDataIntervalStart(runOptions.dataIntervalStart());
+        run.setDataIntervalEnd(runOptions.dataIntervalEnd());
+        run.setBackfillId(runOptions.backfillId());
         runRepo.save(run);
 
         // 4. 为每个有效节点创建 TaskRun。初始状态由数据流 DAG 推导，避免所有节点被扁平化为 QUEUED。
@@ -246,6 +258,8 @@ public class OrchestrationService {
             tr.setTenantId(tenantId);
             tr.setJobRunId(run.getId());
             tr.setTaskKey(t.getTaskKey());
+            tr.setDataIntervalStart(runOptions.dataIntervalStart());
+            tr.setDataIntervalEnd(runOptions.dataIntervalEnd());
             TaskRunStatus initialStatus = initialStatuses.getOrDefault(t.getTaskKey(), TaskRunStatus.QUEUED);
             tr.setStatus(initialStatus);
             if (initialStatus == TaskRunStatus.RUNNING || initialStatus == TaskRunStatus.SUCCEEDED) {
@@ -267,17 +281,11 @@ public class OrchestrationService {
                 dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
                 dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
         );
-        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges);
+        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runOptions);
 
         // 6. 启动 Dagster。
         try {
-            List<Map<String, String>> tags = List.of(
-                    Map.of("key", "onelake.pipeline_id", "value", dagId.toString()),
-                    Map.of("key", "onelake.run_id", "value", run.getId().toString()),
-                    Map.of("key", "onelake.tenant_id", "value", tenantId.toString()),
-                    Map.of("key", "onelake.trigger_type", "value", trigger.name()),
-                    Map.of("key", "onelake.engine", "value", pipelineEngineTag(tasks))
-            );
+            List<Map<String, String>> tags = pipelineRunTags(dagId, tenantId, run, trigger, tasks);
             String dagsterRunId = dagster.launch(
                     runConfig.jobName(), "onelake", "onelake-loc",
                     runConfig.opConfig(), tags);
@@ -610,8 +618,10 @@ public class OrchestrationService {
 
     private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx,
                                                     List<PipelineTask> tasks,
-                                                    List<PipelineTaskEdge> pipelineEdges) {
+                                                    List<PipelineTaskEdge> pipelineEdges,
+                                                    PipelineRunOptions runOptions) {
         // GRAPH/LEGACY 只影响 Dagster 作业与 runConfig 形状，C3 仍保持 Java 生成、Dagster 执行。
+        Map<String, String> runtimeParams = pipelineRunRuntimeParams(runOptions);
         if (isGraphPipelineExecutionMode()) {
             return sparkBuilder.buildGraphRunConfig(
                     ctx,
@@ -619,12 +629,46 @@ public class OrchestrationService {
                     pipelineEdges,
                     pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                     Math.max(1, pipelineMaxParallel),
-                    Map.of());
+                    Map.of(),
+                    runtimeParams);
         }
         return sparkBuilder.build(
                 ctx,
                 tasks,
-                pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim());
+                pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
+                runtimeParams);
+    }
+
+    private List<Map<String, String>> pipelineRunTags(UUID dagId,
+                                                      UUID tenantId,
+                                                      JobRun run,
+                                                      TriggerType trigger,
+                                                      List<PipelineTask> tasks) {
+        List<Map<String, String>> tags = new ArrayList<>();
+        tags.add(Map.of("key", "onelake.pipeline_id", "value", dagId.toString()));
+        tags.add(Map.of("key", "onelake.run_id", "value", run.getId().toString()));
+        tags.add(Map.of("key", "onelake.tenant_id", "value", tenantId.toString()));
+        tags.add(Map.of("key", "onelake.trigger_type", "value", trigger.name()));
+        tags.add(Map.of("key", "onelake.engine", "value", pipelineEngineTag(tasks)));
+        if (run.getBackfillId() != null) {
+            tags.add(Map.of("key", "onelake.backfill_id", "value", run.getBackfillId().toString()));
+        }
+        if (run.getLogicalDate() != null) {
+            tags.add(Map.of("key", "onelake.logical_date", "value", run.getLogicalDate().toString()));
+        }
+        return tags;
+    }
+
+    private Map<String, String> pipelineRunRuntimeParams(PipelineRunOptions runOptions) {
+        if (runOptions == null || runOptions.logicalDate() == null) {
+            return Map.of();
+        }
+        Instant logicalDate = runOptions.logicalDate();
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("bizdate", DateTimeFormatter.ISO_LOCAL_DATE
+                .format(logicalDate.atZone(ZoneOffset.UTC).toLocalDate()));
+        params.put("logical_date", logicalDate.toString());
+        return params;
     }
 
     private List<Map<String, String>> pipelineRerunTags(Dag dag,
@@ -706,6 +750,13 @@ public class OrchestrationService {
             payload.put("partialSucceeded", List.of()); // 后续由 refreshRunStatus 填充部分成功节点。
         }
         publisher.publish(eventType, dag.getId().toString(), payload);
+    }
+
+    @Transactional
+    public JobRun refreshRunStatusForBackfill(UUID runId) {
+        JobRun run = runRepo.findById(runId)
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        return refreshRunStatus(run);
     }
 
     @Transactional
@@ -1560,6 +1611,7 @@ public class OrchestrationService {
             dag == null ? null : dag.getDagsterJob(),
             r.getDagsterRunId(),
             r.getTriggerType().name(), r.getStatus().name(),
+            r.getLogicalDate(), r.getDataIntervalStart(), r.getDataIntervalEnd(), r.getBackfillId(),
             r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r));
     }
 
@@ -1568,6 +1620,17 @@ public class OrchestrationService {
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 
     public record TaskRunLogResource(String objectKey, String filename, long contentLength, InputStream content) {}
+
+    public record PipelineRunOptions(
+            Instant logicalDate,
+            Instant dataIntervalStart,
+            Instant dataIntervalEnd,
+            UUID backfillId
+    ) {
+        public static PipelineRunOptions empty() {
+            return new PipelineRunOptions(null, null, null, null);
+        }
+    }
 
     private enum RerunMode {
         SINGLE,

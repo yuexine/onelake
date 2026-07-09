@@ -688,7 +688,7 @@ class OrchestrationServiceTest {
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
         ReflectionTestUtils.setField(service, "pipelineCallbackBaseUrl", "http://localhost:8080");
-        when(sparkBuilder.build(any(), anyList(), eq("http://localhost:8080")))
+        when(sparkBuilder.build(any(), anyList(), eq("http://localhost:8080"), anyMap()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of("ops", Map.of())));
         when(dagster.launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-legacy");
@@ -697,9 +697,9 @@ class OrchestrationServiceTest {
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
-        verify(sparkBuilder).build(any(), anyList(), eq("http://localhost:8080"));
+        verify(sparkBuilder).build(any(), anyList(), eq("http://localhost:8080"), anyMap());
         verify(sparkBuilder, never()).buildGraphRunConfig(
-                any(), anyList(), anyList(), anyString(), anyInt(), anyMap());
+                any(), anyList(), anyList(), anyString(), anyInt(), anyMap(), anyMap());
         verify(dagster).launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
     }
@@ -718,7 +718,7 @@ class OrchestrationServiceTest {
         when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap()))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap(), anyMap()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
         when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-graph");
@@ -727,8 +727,8 @@ class OrchestrationServiceTest {
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
-        verify(sparkBuilder, never()).build(any(), anyList(), anyString());
-        verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap());
+        verify(sparkBuilder, never()).build(any(), anyList(), anyString(), anyMap());
+        verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap(), anyMap());
         verify(dagster).launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
     }

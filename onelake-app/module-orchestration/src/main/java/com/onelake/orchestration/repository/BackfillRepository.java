@@ -1,12 +1,34 @@
 package com.onelake.orchestration.repository;
 
 import com.onelake.orchestration.domain.entity.Backfill;
+import com.onelake.orchestration.domain.enums.BackfillStatus;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
  * 真回填批次持久化访问接口。
  */
 public interface BackfillRepository extends JpaRepository<Backfill, UUID> {
+    List<Backfill> findByStatusInOrderByCreatedAtAsc(Collection<BackfillStatus> statuses);
+
+    List<Backfill> findByDagIdOrderByCreatedAtDesc(UUID dagId);
+
+    Optional<Backfill> findByIdAndTenantId(UUID id, UUID tenantId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select bf from Backfill bf where bf.id = :id and bf.tenantId = :tenantId")
+    Optional<Backfill> findByIdAndTenantIdForUpdate(@Param("id") UUID id,
+                                                    @Param("tenantId") UUID tenantId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select bf from Backfill bf where bf.id = :id")
+    Optional<Backfill> findByIdForUpdate(@Param("id") UUID id);
 }

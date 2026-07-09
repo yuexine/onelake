@@ -9,5 +9,7 @@ public enum TriggerType {
     /** 用户手动触发。 */
     MANUAL,
     /** 由上游事件触发。 */
-    EVENT
+    EVENT,
+    /** 业务日期回填派发触发。 */
+    BACKFILL
 }

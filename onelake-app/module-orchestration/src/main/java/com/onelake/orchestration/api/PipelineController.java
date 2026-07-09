@@ -32,6 +32,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -140,9 +141,19 @@ public class PipelineController {
     @PostMapping("/{dagId}/trigger")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Map<String, UUID>> trigger(@PathVariable UUID dagId,
-                                                   @RequestParam(defaultValue = "MANUAL") String trigger) {
+                                                   @RequestParam(defaultValue = "MANUAL") String trigger,
+                                                   @RequestParam(required = false) Instant logicalDate,
+                                                   @RequestParam(required = false) Instant dataIntervalStart,
+                                                   @RequestParam(required = false) Instant dataIntervalEnd) {
         TriggerType tt = TriggerType.valueOf(trigger);
-        UUID runId = orchestrationService.triggerPipelineRun(dagId, tt);
+        UUID runId = orchestrationService.triggerPipelineRun(
+                dagId,
+                tt,
+                new OrchestrationService.PipelineRunOptions(
+                        logicalDate,
+                        dataIntervalStart,
+                        dataIntervalEnd,
+                        null));
         return ApiResponse.ok(Map.of("runId", runId));
     }
 

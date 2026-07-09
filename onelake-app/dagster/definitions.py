@@ -129,6 +129,28 @@ spark.stop()
     return cmd, temp_paths
 
 
+def _runtime_params(config):
+    params = {}
+    for item in config.get("runtime_params") or []:
+        key = str(item.get("key") or "").strip()
+        if key:
+            params[key] = "" if item.get("value") is None else str(item.get("value"))
+    return params
+
+
+def _apply_runtime_params(text, params):
+    result = "" if text is None else str(text)
+    for key, value in (params or {}).items():
+        result = result.replace("${" + key + "}", value)
+    return result
+
+
+def _node_with_runtime_params(node, params):
+    enriched = dict(node)
+    enriched["sql_or_script"] = _apply_runtime_params(enriched.get("sql_or_script", ""), params)
+    return enriched
+
+
 @op(
     name="run_spark_task_op",
     config_schema={
@@ -151,6 +173,13 @@ spark.stop()
         ),
         "iceberg_catalog": Field(String, default_value="onelake"),
         "callback_base_url": Field(String, default_value=""),
+        "runtime_params": Field(
+            Array(Shape({
+                "key": Field(String),
+                "value": Field(String, default_value=""),
+            })),
+            default_value=[],
+        ),
         "tasks": Field(
             Array(Shape({
                 "task_key": Field(String),
@@ -186,6 +215,7 @@ def run_spark_task_op(context):
     """
     cfg = context.op_config
     base_url = cfg.get("callback_base_url", "")
+    runtime_params = _runtime_params(cfg)
     iceberg_catalog = cfg["iceberg_catalog"]
     spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
     tasks = cfg.get("tasks") or []
@@ -210,7 +240,7 @@ def run_spark_task_op(context):
             task_type, resource, task.get("from_tables", []), task.get("target_fqn", ""),
         )
 
-        node = dict(task)
+        node = _node_with_runtime_params(task, runtime_params)
         node["resource_profile"] = resource
         temp_paths = []
         log_ref = ""
@@ -470,6 +500,13 @@ def _upload_log(tenant_id, run_id, task_key, attempt, content, log):
         "iceberg_catalog": Field(String, default_value="onelake"),
         "execution_mode": Field(String, default_value="GRAPH"),
         "callback_base_url": Field(String, default_value=""),
+        "runtime_params": Field(
+            Array(Shape({
+                "key": Field(String),
+                "value": Field(String, default_value=""),
+            })),
+            default_value=[],
+        ),
         "max_parallel": Field(Int, default_value=4),
         "nodes": Field(
             Array(Shape({
@@ -506,6 +543,7 @@ def run_pipeline_graph_op(context):
     base_url = cfg.get("callback_base_url", "")
     run_id = cfg["run_id"]
     tenant_id = cfg["tenant_id"]
+    runtime_params = _runtime_params(cfg)
     iceberg_catalog = cfg.get("iceberg_catalog", "onelake")
     spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
     max_parallel = max(1, int(cfg.get("max_parallel") or 1))
@@ -634,7 +672,7 @@ def run_pipeline_graph_op(context):
             stack.extend(downstream.get(task_key, []))
 
     def run_node(task_key):
-        node = nodes[task_key]
+        node = _node_with_runtime_params(nodes[task_key], runtime_params)
         task_type = node["task_type"]
         first_attempt = base_attempt(task_key)
         _callback(base_url, run_id, task_key, {

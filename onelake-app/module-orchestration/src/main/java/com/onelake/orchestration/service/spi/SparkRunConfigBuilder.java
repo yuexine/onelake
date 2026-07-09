@@ -53,6 +53,13 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
     }
 
     public DagsterRunConfig build(TaskBundleContext ctx, List<PipelineTask> tasks, String callbackBaseUrl) {
+        return build(ctx, tasks, callbackBaseUrl, Map.of());
+    }
+
+    public DagsterRunConfig build(TaskBundleContext ctx,
+                                  List<PipelineTask> tasks,
+                                  String callbackBaseUrl,
+                                  Map<String, String> runtimeParams) {
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -70,6 +77,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("tenant_id", ctx.tenantId().toString());
         opConfig.put("iceberg_catalog", "onelake");
         opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
+        opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
         opConfig.put("tasks", sparkTasks);
         opConfig.put("resource_profile", defaultSparkProfile());
         return new DagsterRunConfig(JOB_NAME, Map.of(
@@ -91,6 +99,16 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                                 String callbackBaseUrl,
                                                 int maxParallel,
                                                 Map<String, Integer> baseAttempts) {
+        return buildGraphRunConfig(ctx, tasks, pipelineEdges, callbackBaseUrl, maxParallel, baseAttempts, Map.of());
+    }
+
+    public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
+                                                List<PipelineTask> tasks,
+                                                List<PipelineTaskEdge> pipelineEdges,
+                                                String callbackBaseUrl,
+                                                int maxParallel,
+                                                Map<String, Integer> baseAttempts,
+                                                Map<String, String> runtimeParams) {
         // GRAPH 模式把可观测节点和 PIPELINE 边完整交给 Dagster op 内置调度器，旧 build(...) 保持扁平 tasks[] 回退。
         PipelineCompileResult plan = ctx.compileResult();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -133,6 +151,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("iceberg_catalog", "onelake");
         opConfig.put("execution_mode", "GRAPH");
         opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
+        opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
         opConfig.put("max_parallel", Math.max(1, maxParallel));
         opConfig.put("nodes", nodes);
         opConfig.put("edges", edges);
@@ -168,6 +187,19 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("resource_profile", profile);
 
         return opConfig;
+    }
+
+    private static List<Map<String, String>> runtimeParamEntries(Map<String, String> runtimeParams) {
+        if (runtimeParams == null || runtimeParams.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, String>> entries = new ArrayList<>();
+        runtimeParams.forEach((key, value) -> {
+            if (StringUtils.hasText(key) && value != null) {
+                entries.add(Map.of("key", key, "value", value));
+            }
+        });
+        return entries;
     }
 
     private static Map<String, Object> resourceProfile(JsonNode cfg) {

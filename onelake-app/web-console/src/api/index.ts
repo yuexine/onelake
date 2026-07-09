@@ -318,6 +318,8 @@ export const OrchestrationAPI = {
     unwrap<PageResult<JobRun>>(http.get('/orchestration/runs', { params: { page, size } })),
   getRun: (id: string) =>
     unwrap<JobRun>(http.get(`/orchestration/runs/${id}`)),
+  cancelRun: (id: string) =>
+    unwrap<JobRun>(http.post(`/orchestration/runs/${id}/cancel`)),
   listDagRuns: (id: string, page = 0, size = 20) =>
     unwrap<PageResult<JobRun>>(http.get(`/orchestration/dags/${id}/runs`, { params: { page, size } })),
 };

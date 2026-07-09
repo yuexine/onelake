@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -521,6 +522,79 @@ def run_pipeline_graph_op(context):
 
     status = {key: "QUEUED" for key in nodes}
     lock = threading.Lock()
+    process_lock = threading.Lock()
+    active_processes = set()
+
+    def register_process(process):
+        with process_lock:
+            active_processes.add(process)
+
+    def unregister_process(process):
+        with process_lock:
+            active_processes.discard(process)
+
+    def active_process_snapshot(lock_timeout=None):
+        if lock_timeout is None:
+            with process_lock:
+                return list(active_processes)
+        acquired = process_lock.acquire(timeout=lock_timeout)
+        if not acquired:
+            return list(active_processes)
+        try:
+            return list(active_processes)
+        finally:
+            process_lock.release()
+
+    def terminate_active_processes(reason, lock_timeout=None):
+        processes = active_process_snapshot(lock_timeout)
+        for process in processes:
+            if process.poll() is not None:
+                continue
+            try:
+                context.log.warning(
+                    "terminating spark-submit process group pid=%s reason=%s",
+                    process.pid,
+                    reason,
+                )
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except Exception as exc:
+                context.log.warning("failed to terminate process group pid=%s: %s", process.pid, exc)
+        for process in processes:
+            if process.poll() is not None:
+                continue
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    context.log.warning("force killing spark-submit process group pid=%s", process.pid)
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            except Exception as exc:
+                context.log.warning("failed to force kill process group pid=%s: %s", process.pid, exc)
+
+    previous_signal_handlers = {}
+
+    def handle_termination_signal(signum, frame):
+        reason = signal.Signals(signum).name
+        terminate_active_processes(reason, lock_timeout=1)
+        raise KeyboardInterrupt(reason)
+
+    def install_signal_handlers():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, handle_termination_signal)
+
+    def restore_signal_handlers():
+        for signum, handler in previous_signal_handlers.items():
+            signal.signal(signum, handler)
+
+    def is_execution_interrupt(exc):
+        return isinstance(exc, (KeyboardInterrupt, SystemExit)) or (
+            exc.__class__.__name__ == "DagsterExecutionInterruptedError"
+        )
 
     def base_attempt(task_key):
         # Java 侧传入跨 run 累计 attempt；普通首跑没有该字段时从 1 开始。
@@ -589,6 +663,7 @@ def run_pipeline_graph_op(context):
         for local_attempt in range(1, attempts + 1):
             attempt = cumulative_attempt(task_key, local_attempt)
             temp_paths = []
+            process = None
             try:
                 cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
                 context.log.info(
@@ -599,13 +674,16 @@ def run_pipeline_graph_op(context):
                     attempts,
                     " ".join(cmd),
                 )
-                result = subprocess.run(
+                process = subprocess.Popen(
                     cmd,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    check=False,
+                    start_new_session=True,
                 )
+                register_process(process)
+                stdout, stderr = process.communicate()
+                result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
                 last_log = (result.stdout or "") + "\n" + (result.stderr or "")
                 if result.stdout:
                     context.log.info(result.stdout)
@@ -634,6 +712,8 @@ def run_pipeline_graph_op(context):
                 last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
                 context.log.warning("[%s] attempt %s failed: %s", task_key, attempt, exc)
             finally:
+                if process is not None:
+                    unregister_process(process)
                 for path in temp_paths:
                     try:
                         os.unlink(path)
@@ -650,43 +730,52 @@ def run_pipeline_graph_op(context):
         return "FAILED"
 
     failures = []
-    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-        futures = {}
+    install_signal_handlers()
+    try:
+        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+            futures = {}
 
-        def submit_ready():
-            # 就绪即调度：入度归零的 QUEUED 节点立即进入线程池，受 max_parallel 限流。
-            with lock:
-                ready = [
-                    key for key in nodes
-                    if status[key] == "QUEUED" and indegree[key] == 0 and key not in futures
-                ]
-                for key in ready:
-                    status[key] = "RUNNING"
-                    futures[key] = pool.submit(run_node, key)
+            def submit_ready():
+                # 就绪即调度：入度归零的 QUEUED 节点立即进入线程池，受 max_parallel 限流。
+                with lock:
+                    ready = [
+                        key for key in nodes
+                        if status[key] == "QUEUED" and indegree[key] == 0 and key not in futures
+                    ]
+                    for key in ready:
+                        status[key] = "RUNNING"
+                        futures[key] = pool.submit(run_node, key)
 
-        submit_ready()
-        while futures:
-            done_key = None
-            for key, future in list(futures.items()):
-                if future.done():
-                    done_key = key
-                    break
-            if done_key is None:
-                time.sleep(0.05)
-                continue
+            try:
+                submit_ready()
+                while futures:
+                    done_key = None
+                    for key, future in list(futures.items()):
+                        if future.done():
+                            done_key = key
+                            break
+                    if done_key is None:
+                        time.sleep(0.05)
+                        continue
 
-            future = futures.pop(done_key)
-            result = future.result()
-            with lock:
-                status[done_key] = result
-                if result == "SUCCEEDED":
-                    for child in downstream.get(done_key, []):
-                        indegree[child] -= 1
-                else:
-                    failures.append(done_key)
-            if result != "SUCCEEDED":
-                mark_downstream_failed(done_key)
-            submit_ready()
+                    future = futures.pop(done_key)
+                    result = future.result()
+                    with lock:
+                        status[done_key] = result
+                        if result == "SUCCEEDED":
+                            for child in downstream.get(done_key, []):
+                                indegree[child] -= 1
+                        else:
+                            failures.append(done_key)
+                    if result != "SUCCEEDED":
+                        mark_downstream_failed(done_key)
+                    submit_ready()
+            except BaseException as exc:
+                if is_execution_interrupt(exc):
+                    terminate_active_processes(exc.__class__.__name__)
+                raise
+    finally:
+        restore_signal_handlers()
 
     blocked = [key for key, value in status.items() if value == "QUEUED"]
     for task_key in blocked:

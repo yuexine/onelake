@@ -2,6 +2,7 @@ package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
@@ -55,6 +56,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -98,6 +100,7 @@ class OrchestrationServiceTest {
     @Mock private TaskRunRepository taskRunRepo;
     @Mock private SparkRunConfigBuilder sparkBuilder;
     @Mock private ObjectProvider<OutboxPublisher> outboxPublisher;
+    @Mock private OutboxPublisher publisher;
     @Mock private PipelineLogStorage pipelineLogStorage;
 
     private OrchestrationService service;
@@ -107,6 +110,7 @@ class OrchestrationServiceTest {
         TenantContext.setTenantId(TENANT_ID);
         lenient().when(runtimeContractService.triggerBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
         lenient().when(runtimeContractService.launchBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
+        lenient().when(runRepo.findByIdForUpdate(any())).thenReturn(Optional.empty());
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
             runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
             sparkBuilder, outboxPublisher, pipelineLogStorage);
@@ -308,6 +312,232 @@ class OrchestrationServiceTest {
 
         assertThat(page.getContent()).isEmpty();
         verifyNoInteractions(runRepo);
+    }
+
+    @Test
+    void cancelRunTerminatesDagsterAndMarksNonTerminalTaskRunsCancelled() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun succeeded = taskRun("extract", TaskRunStatus.SUCCEEDED);
+        Instant succeededFinishedAt = Instant.parse("2026-07-09T01:01:00Z");
+        succeeded.setFinishedAt(succeededFinishedAt);
+        TaskRun running = taskRun("transform", TaskRunStatus.RUNNING);
+        TaskRun queued = taskRun("load", TaskRunStatus.QUEUED);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByIdAndDagIdInForUpdate(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(dagster.terminate("dagster-run-1", false)).thenReturn(true);
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(succeeded, running, queued));
+        when(outboxPublisher.getIfAvailable()).thenReturn(publisher);
+
+        JobRunDTO dto = service.cancelRun(RUN_ID);
+
+        assertThat(dto.status()).isEqualTo("CANCELLED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.CANCELLED);
+        assertThat(run.getFinishedAt()).isNotNull();
+        assertThat(succeeded.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(succeeded.getFinishedAt()).isEqualTo(succeededFinishedAt);
+        assertThat(running.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        assertThat(running.getFinishedAt()).isEqualTo(run.getFinishedAt());
+        assertThat(queued.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        assertThat(queued.getFinishedAt()).isEqualTo(run.getFinishedAt());
+        verify(dagster).terminate("dagster-run-1", false);
+        verify(runRepo).save(run);
+        verify(taskRunRepo, never()).save(succeeded);
+        verify(taskRunRepo).save(running);
+        verify(taskRunRepo).save(queued);
+        verify(publisher).publish(eq(DomainEvents.PIPELINE_RUN_FAILED), eq(DAG_ID.toString()),
+                org.mockito.ArgumentMatchers.<Map<String, Object>>argThat(payload ->
+                        RUN_ID.toString().equals(payload.get("runId"))
+                                && "cancelled".equals(payload.get("errorMsg"))));
+    }
+
+    @Test
+    void cancelRunIsIdempotentForTerminalRun() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.CANCELLED);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByIdAndDagIdInForUpdate(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+
+        JobRunDTO dto = service.cancelRun(RUN_ID);
+
+        assertThat(dto.status()).isEqualTo("CANCELLED");
+        verify(dagster, never()).terminate(anyString(), anyBoolean());
+        verify(taskRunRepo, never()).findByJobRunIdForUpdate(any());
+        verify(runRepo, never()).save(any(JobRun.class));
+        verify(outboxPublisher, never()).getIfAvailable();
+    }
+
+    @Test
+    void cancelRunWithoutDagsterRunIdMarksLocalStateOnly() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setDagsterRunId(null);
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun running = taskRun("transform", TaskRunStatus.RUNNING);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByIdAndDagIdInForUpdate(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(running));
+
+        JobRunDTO dto = service.cancelRun(RUN_ID);
+
+        assertThat(dto.status()).isEqualTo("CANCELLED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.CANCELLED);
+        assertThat(running.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        verify(dagster, never()).terminate(anyString(), anyBoolean());
+        verify(runRepo).save(run);
+        verify(taskRunRepo).save(running);
+    }
+
+    @Test
+    void cancelRunContinuesWhenDagsterTerminateFails() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun running = taskRun("transform", TaskRunStatus.RUNNING);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByIdAndDagIdInForUpdate(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(dagster.terminate("dagster-run-1", false)).thenThrow(new RuntimeException("dagster down"));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(running));
+
+        JobRunDTO dto = service.cancelRun(RUN_ID);
+
+        assertThat(dto.status()).isEqualTo("CANCELLED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.CANCELLED);
+        assertThat(running.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        verify(runRepo).save(run);
+        verify(taskRunRepo).save(running);
+    }
+
+    @Test
+    void cancelRunRejectsRunOutsideTenant() {
+        Dag dag = dag();
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByIdAndDagIdInForUpdate(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.cancelRun(RUN_ID))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("运行实例不存在");
+
+        verify(dagster, never()).terminate(anyString(), anyBoolean());
+        verify(taskRunRepo, never()).findByJobRunIdForUpdate(any());
+    }
+
+    @Test
+    void listRunsMapsDagsterCanceledToCancelledAndCompensatesPendingTaskRuns() {
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun pending = taskRun("spark_node", TaskRunStatus.RUNNING);
+        Instant finishedAt = Instant.parse("2026-07-09T02:03:00Z");
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(dagster.getRunStatus("dagster-run-1"))
+                .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "CANCELED", null, finishedAt));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of(pending));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("CANCELLED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.CANCELLED);
+        assertThat(run.getFinishedAt()).isEqualTo(finishedAt);
+        assertThat(pending.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        assertThat(pending.getFinishedAt()).isEqualTo(finishedAt);
+        assertThat(pending.getErrorMsg()).isNull();
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(any());
+        verify(taskRunRepo).save(pending);
+    }
+
+    @Test
+    void terminalCancelledRunIsTerminalAndCompensatesWithoutDagsterRefresh() {
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.CANCELLED);
+        TaskRun pending = taskRun("spark_node", TaskRunStatus.QUEUED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of(pending));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("CANCELLED");
+        assertThat(pending.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        assertThat(pending.getFinishedAt()).isEqualTo(run.getFinishedAt());
+        verify(dagster, never()).getRunStatus("dagster-run-1");
+        verify(taskRunRepo).save(pending);
+    }
+
+    @Test
+    void refreshUsesLockedCancelledRunAndDoesNotOverwriteWithStaleRunningEntity() {
+        Dag dag = dag();
+        JobRun staleRun = jobRun(dag.getId());
+        staleRun.setStatus(DagStatus.RUNNING);
+        staleRun.setFinishedAt(null);
+        JobRun lockedCancelled = jobRun(dag.getId());
+        lockedCancelled.setStatus(DagStatus.CANCELLED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(staleRun), pageable, 1));
+        when(runRepo.findByIdForUpdate(RUN_ID)).thenReturn(Optional.of(lockedCancelled));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of());
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("CANCELLED");
+        verify(dagster, never()).getRunStatus("dagster-run-1");
+        verify(runRepo, never()).save(staleRun);
+    }
+
+    @Test
+    void graphTerminalRunCompensatesCancelledWithoutUpstreamFailurePropagation() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun callbackTerminal = taskRun("extract", TaskRunStatus.SUCCEEDED);
+        TaskRun failedTerminal = taskRun("transform", TaskRunStatus.FAILED);
+        failedTerminal.setErrorMsg("boom");
+        TaskRun pending = taskRun("load", TaskRunStatus.QUEUED);
+        Instant finishedAt = Instant.parse("2026-07-09T02:03:00Z");
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(dagster.getRunStatus("dagster-run-1"))
+                .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "CANCELLED", null, finishedAt));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(callbackTerminal, failedTerminal, pending));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("CANCELLED");
+        assertThat(callbackTerminal.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(failedTerminal.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(pending.getStatus()).isEqualTo(TaskRunStatus.CANCELLED);
+        assertThat(pending.getFinishedAt()).isEqualTo(finishedAt);
+        assertThat(pending.getErrorMsg()).isNull();
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(any());
+        verify(taskRunRepo, never()).save(callbackTerminal);
+        verify(taskRunRepo, never()).save(failedTerminal);
+        verify(taskRunRepo).save(pending);
     }
 
     @Test

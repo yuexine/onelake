@@ -5,8 +5,8 @@
  * plus expandable row showing per-task task_run status from PipelineAPI.listTaskRuns.
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
-import { Alert, App as AntApp, Descriptions, Drawer, Select, Space, Button, Table, Tabs, Tag, Typography } from 'antd';
-import { ArrowLeftOutlined, BranchesOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, UpOutlined } from '@ant-design/icons';
+import { Alert, App as AntApp, Descriptions, Drawer, Select, Space, Button, Popconfirm, Table, Tabs, Tag, Typography } from 'antd';
+import { ArrowLeftOutlined, BranchesOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, StopOutlined, UpOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
 import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
@@ -41,6 +41,10 @@ function triggerActorName(run: JobRun) {
 function triggerActorTitle(run: JobRun) {
   if (!run.triggeredBy) return triggerActorName(run);
   return `${triggerActorName(run)} · ${run.triggeredBy}`;
+}
+
+function isRunTerminal(status?: string) {
+  return ['SUCCEEDED', 'SUCCESS', 'FAILED', 'CANCELLED'].includes((status || '').toUpperCase());
 }
 
 function filenameFromContentDisposition(header?: string) {
@@ -722,6 +726,8 @@ export default function RunInstances() {
   const [detailRun, setDetailRun] = useState<JobRun | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [cancelingRun, setCancelingRun] = useState(false);
+  const [taskRefreshVersion, setTaskRefreshVersion] = useState(0);
   const [expandedRunIds, setExpandedRunIds] = useState<string[]>([]);
 
   const loadRuns = (nextPage = page, nextSize = pageSize) => {
@@ -774,6 +780,28 @@ export default function RunInstances() {
     [dagIdFilter, runs],
   );
 
+  const handleCancelRun = async () => {
+    if (!routeRunId || !detailRun) return;
+    setCancelingRun(true);
+    try {
+      const previousStatus = detailRun.status;
+      const nextRun = await OrchestrationAPI.cancelRun(routeRunId);
+      setDetailRun(nextRun);
+      setTaskRefreshVersion((version) => version + 1);
+      if (nextRun.status === 'CANCELLED') {
+        message.success('已取消运行');
+      } else if (isRunTerminal(previousStatus) && nextRun.status === previousStatus) {
+        message.info('运行已终态，状态未变');
+      } else {
+        message.success(`运行状态：${nextRun.status}`);
+      }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '取消运行失败');
+    } finally {
+      setCancelingRun(false);
+    }
+  };
+
   useEffect(() => {
     const visibleIds = new Set(visibleRuns.map((run) => run.id));
     setExpandedRunIds((keys) => keys.filter((key) => visibleIds.has(key)));
@@ -805,6 +833,24 @@ export default function RunInstances() {
               <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/orchestration/runs')}>返回列表</Button>
               {detailRun?.dagId && (
                 <Button onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}`)}>打开流水线</Button>
+              )}
+              {detailRun && (
+                <Popconfirm
+                  title="取消运行"
+                  description="确认取消当前运行？"
+                  okText="取消运行"
+                  cancelText="保留"
+                  okButtonProps={{ danger: true, loading: cancelingRun }}
+                  onConfirm={handleCancelRun}
+                >
+                  <Button
+                    danger
+                    icon={<StopOutlined />}
+                    loading={cancelingRun}
+                  >
+                    取消运行
+                  </Button>
+                </Popconfirm>
               )}
               <Button icon={<ReloadOutlined />} onClick={loadRunDetail} loading={detailLoading}>刷新</Button>
             </Space>
@@ -851,7 +897,12 @@ export default function RunInstances() {
             </SectionCard>
             <SectionCard title="任务拓扑与节点状态" icon={<HistoryOutlined />} flatBody>
               <div style={{ padding: 12 }}>
-                <TaskRunsPanel runId={detailRun.id} dagId={detailRun.dagId} onRunChanged={loadRunDetail} />
+                <TaskRunsPanel
+                  runId={detailRun.id}
+                  dagId={detailRun.dagId}
+                  refreshVersion={taskRefreshVersion}
+                  onRunChanged={loadRunDetail}
+                />
               </div>
             </SectionCard>
           </>
@@ -1279,7 +1330,17 @@ function TaskRunDrawer({
  * Per-task status panel (P4). Loads via PipelineAPI.listTaskRuns for v2 pipelines.
  * Falls back to "no task_run data" when a run has no task-level rows.
  */
-function TaskRunsPanel({ runId, dagId, onRunChanged }: { runId: string; dagId: string; onRunChanged?: () => void }) {
+function TaskRunsPanel({
+  runId,
+  dagId,
+  refreshVersion,
+  onRunChanged,
+}: {
+  runId: string;
+  dagId: string;
+  refreshVersion?: number;
+  onRunChanged?: () => void;
+}) {
   const { message } = AntApp.useApp();
   const [taskRuns, setTaskRuns] = useState<TaskRun[] | null>(null);
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
@@ -1343,7 +1404,7 @@ function TaskRunsPanel({ runId, dagId, onRunChanged }: { runId: string; dagId: s
     return () => {
       cancelled = true;
     };
-  }, [runId, dagId]);
+  }, [runId, dagId, refreshVersion]);
 
   const assetByFqn = useMemo(() => buildAssetByFqn(assets), [assets]);
 

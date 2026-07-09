@@ -5,6 +5,7 @@ import com.onelake.common.exception.DataplaneException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
@@ -53,6 +54,17 @@ public class DagsterClient {
           runOrError(runId: $runId) {
             __typename
             ... on Run { runId status startTime endTime }
+            ... on PythonError { message }
+          }
+        }""";
+
+    private static final String TERMINATE_RUN = """
+        mutation($runId: String!, $policy: TerminateRunPolicy!) {
+          terminateRun(runId: $runId, terminatePolicy: $policy) {
+            __typename
+            ... on TerminateRunSuccess { run { runId status } }
+            ... on TerminateRunFailure { message run { runId status } }
+            ... on RunNotFoundError { message }
             ... on PythonError { message }
           }
         }""";
@@ -145,6 +157,44 @@ public class DagsterClient {
         );
     }
 
+    /**
+     * Request Dagster to terminate a run.
+     *
+     * @return true when Dagster accepts the request, or the run is already gone/terminal.
+     */
+    public boolean terminate(String dagsterRunId, boolean force) {
+        if (!StringUtils.hasText(dagsterRunId)) {
+            throw new DataplaneException("dagster terminate failed: runId is blank");
+        }
+        String policy = force ? "MARK_AS_CANCELED_IMMEDIATELY" : "SAFE_TERMINATE";
+        WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
+        JsonNode resp = client.post()
+            .bodyValue(Map.of(
+                "query", TERMINATE_RUN,
+                "variables", Map.of("runId", dagsterRunId, "policy", policy)))
+            .retrieve()
+            .bodyToMono(JsonNode.class)
+            .block(Duration.ofSeconds(5));
+        if (resp == null) {
+            throw new DataplaneException("dagster empty response");
+        }
+        if (resp.hasNonNull("errors")) {
+            throw new DataplaneException("dagster terminate failed: " + resp.get("errors").toString());
+        }
+        JsonNode result = resp.at("/data/terminateRun");
+        String type = result.path("__typename").asText("");
+        if ("TerminateRunSuccess".equals(type) || "RunNotFoundError".equals(type)) {
+            return true;
+        }
+        String status = result.at("/run/status").asText("");
+        String message = result.path("message").asText(result.toString());
+        if ("TerminateRunFailure".equals(type)
+                && (isTerminalDagsterStatus(status) || isAlreadyTerminalTerminateMessage(message))) {
+            return true;
+        }
+        throw new DataplaneException("dagster terminate failed: " + message);
+    }
+
     public List<String> listJobs(String repo, String location) {
         WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
         JsonNode resp = client.post()
@@ -174,6 +224,32 @@ public class DagsterClient {
             });
         }
         return jobs;
+    }
+
+    private boolean isTerminalDagsterStatus(String status) {
+        if (!StringUtils.hasText(status)) {
+            return false;
+        }
+        return switch (status.trim().toUpperCase()) {
+            case "SUCCESS", "SUCCEEDED", "FAILURE", "FAILED", "CANCELED", "CANCELLED" -> true;
+            default -> false;
+        };
+    }
+
+    private boolean isAlreadyTerminalTerminateMessage(String message) {
+        if (!StringUtils.hasText(message)) {
+            return false;
+        }
+        String normalized = message.trim().toUpperCase();
+        return normalized.contains("STATUS SUCCESS")
+            || normalized.contains("STATUS SUCCEEDED")
+            || normalized.contains("STATUS FAILURE")
+            || normalized.contains("STATUS FAILED")
+            || normalized.contains("STATUS CANCELED")
+            || normalized.contains("STATUS CANCELLED")
+            || normalized.contains("ALREADY FINISHED")
+            || normalized.contains("ALREADY COMPLETED")
+            || normalized.contains("TERMINAL STATE");
     }
 
     private Instant epochSeconds(JsonNode node) {

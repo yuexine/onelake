@@ -1,9 +1,13 @@
 package com.onelake.orchestration.repository;
 
 import com.onelake.orchestration.domain.entity.JobRun;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.Collection;
 import java.util.Optional;
@@ -15,6 +19,15 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
     Page<JobRun> findByDagIdInOrderByStartedAtDesc(Collection<UUID> dagIds, Pageable pageable);
 
     Optional<JobRun> findByIdAndDagIdIn(UUID id, Collection<UUID> dagIds);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select jr from JobRun jr where jr.id = :id")
+    Optional<JobRun> findByIdForUpdate(@Param("id") UUID id);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select jr from JobRun jr where jr.id = :id and jr.dagId in :dagIds")
+    Optional<JobRun> findByIdAndDagIdInForUpdate(@Param("id") UUID id,
+                                                 @Param("dagIds") Collection<UUID> dagIds);
 
     Optional<JobRun> findFirstByDagIdOrderByStartedAtDesc(UUID dagId);
 }

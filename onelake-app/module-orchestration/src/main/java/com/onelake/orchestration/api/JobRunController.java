@@ -11,6 +11,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -46,5 +47,15 @@ public class JobRunController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<JobRunDTO> get(@PathVariable UUID id) {
         return ApiResponse.ok(service.getRun(id));
+    }
+
+    @Operation(
+        summary = "取消运行实例",
+        description = "用途：按 runId 取消运行实例，并请求 Dagster terminate 对应运行。"
+    )
+    @PostMapping("/{id}/cancel")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<JobRunDTO> cancel(@PathVariable UUID id) {
+        return ApiResponse.ok(service.cancelRun(id));
     }
 }

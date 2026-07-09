@@ -745,6 +745,54 @@ public class OrchestrationService {
         return toRunDTO(refreshRunStatus(run), dagById.get(run.getDagId()));
     }
 
+    @Transactional
+    public JobRunDTO cancelRun(UUID runId) {
+        List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
+        if (dags.isEmpty()) {
+            throw new BizException(40400, "运行实例不存在");
+        }
+        Map<UUID, Dag> dagById = dags.stream()
+                .collect(Collectors.toMap(Dag::getId, Function.identity()));
+        JobRun run = runRepo.findByIdAndDagIdInForUpdate(runId, dagById.keySet())
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        Dag dag = dagById.get(run.getDagId());
+
+        if (isTerminal(run.getStatus())) {
+            return toRunDTO(run, dag);
+        }
+
+        if (StringUtils.hasText(run.getDagsterRunId())) {
+            try {
+                dagster.terminate(run.getDagsterRunId(), false);
+            } catch (RuntimeException ex) {
+                log.warn("Dagster terminate failed for {}: {}; marking run cancelled locally",
+                        run.getDagsterRunId(), ex.getMessage());
+            }
+        }
+
+        Instant cancelledAt = Instant.now();
+        run.setStatus(DagStatus.CANCELLED);
+        run.setFinishedAt(cancelledAt);
+        run.setUpdatedAt(cancelledAt);
+        runRepo.save(run);
+
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(runId);
+        for (TaskRun tr : taskRuns) {
+            if (isTerminalTaskRunStatus(tr.getStatus())) {
+                continue;
+            }
+            tr.setStatus(TaskRunStatus.CANCELLED);
+            if (tr.getStartedAt() == null) {
+                tr.setStartedAt(run.getStartedAt());
+            }
+            tr.setFinishedAt(cancelledAt);
+            tr.setUpdatedAt(cancelledAt);
+            taskRunRepo.save(tr);
+        }
+        publishPipelineRunEvent(dag, run, null, false, "cancelled");
+        return toRunDTO(run, dag);
+    }
+
     /**
      * 应用 Dagster 节点级状态回调。
      *
@@ -870,6 +918,10 @@ public class OrchestrationService {
         if (run == null || !StringUtils.hasText(run.getDagsterRunId())) {
             return run;
         }
+        run = runRepo.findByIdForUpdate(run.getId()).orElse(run);
+        if (!StringUtils.hasText(run.getDagsterRunId())) {
+            return run;
+        }
         DagStatus oldStatus = run.getStatus();
         if (isTerminal(run.getStatus())) {
             try {
@@ -919,8 +971,7 @@ public class OrchestrationService {
         if (isGraphPipelineExecutionMode()) {
             return compensateGraphTaskRunsFromTerminalRun(run, terminalStatus);
         }
-        TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
-                ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
+        TaskRunStatus mapped = mapTerminalTaskRunStatus(terminalStatus);
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
         if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
@@ -953,8 +1004,7 @@ public class OrchestrationService {
     }
 
     private DagStatus compensateGraphTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
-        TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
-                ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
+        TaskRunStatus mapped = mapTerminalTaskRunStatus(terminalStatus);
         // GRAPH 模式可能同时收到节点回调和 run 终态兜底；锁住整批 task_run 后再补偿。
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(run.getId());
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
@@ -973,7 +1023,7 @@ public class OrchestrationService {
             tr.setFinishedAt(run.getFinishedAt() == null ? Instant.now() : run.getFinishedAt());
             if (mapped == TaskRunStatus.SUCCEEDED) {
                 enrichTaskRunSummary(task, tr);
-            } else if (!StringUtils.hasText(tr.getErrorMsg())) {
+            } else if (mapped == TaskRunStatus.FAILED && !StringUtils.hasText(tr.getErrorMsg())) {
                 tr.setErrorMsg("Dagster graph run reported " + terminalStatus.name() + " before node callback completed");
             }
             taskRunRepo.save(tr);
@@ -981,9 +1031,22 @@ public class OrchestrationService {
         return reconcileGraphRunStatusFromTaskRuns(taskRuns, terminalStatus);
     }
 
+    private TaskRunStatus mapTerminalTaskRunStatus(DagStatus terminalStatus) {
+        if (terminalStatus == DagStatus.SUCCEEDED) {
+            return TaskRunStatus.SUCCEEDED;
+        }
+        if (terminalStatus == DagStatus.CANCELLED) {
+            return TaskRunStatus.CANCELLED;
+        }
+        return TaskRunStatus.FAILED;
+    }
+
     private DagStatus reconcileGraphRunStatusFromTaskRuns(List<TaskRun> taskRuns, DagStatus terminalStatus) {
         if (taskRuns == null || taskRuns.isEmpty()) {
             return terminalStatus;
+        }
+        if (terminalStatus == DagStatus.CANCELLED) {
+            return DagStatus.CANCELLED;
         }
         boolean allSucceeded = true;
         boolean hasCancelled = false;
@@ -1242,13 +1305,23 @@ public class OrchestrationService {
             }
             // 2. pipeline.run.succeeded/failed (aggregate)
             publishPipelineRunEvent(dag, run, null, succeeded,
-                    succeeded ? null : "Dagster run reported failure");
+                    pipelineRunTerminalErrorMessage(terminalStatus));
             log.info("Pipeline {} run {} terminal event published: {}",
                     dag.getId(), run.getId(), succeeded ? "SUCCEEDED" : "FAILED");
         } catch (RuntimeException e) {
             log.warn("publishPipelineRunEventsIfTerminal failed for run {}: {}",
                     run.getId(), e.getMessage());
         }
+    }
+
+    private String pipelineRunTerminalErrorMessage(DagStatus terminalStatus) {
+        if (terminalStatus == DagStatus.SUCCEEDED) {
+            return null;
+        }
+        if (terminalStatus == DagStatus.CANCELLED) {
+            return "cancelled";
+        }
+        return "Dagster run reported failure";
     }
 
     private void publishPipelineTaskLoadedEvent(Dag dag, JobRun run, TaskRun tr, boolean runSucceeded) {
@@ -1336,14 +1409,15 @@ public class OrchestrationService {
         }
         return switch (status.trim().toUpperCase()) {
             case "SUCCESS", "SUCCEEDED" -> DagStatus.SUCCEEDED;
-            case "FAILURE", "FAILED", "CANCELED", "CANCELLED" -> DagStatus.FAILED;
+            case "CANCELED", "CANCELLED" -> DagStatus.CANCELLED;
+            case "FAILURE", "FAILED" -> DagStatus.FAILED;
             case "QUEUED", "NOT_STARTED" -> DagStatus.QUEUED;
             default -> DagStatus.RUNNING;
         };
     }
 
     private boolean isTerminal(DagStatus status) {
-        return status == DagStatus.SUCCEEDED || status == DagStatus.FAILED;
+        return status == DagStatus.SUCCEEDED || status == DagStatus.FAILED || status == DagStatus.CANCELLED;
     }
 
     private DagDTO toDTO(Dag d, JobRun latestRun) {

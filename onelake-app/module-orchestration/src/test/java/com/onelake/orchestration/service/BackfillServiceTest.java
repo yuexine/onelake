@@ -44,6 +44,7 @@ class BackfillServiceTest {
     private static final UUID DAG_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID BACKFILL_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID RUN_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
+    private static final UUID CREATOR_ID = UUID.fromString("55555555-5555-5555-5555-555555555555");
 
     @Mock private BackfillRepository backfillRepo;
     @Mock private BackfillRunRepository backfillRunRepo;
@@ -105,6 +106,8 @@ class BackfillServiceTest {
     @Test
     void dispatchBackfillHonorsMaxParallelSlots() {
         Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
+        backfill.setCreatedBy(CREATOR_ID);
+        backfill.setCreatedByName("backfill-owner");
         BackfillRun alreadyRunning = backfillRun(Instant.parse("2026-01-01T00:00:00Z"), BackfillRunStatus.RUNNING);
         alreadyRunning.setJobRunId(UUID.randomUUID());
         BackfillRun queuedA = backfillRun(Instant.parse("2026-01-02T00:00:00Z"), BackfillRunStatus.QUEUED);
@@ -122,7 +125,14 @@ class BackfillServiceTest {
                 .thenReturn(List.of(queuedA));
         when(orchestrationService.refreshRunStatusForBackfill(alreadyRunning.getJobRunId())).thenReturn(runningRun);
         when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any()))
-                .thenReturn(RUN_ID);
+                .thenAnswer(invocation -> {
+                    assertThat(TenantContext.getTenantId()).isEqualTo(TENANT_ID);
+                    assertThat(TenantContext.getUserId()).isEqualTo(CREATOR_ID);
+                    assertThat(TenantContext.getUsername()).isEqualTo("backfill-owner");
+                    return RUN_ID;
+                });
+
+        TenantContext.clear();
 
         int dispatched = service.dispatchBackfill(BACKFILL_ID);
 
@@ -130,6 +140,9 @@ class BackfillServiceTest {
         assertThat(queuedA.getJobRunId()).isEqualTo(RUN_ID);
         assertThat(queuedA.getStatus()).isEqualTo(BackfillRunStatus.RUNNING);
         assertThat(queuedB.getJobRunId()).isNull();
+        assertThat(TenantContext.getTenantId()).isNull();
+        assertThat(TenantContext.getUserId()).isNull();
+        assertThat(TenantContext.getUsername()).isNull();
         verify(orchestrationService).triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any());
     }
 

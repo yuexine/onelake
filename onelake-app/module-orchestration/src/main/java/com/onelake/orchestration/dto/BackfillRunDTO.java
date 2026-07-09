@@ -1,5 +1,7 @@
 package com.onelake.orchestration.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.time.Instant;
 import java.util.UUID;
 
@@ -8,10 +10,15 @@ import java.util.UUID;
  */
 public record BackfillRunDTO(
         UUID id,
+        @JsonProperty("job_run_id")
         UUID jobRunId,
+        @JsonProperty("logical_date")
         Instant logicalDate,
+        @JsonProperty("data_interval_start")
         Instant dataIntervalStart,
+        @JsonProperty("data_interval_end")
         Instant dataIntervalEnd,
         String status,
+        @JsonProperty("error_msg")
         String errorMsg
 ) {}

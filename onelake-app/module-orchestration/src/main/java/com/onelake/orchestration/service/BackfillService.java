@@ -131,6 +131,13 @@ public class BackfillService {
 
         TenantSnapshot previousTenant = TenantSnapshot.capture();
         TenantContext.setTenantId(backfill.getTenantId());
+        if (TenantContext.getUserId() == null && backfill.getCreatedBy() != null) {
+            TenantContext.setUserId(backfill.getCreatedBy());
+        }
+        if (!StringUtils.hasText(TenantContext.getUsername())
+                && StringUtils.hasText(backfill.getCreatedByName())) {
+            TenantContext.setUsername(backfill.getCreatedByName());
+        }
         try {
             syncChildRuns(backfill);
             if (isTerminal(backfill.getStatus()) || backfill.getStatus() == BackfillStatus.CANCELLED) {
@@ -346,13 +353,12 @@ public class BackfillService {
                 backfill.getId(),
                 backfill.getDagId(),
                 backfill.getStatus().name(),
-                backfill.getRangeStart(),
-                backfill.getRangeEnd(),
-                backfill.getGrain(),
                 backfill.getTotalRuns(),
                 backfill.getSucceededRuns(),
                 backfill.getFailedRuns(),
                 backfill.getMaxParallel() == null ? 1 : backfill.getMaxParallel(),
+                new BackfillDTO.Range(backfill.getRangeStart(), backfill.getRangeEnd()),
+                backfill.getGrain(),
                 backfill.getCreatedAt(),
                 backfill.getUpdatedAt(),
                 runs.stream().map(this::toRunDTO).toList());

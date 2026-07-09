@@ -80,7 +80,7 @@ public class OrchestrationService {
     private final JdbcTemplate jdbc;
     private final RuntimeContractService runtimeContractService;
 
-    // Pipeline v2 dependencies (P1+)
+    // 流水线 V2 依赖。
     private final PipelineCompileService pipelineCompileService;
     private final PipelineTaskRepository pipelineTaskRepo;
     private final PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
@@ -185,20 +185,19 @@ public class OrchestrationService {
     }
 
     /**
-     * P1 pipeline v2 trigger path.
+     * 流水线 V2 触发路径。
      *
-     * <p><b>C2 (docs/流水线模块重设计方案.md §7 P1)</b>: this is a NEW code path that
-     * coexists with the generic {@link #triggerDag(UUID, TriggerType)} for non-pipeline
-     * Dagster jobs. External model execution has been removed. The new path:
+     * <p>该路径与非流水线 Dagster 作业使用的通用 {@link #triggerDag(UUID, TriggerType)}
+     * 并存。外部模型执行已移除，新路径按以下顺序执行：
      * <ol>
-     *   <li>Compiles the pipeline via {@link PipelineCompileService}.</li>
-     *   <li>Builds Spark Dagster runConfig via {@link SparkRunConfigBuilder}.</li>
-     *   <li>Launches {@code onelake_pipeline_run} Dagster job.</li>
-     *   <li>Creates one {@link TaskRun} per observable task and initializes status by topology.</li>
-     *   <li><b>Does NOT write modeling.* schema</b> — modeling updates come from Outbox events.</li>
+     *   <li>通过 {@link PipelineCompileService} 编译流水线。</li>
+     *   <li>通过 {@link SparkRunConfigBuilder} 构建 Spark Dagster runConfig。</li>
+     *   <li>启动 {@code onelake_pipeline_run} 或 {@code onelake_pipeline_graph_run} Dagster 作业。</li>
+     *   <li>为每个可观测节点创建 {@link TaskRun}，并按拓扑初始化状态。</li>
+     *   <li><b>不写入 modeling.* schema</b>；建模模块更新由 Outbox 事件驱动。</li>
      * </ol>
      *
-     * @return the JobRun ID
+     * @return JobRun ID
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger) {
@@ -210,7 +209,7 @@ public class OrchestrationService {
         String activeJobName = activePipelineDagsterJob();
         validatePipelineRuntimeContract(dag, activeJobName);
 
-        // 1. Compile
+        // 1. 编译流水线。
         PipelineCompileResult plan = pipelineCompileService.compile(dagId);
         if (!plan.allValidated()) {
             throw new BizException(40060, "Pipeline 编译未通过，无法触发: "
@@ -221,15 +220,14 @@ public class OrchestrationService {
                                 .toList())
                     + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
-        // 2. Readiness: ensure at least one real engine task; observation-only
-        // nodes (SYNC_REF/QUALITY_GATE) still get task_run rows for UI visibility.
+        // 2. 就绪检查：至少需要一个真实执行节点；SYNC_REF/QUALITY_GATE 等观测节点仍会生成 task_run 供 UI 展示。
         List<PipelineTask> tasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
         long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
         if (executableCount == 0) {
             throw new BizException(40061, "流水线没有可执行任务（可能是 Spark 任务尚未就绪，P-Spark 阶段后启用）");
         }
 
-        // 3. Create JobRun
+        // 3. 创建 JobRun。
         JobRun run = new JobRun();
         run.setDagId(dagId);
         run.setTriggerType(trigger);
@@ -239,9 +237,7 @@ public class OrchestrationService {
         run.setTriggeredByName(currentTriggerActorName());
         runRepo.save(run);
 
-        // 4. Create TaskRun per valid task. Status is initialized from the data-flow
-        // DAG so the run instance reflects direct-upstream readiness instead of
-        // flattening every node to QUEUED.
+        // 4. 为每个有效节点创建 TaskRun。初始状态由数据流 DAG 推导，避免所有节点被扁平化为 QUEUED。
         List<PipelineTask> observable = observableTasks(plan, tasks);
         List<PipelineTaskEdge> pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
         Map<String, TaskRunStatus> initialStatuses = initialTaskRunStatuses(observable, pipelineEdges);
@@ -264,7 +260,7 @@ public class OrchestrationService {
             taskRunRepo.save(tr);
         }
 
-        // 5. Build Dagster runConfig (C3 — Java builds, Dagster executes)
+        // 5. 构建 Dagster runConfig：Java 生成配置，Dagster 负责执行。
         TaskBundleContext ctx = new TaskBundleContext(
                 dagId, tenantId, run.getId(), plan,
                 plan.pipelineTag(),
@@ -273,7 +269,7 @@ public class OrchestrationService {
         );
         DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges);
 
-        // 6. Launch Dagster
+        // 6. 启动 Dagster。
         try {
             List<Map<String, String>> tags = List.of(
                     Map.of("key", "onelake.pipeline_id", "value", dagId.toString()),
@@ -288,13 +284,13 @@ public class OrchestrationService {
             run.setDagsterRunId(dagsterRunId);
             run.setStatus(DagStatus.RUNNING);
             runRepo.save(run);
-            log.info("Spark pipeline {} launched, runId={}, dagsterRunId={}",
+            log.info("Spark 流水线 {} 已触发，runId={}，dagsterRunId={}",
                     dagId, run.getId(), dagsterRunId);
         } catch (RuntimeException ex) {
             run.setStatus(DagStatus.FAILED);
             run.setFinishedAt(Instant.now());
             runRepo.save(run);
-            // Fail all non-terminal task_runs
+            // 将所有非终态 task_run 收口为失败。
             taskRunRepo.findByJobRunId(run.getId()).forEach(tr -> {
                 if (!isTerminalTaskRunStatus(tr.getStatus())) {
                     tr.setStatus(TaskRunStatus.FAILED);
@@ -338,7 +334,7 @@ public class OrchestrationService {
         if (pipelineEdges == null) {
             pipelineEdges = List.of();
         }
-        // SINGLE 只重跑目标节点；DOWNSTREAM 沿 PIPELINE 边续跑，但跳过已经成功的下游节点。
+        // 重跑模式 SINGLE 只重跑目标节点；DOWNSTREAM 沿 PIPELINE 边续跑，但跳过已经成功的下游节点。
         Set<String> subgraph = resolveRerunSubgraph(taskKey, mode, runByTaskKey, pipelineEdges);
         boolean canRerunTarget = isRerunnableTaskRunStatus(target.getStatus())
                 || canResumeFromSucceededRoot(taskKey, mode, target, subgraph, runByTaskKey);
@@ -382,7 +378,7 @@ public class OrchestrationService {
         Map<String, Integer> baseAttempts = new LinkedHashMap<>();
         for (String key : subgraph) {
             TaskRun tr = runByTaskKey.get(key);
-            // task_run.attempt 保存跨 Dagster run 的累计次数，传给 Dagster 后作为本次本地重试的起点。
+            // 字段 task_run.attempt 保存跨 Dagster run 的累计次数，传给 Dagster 后作为本次本地重试的起点。
             int nextAttempt = Math.max(1, tr.getAttempt() + 1);
             tr.setAttempt(nextAttempt);
             baseAttempts.put(key, nextAttempt);
@@ -394,7 +390,7 @@ public class OrchestrationService {
             taskRunRepo.save(tr);
         }
 
-        // M1 复用同一个 JobRun：先清掉旧 Dagster runId，launch 成功后再写入本次新值。
+        // M1 复用同一个 JobRun：先清掉旧 Dagster runId，启动成功后再写入本次新值。
         run.setStatus(DagStatus.RUNNING);
         run.setDagsterRunId(null);
         run.setFinishedAt(null);
@@ -423,11 +419,11 @@ public class OrchestrationService {
             run.setStatus(DagStatus.RUNNING);
             run.setUpdatedAt(Instant.now());
             runRepo.save(run);
-            log.info("Spark pipeline {} rerun launched, runId={}, taskKey={}, mode={}, dagsterRunId={}",
+            log.info("Spark 流水线 {} 已触发节点重跑，runId={}，taskKey={}，mode={}，dagsterRunId={}",
                     dagId, run.getId(), taskKey, mode, dagsterRunId);
             return new TaskRerunResult(runId, new ArrayList<>(subgraph), dagsterRunId);
         } catch (RuntimeException ex) {
-            // launch 失败发生在节点已重置之后，需要像首触发失败一样把子图收口到可观测 FAILED。
+            // 启动失败发生在节点已重置之后，需要像首触发失败一样把子图收口到可观测 FAILED。
             Instant failedAt = Instant.now();
             run.setStatus(DagStatus.FAILED);
             run.setFinishedAt(failedAt);
@@ -673,19 +669,18 @@ public class OrchestrationService {
     }
 
     /**
-     * Publish {@code pipeline.run.succeeded} or {@code pipeline.run.failed} Outbox event.
+     * 发布 {@code pipeline.run.succeeded} 或 {@code pipeline.run.failed} Outbox 事件。
      *
-     * <p>Called from {@link #triggerPipelineRun} on launch failure and from
-     * {@code refreshRunStatus} on terminal state (next iteration).
+     * <p>触发失败时由 {@link #triggerPipelineRun} 调用；运行进入终态时由
+     * {@code refreshRunStatus} 调用。
      *
-     * <p><b>C4</b>: pipeline run events replace direct writes into modeling-owned
-     * runtime tables.
+     * <p>流水线运行事件用于替代对建模模块运行态表的直接写入。
      */
     public void publishPipelineRunEvent(Dag dag, JobRun run, PipelineCompileResult plan,
                                         boolean succeeded, String errorMessage) {
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) {
-            log.warn("OutboxPublisher not available — skipping pipeline.run.* event for runId={}", run.getId());
+            log.warn("OutboxPublisher 不可用，跳过 pipeline.run.* 事件，runId={}", run.getId());
             return;
         }
         UUID tenantId = TenantContext.getTenantId();
@@ -708,7 +703,7 @@ public class OrchestrationService {
         }
         if (!succeeded) {
             payload.put("errorMsg", truncate(errorMessage, 2000));
-            payload.put("partialSucceeded", List.of()); // populated by refreshRunStatus in later iteration
+            payload.put("partialSucceeded", List.of()); // 后续由 refreshRunStatus 填充部分成功节点。
         }
         publisher.publish(eventType, dag.getId().toString(), payload);
     }
@@ -765,7 +760,7 @@ public class OrchestrationService {
             try {
                 dagster.terminate(run.getDagsterRunId(), false);
             } catch (RuntimeException ex) {
-                log.warn("Dagster terminate failed for {}: {}; marking run cancelled locally",
+                log.warn("Dagster 终止运行 {} 失败：{}；本地仍标记为已取消",
                         run.getDagsterRunId(), ex.getMessage());
             }
         }
@@ -931,7 +926,7 @@ public class OrchestrationService {
                     runRepo.save(run);
                 }
             } catch (RuntimeException e) {
-                log.warn("Pipeline task run status sync failed for {}: {}", run.getDagsterRunId(), e.getMessage());
+                log.warn("流水线节点运行状态同步失败 {}：{}", run.getDagsterRunId(), e.getMessage());
             }
             return run;
         }
@@ -953,7 +948,7 @@ public class OrchestrationService {
             }
             runRepo.save(run);
 
-            // P4-A: publish pipeline.run.succeeded/failed the first time a v2 pipeline enters terminal state.
+            // V2 流水线首次进入终态时发布 pipeline.run.succeeded/failed。
             if (isTerminal(mapped) && !isTerminal(oldStatus)) {
                 DagStatus reconciled = syncTaskRunsFromTerminalRun(run, mapped);
                 if (reconciled != mapped) {
@@ -963,7 +958,7 @@ public class OrchestrationService {
                 publishPipelineRunEventsIfTerminal(run, reconciled);
             }
         } catch (RuntimeException e) {
-            log.warn("Dagster run status refresh failed for {}: {}", run.getDagsterRunId(), e.getMessage());
+            log.warn("刷新 Dagster run 状态失败 {}：{}", run.getDagsterRunId(), e.getMessage());
         }
         return run;
     }
@@ -985,15 +980,15 @@ public class OrchestrationService {
             }
         }
         DagStatus reconciled = reconcileGraphRunStatusFromTaskRuns(taskRuns, DagStatus.SUCCEEDED);
-        log.warn("Dagster graph run {} is still {}, but all local task_runs are terminal; reconciling run {} to {}",
+        log.warn("Dagster graph run {} 仍为 {}，但本地 task_run 已全部终态；将 run {} 校正为 {}",
                 run.getDagsterRunId(), dagsterStatus, run.getId(), reconciled);
         return reconciled;
     }
 
     /**
-     * Terminal refresh: Dagster runs the Spark pipeline as one fixed op. Until per-node
-     * Spark artifacts are parsed, every non-terminal task_run follows the Dagster run
-     * terminal state so the UI and Outbox do not stay stuck at QUEUED.
+     * 终态刷新：LEGACY 模式下 Dagster 把 Spark 流水线作为一个固定 op 运行。
+     * 在节点级 Spark 产物可解析之前，所有非终态 task_run 跟随 Dagster run 的终态，
+     * 避免 UI 和 Outbox 长期停留在 QUEUED。
      */
     private DagStatus syncTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
         if (isGraphPipelineExecutionMode()) {
@@ -1292,7 +1287,7 @@ public class OrchestrationService {
                     },
                     rs -> rs.next() ? rs.getObject("row_count", Long.class) : null);
         } catch (RuntimeException e) {
-            log.warn("Task run summary row_count lookup skipped for {}: {}", fqn, e.getMessage());
+            log.warn("节点运行摘要跳过 row_count 查询，fqn={}：{}", fqn, e.getMessage());
             return null;
         }
     }
@@ -1313,31 +1308,31 @@ public class OrchestrationService {
     }
 
     /**
-     * P4-A — emit {@code pipeline.run.succeeded/failed} (+ per-task {@code pipeline.task.loaded})
-     * the first time a v2 pipeline run reaches terminal state.
+     * V2 流水线首次到达终态时发布 {@code pipeline.run.succeeded/failed}，
+     * 并按成功节点补发 {@code pipeline.task.loaded}。
      *
      */
     private void publishPipelineRunEventsIfTerminal(JobRun run, DagStatus terminalStatus) {
         try {
             Dag dag = dagRepo.findById(run.getDagId()).orElse(null);
             if (dag == null) return;
-            // Only v2 pipeline job
+            // 只处理 V2 流水线作业。
             if (!PIPELINE_JOB_NAME.equals(dag.getDagsterJob())
                     && !PIPELINE_GRAPH_JOB_NAME.equals(dag.getDagsterJob())) return;
 
             boolean succeeded = terminalStatus == DagStatus.SUCCEEDED;
-            // 1. pipeline.task.loaded for each executable task_run in this job
+            // 1. 为本次作业中的可执行成功节点发布 pipeline.task.loaded。
             List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
             for (TaskRun tr : taskRuns) {
                 publishPipelineTaskLoadedEvent(dag, run, tr, succeeded);
             }
-            // 2. pipeline.run.succeeded/failed (aggregate)
+            // 2. 发布聚合级 pipeline.run.succeeded/failed。
             publishPipelineRunEvent(dag, run, null, succeeded,
                     pipelineRunTerminalErrorMessage(terminalStatus));
-            log.info("Pipeline {} run {} terminal event published: {}",
+            log.info("流水线 {} 运行 {} 已发布终态事件：{}",
                     dag.getId(), run.getId(), succeeded ? "SUCCEEDED" : "FAILED");
         } catch (RuntimeException e) {
-            log.warn("publishPipelineRunEventsIfTerminal failed for run {}: {}",
+            log.warn("发布运行 {} 的终态事件失败：{}",
                     run.getId(), e.getMessage());
         }
     }
@@ -1358,7 +1353,7 @@ public class OrchestrationService {
         if (tr.getStatus() == null) return;
 
         UUID tenantId = run.getTriggeredBy() != null ? dag.getTenantId() : dag.getTenantId();
-        // Only emit task.loaded for SUCCEEDED task_runs; failed tasks surface via pipeline.run.failed
+        // 仅对 SUCCEEDED 节点发布 task.loaded；失败节点通过 pipeline.run.failed 暴露。
         if (tr.getStatus() != com.onelake.orchestration.domain.enums.TaskRunStatus.SUCCEEDED) return;
 
         java.util.Map<String, Object> payload = new LinkedHashMap<>();
@@ -1412,7 +1407,7 @@ public class OrchestrationService {
         try {
             return JsonUtil.parse(task.getConfig());
         } catch (RuntimeException e) {
-            log.warn("Pipeline task {} config parse skipped: {}", task.getTaskKey(), e.getMessage());
+            log.warn("流水线节点 {} 的 config 解析失败，已跳过：{}", task.getTaskKey(), e.getMessage());
             return JsonUtil.mapper().createObjectNode();
         }
     }

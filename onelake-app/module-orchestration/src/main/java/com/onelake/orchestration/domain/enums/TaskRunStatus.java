@@ -1,11 +1,10 @@
 package com.onelake.orchestration.domain.enums;
 
 /**
- * Status of a single task_run row.
+ * 单条 {@code task_run} 的节点运行状态。
  *
- * <p>Aligned with the unified RunStatus:
- * QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED|UPSTREAM_FAILED|SKIPPED.
- * See C8 / docs/流水线模块重设计方案.md §6.1, §7 P0 audit doc.
+ * <p>与统一运行状态口径保持一致：
+ * {@code QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED|UPSTREAM_FAILED|SKIPPED}。
  */
 public enum TaskRunStatus {
     QUEUED,

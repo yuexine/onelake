@@ -6,11 +6,10 @@ import com.onelake.orchestration.domain.entity.PipelineTask;
 import org.springframework.util.StringUtils;
 
 /**
- * Renders executable PySpark for {@code QUALITY_GATE} pipeline tasks.
+ * 为 {@code QUALITY_GATE} 流水线节点渲染可执行 PySpark 脚本。
  *
- * <p>The generated script writes a convention-based {@code *_quality_check} Iceberg
- * table before raising on FAIL rules, so users get both an execution failure and
- * inspectable quality evidence.
+ * <p>生成的脚本会先写入约定命名的 {@code *_quality_check} Iceberg 表，再根据 FAIL
+ * 规则抛错，因此用户既能看到运行失败，也能检查质量证据。
  */
 final class QualityGateScriptRenderer {
 

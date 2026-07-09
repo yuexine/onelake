@@ -13,6 +13,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * 编排运行契约服务。
+ *
+ * <p>该服务把前端可见的编译目标、Java 可生成的 runConfig 和 Dagster 当前暴露的 job
+ * 对齐，避免用户触发尚未接入运行态的能力。
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -72,7 +78,7 @@ public class RuntimeContractService {
         try {
             return Set.copyOf(dagster.listJobs(REPOSITORY, LOCATION));
         } catch (RuntimeException e) {
-            log.warn("Dagster runtime contract check failed: {}", e.getMessage());
+            log.warn("Dagster 运行契约检查失败：{}", e.getMessage());
             return Set.of();
         }
     }

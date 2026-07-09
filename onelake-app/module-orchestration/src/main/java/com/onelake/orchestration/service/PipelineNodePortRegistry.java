@@ -11,12 +11,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Central node-port contract for pipeline data-flow validation.
+ * 流水线数据流校验使用的统一节点端口契约。
  *
- * <p>The operator market may expose richer UI metadata, but the pipeline main
- * path needs one runtime contract that the compiler, validator, and run pages
- * can share. Keep this conservative: generic nodes accept the canonical
- * {@code in/out}; structured nodes tighten their own ports.
+ * <p>算子市场可以暴露更丰富的 UI 元数据，但流水线主路径需要一份编译器、校验器
+ * 和运行页都能共享的运行时契约。这里保持保守：通用节点接受标准
+ * {@code in/out}，结构化节点再收紧自己的端口。
  */
 final class PipelineNodePortRegistry {
 

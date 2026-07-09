@@ -1,16 +1,15 @@
 package com.onelake.orchestration.domain.enums;
 
 /**
- * Pipeline v2 task types.
- * See docs/流水线模块重设计方案.md §6.1.
+ * 流水线 V2 节点类型。
  */
 public enum TaskType {
-    /** Quality gate over a Spark-produced asset. */
+    /** 对 Spark 产出的资产做质量门禁。 */
     QUALITY_GATE,
-    /** Reference to an integration sync task; declares run-order dependency. */
+    /** 引用集成同步任务，用于声明运行顺序依赖。 */
     SYNC_REF,
-    /** Spark SQL task (real execution path in P-Spark). */
+    /** Spark SQL 节点，当前真实执行主路径。 */
     SPARK_SQL,
-    /** PySpark task on the Spark runtime. */
+    /** 运行在 Spark Runtime 上的 PySpark 节点。 */
     PYSPARK
 }

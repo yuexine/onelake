@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
 /**
- * Runtime-contract tests: unified pipelines expose Spark as the only runnable engine.
+ * 运行契约测试：统一流水线只暴露 Spark 作为可运行引擎。
  */
 @ExtendWith(MockitoExtension.class)
 class RuntimeContractServiceTest {

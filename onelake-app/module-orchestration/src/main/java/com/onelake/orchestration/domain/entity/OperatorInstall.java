@@ -12,6 +12,9 @@ import lombok.Setter;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 租户算子安装记录实体。
+ */
 @Entity
 @Table(name = "operator_install", schema = "orchestration")
 @Getter

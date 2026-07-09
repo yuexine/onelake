@@ -41,6 +41,11 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.Set;
 
+/**
+ * 算子市场领域服务。
+ *
+ * <p>负责算子可见性、Manifest 校验、版本管理、租户安装和内置算子种子数据写入。
+ */
 @Service
 @RequiredArgsConstructor
 public class OperatorService {

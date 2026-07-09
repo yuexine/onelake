@@ -44,10 +44,10 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * CRUD + validation service for pipeline v2 entities.
+ * 流水线 V2 的实体读写与校验服务。
  *
- * <p>This is the read/write surface used by the Unified Pipeline Editor (P2).
- * It composes {@link PipelineCompileService} for validation (C1 still enforced there).
+ * <p>该服务是统一流水线编辑器的后端读写入口，负责任务、边、发布状态和模板化创建；
+ * 图编译与 C1 约束仍由 {@link PipelineCompileService} 统一处理。
  */
 @Service
 @RequiredArgsConstructor
@@ -72,7 +72,7 @@ public class PipelineService {
     private final PipelineCompileService compileService;
     private final org.springframework.beans.factory.ObjectProvider<OutboxPublisher> outboxPublisher;
 
-    // ---------- pipeline (dag) ----------
+    // ---------- 流水线（dag） ----------
 
     @Transactional
     public Dag getPipeline(UUID dagId) {
@@ -99,14 +99,14 @@ public class PipelineService {
     }
 
     /**
-     * P4-D — Publish status machine: DRAFT → VALIDATED → PUBLISHED.
+     * P4-D 发布状态机：DRAFT → VALIDATED → PUBLISHED。
      *
-     * <p>Transitions enforced:
+     * <p>状态流转约束：
      * <ul>
-     *   <li>DRAFT → VALIDATED: requires successful {@link #validate(UUID)} (all tasks valid).</li>
-     *   <li>VALIDATED → PUBLISHED: emits {@code pipeline.published} Outbox event.</li>
-     *   <li>Any → DRAFT: allowed (revert).</li>
-     *   <li>Other transitions rejected.</li>
+     *   <li>DRAFT → VALIDATED：必须先通过 {@link #validate(UUID)} 校验。</li>
+     *   <li>VALIDATED → PUBLISHED：发布 {@code pipeline.published} Outbox 事件。</li>
+     *   <li>任意状态 → DRAFT：允许回退。</li>
+     *   <li>其他流转一律拒绝。</li>
      * </ul>
      */
     @Transactional
@@ -118,10 +118,10 @@ public class PipelineService {
             throw new BizException(40020, "非法 pipeline status: " + targetStatusRaw);
         }
         if (target.equals(current)) {
-            return dag; // no-op
+            return dag; // 状态未变化，直接返回。
         }
 
-        // Enforce transition rules
+        // 执行状态流转约束。
         if ("VALIDATED".equals(target)) {
             PipelineValidationResult result = validate(dagId);
             if (!result.valid()) {
@@ -137,11 +137,11 @@ public class PipelineService {
         dag.setVersion((dag.getVersion() == null ? 0 : dag.getVersion()) + 1);
         dag = dagRepo.save(dag);
 
-        // Emit pipeline.published when entering PUBLISHED state
+        // 首次进入 PUBLISHED 时发布流水线发布事件。
         if ("PUBLISHED".equals(target)) {
             emitPipelinePublishedEvent(dag);
         }
-        log.info("Pipeline {} status transition: {} → {} (v{})",
+        log.info("流水线 {} 状态流转：{} → {} (v{})",
                 dag.getId(), current, target, dag.getVersion());
         return dag;
     }
@@ -149,7 +149,7 @@ public class PipelineService {
     private void emitPipelinePublishedEvent(Dag dag) {
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) {
-            log.warn("OutboxPublisher not available — skipping pipeline.published event for {}",
+            log.warn("OutboxPublisher 不可用，跳过 pipeline.published 事件，pipelineId={}",
                     dag.getId());
             return;
         }
@@ -160,7 +160,8 @@ public class PipelineService {
         payload.put("pipelineKind", dag.getPipelineKind() == null ? "BLANK" : dag.getPipelineKind());
         payload.put("publishedBy", com.onelake.common.context.TenantContext.getUserId() == null
                 ? null : com.onelake.common.context.TenantContext.getUserId().toString());
-        payload.put("publishedAt", java.time.Instant.now().toString());        // targetFqns: distinct non-null across tasks
+        payload.put("publishedAt", java.time.Instant.now().toString());
+        // 目标表列表 targetFqns 只收集节点上声明过的非空目标表，并做去重。
         List<String> targets = taskRepo.findByDagIdOrderByCreatedAtAsc(dag.getId()).stream()
                 .map(PipelineTask::getTargetFqn)
                 .filter(StringUtils::hasText)
@@ -171,11 +172,11 @@ public class PipelineService {
         publisher.publish(DomainEvents.PIPELINE_PUBLISHED, dag.getId().toString(), payload);
     }
 
-    // ---------- tasks ----------
+    // ---------- 节点 ----------
 
     @Transactional
     public List<PipelineTaskDTO> listTasks(UUID dagId) {
-        getPipeline(dagId); // tenant scoping
+        getPipeline(dagId); // 先通过流水线查询完成租户隔离。
         return taskRepo.findByDagIdOrderByCreatedAtAsc(dagId).stream()
                 .map(PipelineTaskDTO::of)
                 .toList();
@@ -202,7 +203,7 @@ public class PipelineService {
         t.setPositionX(req.positionX());
         t.setPositionY(req.positionY());
         t = taskRepo.save(t);
-        log.info("Pipeline {} task created: key={} type={}", dagId, t.getTaskKey(), t.getTaskType());
+        log.info("流水线 {} 已创建节点：key={} type={}", dagId, t.getTaskKey(), t.getTaskType());
         return PipelineTaskDTO.of(t);
     }
 
@@ -220,7 +221,7 @@ public class PipelineService {
         if (req.config() != null) t.setConfig(serializeConfig(req));
         if (req.positionX() != null) t.setPositionX(req.positionX());
         if (req.positionY() != null) t.setPositionY(req.positionY());
-        // Reset compile state on edit
+        // 节点被编辑后重置编译态，等待下一次校验重新计算。
         t.setCompileStatus(com.onelake.orchestration.domain.enums.TaskCompileStatus.DRAFT);
         t.setCompileError(null);
         t.setExecutable(false);
@@ -235,13 +236,13 @@ public class PipelineService {
         PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
         taskRepo.delete(t);
-        // Cascade-delete edges referencing this task_key
+        // 级联删除引用该 task_key 的边，避免留下悬空引用。
         edgeRepo.findByDagId(dagId).stream()
                 .filter(e -> e.getSourceKey().equals(taskKey) || e.getTargetKey().equals(taskKey))
                 .forEach(edgeRepo::delete);
     }
 
-    // ---------- edges ----------
+    // ---------- 边 ----------
 
     @Transactional
     public List<PipelineTaskEdgeDTO> listEdges(UUID dagId) {
@@ -298,11 +299,12 @@ public class PipelineService {
                 .ifPresent(edgeRepo::delete);
     }
 
-    // ---------- validation ----------
+    // ---------- 校验 ----------
 
     /**
-     * L1+L2 validation (§6.7). Runs the compile service (which enforces C1) and
-     * translates the result into the API response shape.
+     * L1 + L2 校验入口（§6.7）。
+     *
+     * <p>该方法调用编译服务执行 C1 等约束，再把编译结果转换为接口响应结构。
      */
     @Transactional
     public PipelineValidationResult validate(UUID dagId) {
@@ -332,12 +334,12 @@ public class PipelineService {
         return "TASK_INVALID";
     }
 
-    // ---------- task runs ----------
+    // ---------- 节点运行 ----------
 
     @Transactional
     public List<TaskRunDTO> listTaskRuns(UUID dagId, UUID runId) {
         getPipeline(dagId);
-        // task_run 会暴露日志引用等运行观测字段，必须先确认 run 属于当前 pipeline。
+        // 节点运行列表会暴露日志引用等运行观测字段，必须先确认 run 属于当前 pipeline。
         runRepo.findByIdAndDagIdIn(runId, Set.of(dagId))
                 .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
         return taskRunRepo.findByJobRunId(runId).stream()
@@ -345,11 +347,12 @@ public class PipelineService {
                 .toList();
     }
 
-    // ---------- ODS→DWD template (P3) ----------
+    // ---------- ODS→DWD 模板（P3） ----------
 
     /**
-     * Create a BLANK pipeline prepopulated with the canonical Spark ODS→DWD task structure:
-     * SYNC_REF → optional Spark field governance → Spark DWD sink → QUALITY_GATE.
+     * 创建一条预置 Spark 标准结构的 ODS→DWD 流水线。
+     *
+     * <p>模板结构为：SYNC_REF → 可选字段治理 → Spark DWD 落表 → 可选质量门禁。
      */
     @Transactional
     public OdsDwdTemplateResult applyOdsDwdTemplate(OdsDwdTemplateRequest req) {
@@ -359,7 +362,7 @@ public class PipelineService {
         if (!StringUtils.hasText(req.sourceFqn()) || !StringUtils.hasText(req.targetFqn())) {
             throw new BizException(40021, "ODS→DWD 模板需要 sourceFqn 和 targetFqn");
         }
-        // Create pipeline (dag) with kind=ODS_DWD
+        // 创建 ODS_DWD 类型流水线。
         Dag dag = new Dag();
         dag.setTenantId(requireTenant());
         dag.setName(StringUtils.hasText(req.pipelineName()) ? req.pipelineName().trim()
@@ -375,12 +378,12 @@ public class PipelineService {
         dag.setComputeProfile(DEFAULT_COMPUTE_PROFILE);
         dag = dagRepo.save(dag);
 
-        // Create tasks
+        // 依次创建模板节点和边。
         List<UUID> taskIds = new ArrayList<>();
         List<UUID> edgeIds = new ArrayList<>();
         StringBuilder warnings = new StringBuilder();
 
-        // 1. SYNC_REF
+        // 1. SYNC_REF：承接 ODS 表就绪事件。
         PipelineTask syncTask = newTask(dag, "sync_ref_ods", TaskType.SYNC_REF,
                 "采集: " + req.sourceFqn(), null);
         syncTask.setTargetFqn(req.sourceFqn());
@@ -389,7 +392,7 @@ public class PipelineService {
 
         PipelineTask previous = syncTask;
 
-        // 2. Optional Spark field-governance placeholder. Rules can be refined in the editor.
+        // 2. 可选字段治理占位节点；具体规则后续可在编辑器中调整。
         if (req.includeFieldGovernance()) {
             PipelineTask govTask = newTask(dag, "spark_field_governance", TaskType.SPARK_SQL,
                     "字段治理: " + req.targetFqn(), null);
@@ -403,7 +406,7 @@ public class PipelineService {
             previous = govTask;
         }
 
-        // 3. Spark DWD sink.
+        // 3. Spark DWD 落表节点。
         PipelineTask sinkTask = newTask(dag, "spark_dwd_sink", TaskType.SPARK_SQL,
                 "DWD 落表: " + req.targetFqn(), null);
         sinkTask.setTargetFqn(req.targetFqn());
@@ -415,13 +418,13 @@ public class PipelineService {
         edgeIds.add(sinkEdge.getId());
         previous = sinkTask;
 
-        // 4. QUALITY_GATE (optional, after Spark DWD sink)
+        // 4. 可选质量门禁，挂在 Spark DWD 落表之后。
         if (req.includeQualityGate()) {
             PipelineTask gateTask = newTask(dag, "quality_gate", TaskType.QUALITY_GATE,
                     "质量门禁: " + req.targetFqn(), null);
             gateTask.setTargetFqn(req.targetFqn());
             gateTask.setEngine(SPARK_SQL_ENGINE);
-            // Seed config with default 4 gates (matches QualityGateCards defaults)
+            // 预置 4 个默认门禁，保持与前端 QualityGateCards 默认项一致。
             gateTask.setConfig("""
                 {"targetModelFqn":"%s","gates":[
                   {"id":"primary","kind":"PRIMARY","title":"主键完整性","enabled":true,"columns":[],"actionOnViolation":"FAIL"},
@@ -437,7 +440,7 @@ public class PipelineService {
         }
 
         if (warnings.length() > 0) {
-            log.info("OdsDwdTemplate applied with warnings: {}", warnings);
+            log.info("ODS→DWD 模板应用完成但存在提示：{}", warnings);
         }
         return new OdsDwdTemplateResult(dag.getId(), taskIds, edgeIds, warnings.toString());
     }
@@ -465,7 +468,7 @@ public class PipelineService {
         return e;
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private UUID requireTenant() {
         UUID t = TenantContext.getTenantId();

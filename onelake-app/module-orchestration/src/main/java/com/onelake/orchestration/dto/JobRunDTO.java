@@ -3,6 +3,9 @@ package com.onelake.orchestration.dto;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * DAG 运行实例接口响应对象。
+ */
 public record JobRunDTO(
     UUID id,
     UUID dagId,

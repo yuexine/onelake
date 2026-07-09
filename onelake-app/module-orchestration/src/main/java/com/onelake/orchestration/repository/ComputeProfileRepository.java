@@ -8,6 +8,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 计算画像持久化访问接口。
+ */
 public interface ComputeProfileRepository extends JpaRepository<ComputeProfile, UUID> {
 
     List<ComputeProfile> findByResourceGroupIdOrderByCodeAsc(UUID resourceGroupId);

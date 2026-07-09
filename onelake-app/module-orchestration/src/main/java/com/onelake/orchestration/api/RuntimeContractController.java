@@ -12,6 +12,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
+/**
+ * 运行契约查询接口。
+ */
 @RestController
 @RequestMapping("/api/v1/orchestration/runtime-contracts")
 @RequiredArgsConstructor

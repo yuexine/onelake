@@ -13,6 +13,9 @@ import org.hibernate.annotations.ColumnTransformer;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 算子 Manifest 版本实体。
+ */
 @Entity
 @Table(name = "operator_version", schema = "orchestration")
 @Getter

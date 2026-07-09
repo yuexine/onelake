@@ -32,18 +32,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Pipeline v2 event handler that triggers pipelines on {@code integration.table.loaded}.
+ * 流水线 V2 事件触发器：消费 {@code integration.table.loaded} 后触发下游流水线。
  *
- * <p><b>C4 (docs/流水线模块重设计方案.md §6.5 / §7 P1)</b>: this is the orchestration-side
- * trigger path. Modeling no longer starts DWD jobs directly; this handler is the
- * single source of ODS-event triggering.
+ * <p>这是编排模块侧的 ODS 表就绪触发路径。建模模块不再直接启动 DWD 作业；
+ * ODS 事件驱动统一从这里进入编排。
  *
- * <p>Matching rule: pipeline contains a {@link TaskType#SYNC_REF} task whose {@code target_fqn}
- * equals the event's {@code targetTable}. On match → call
- * {@link OrchestrationService#triggerPipelineRun(UUID, TriggerType)}.
+ * <p>匹配规则：流水线包含 {@link TaskType#SYNC_REF} 节点，且节点 {@code target_fqn}
+ * 等于事件载荷里的 {@code targetTable}。匹配后调用
+ * {@link OrchestrationService#triggerPipelineRun(UUID, TriggerType)}。
  *
- * <p>Outbox handlers run in a background thread; we set {@link TenantContext} from the event
- * payload.
+ * <p>Outbox handler 在后台线程执行，因此需要从事件载荷恢复 {@link TenantContext}。
  */
 @Component
 @RequiredArgsConstructor
@@ -69,7 +67,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             String targetTable = payload.path("targetTable").asText("");
             String tenantIdRaw = payload.path("tenantId").asText("");
             if (targetTable.isBlank() || tenantIdRaw.isBlank()) {
-                log.debug("PipelineSyncRefTriggerHandler skipped event {} (missing targetTable/tenantId)",
+                log.debug("PipelineSyncRefTriggerHandler 跳过事件 {}：缺少 targetTable/tenantId",
                         event.getId());
                 return;
             }
@@ -78,12 +76,12 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             try {
                 tenantId = UUID.fromString(tenantIdRaw);
             } catch (IllegalArgumentException e) {
-                log.warn("PipelineSyncRefTriggerHandler skipped event {} (bad tenantId {})",
+                log.warn("PipelineSyncRefTriggerHandler 跳过事件 {}：tenantId 非法 {}",
                         event.getId(), tenantIdRaw);
                 return;
             }
 
-            // Find pipelines containing a SYNC_REF task matching this target table
+            // 找出包含匹配 SYNC_REF 节点的流水线。
             List<PipelineTask> syncRefs = taskRepo.findByTenantIdAndTaskType(
                     tenantId, TaskType.SYNC_REF.name());
             Map<UUID, Set<String>> pipelineReadyTasks = new HashMap<>();
@@ -94,11 +92,11 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 }
             }
             if (pipelineReadyTasks.isEmpty()) {
-                log.debug("PipelineSyncRefTriggerHandler: no pipelines reference target={}", targetTable);
+                log.debug("PipelineSyncRefTriggerHandler：没有流水线引用目标表 {}", targetTable);
                 return;
             }
 
-            // Trigger each matching pipeline (under tenant context)
+            // 在租户上下文中逐条触发匹配的流水线。
             UUID previousTenant = TenantContext.getTenantId();
             try {
                 TenantContext.setTenantId(tenantId);
@@ -113,7 +111,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 }
             }
         } catch (Exception e) {
-            log.error("PipelineSyncRefTriggerHandler failed for event {}: {}",
+            log.error("PipelineSyncRefTriggerHandler 处理事件 {} 失败：{}",
                     event.getId(), e.getMessage(), e);
             throw new RuntimeException(e);
         }
@@ -123,17 +121,17 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         try {
             Dag dag = dagRepo.findByIdAndTenantId(dagId, tenantId).orElse(null);
             if (dag == null) {
-                log.warn("PipelineSyncRefTriggerHandler: dag {} not found for tenant {}", dagId, tenantId);
+                log.warn("PipelineSyncRefTriggerHandler：租户 {} 下未找到 dag {}", tenantId, dagId);
                 return;
             }
             if (!Boolean.TRUE.equals(dag.getEnabled())) {
-                log.debug("PipelineSyncRefTriggerHandler: dag {} disabled, skip", dagId);
+                log.debug("PipelineSyncRefTriggerHandler：dag {} 已禁用，跳过", dagId);
                 return;
             }
             if (dag.getStatus() != null
                     && !"VALIDATED".equalsIgnoreCase(dag.getStatus())
                     && !"PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
-                log.debug("PipelineSyncRefTriggerHandler: dag {} status={}, skip (not VALIDATED/PUBLISHED)",
+                log.debug("PipelineSyncRefTriggerHandler：dag {} 状态为 {}，非 VALIDATED/PUBLISHED，跳过",
                         dagId, dag.getStatus());
                 return;
             }
@@ -142,12 +140,12 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             }
             orchestrationService.triggerPipelineRun(dagId, TriggerType.EVENT);
             clearSatisfiedReadiness(dagId);
-            log.info("PipelineSyncRefTriggerHandler: triggered pipeline {} after table loaded", dagId);
+            log.info("PipelineSyncRefTriggerHandler：表就绪后已触发流水线 {}", dagId);
         } catch (BizException e) {
-            log.info("PipelineSyncRefTriggerHandler: pipeline {} not triggered (biz): {}",
+            log.info("PipelineSyncRefTriggerHandler：流水线 {} 未触发，业务原因：{}",
                     dagId, e.getMessage());
         } catch (RuntimeException e) {
-            log.warn("PipelineSyncRefTriggerHandler: pipeline {} trigger failed: {}",
+            log.warn("PipelineSyncRefTriggerHandler：流水线 {} 触发失败：{}",
                     dagId, e.getMessage());
         }
     }
@@ -197,7 +195,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                     .filter(sourceKey -> !ready.containsKey(sourceKey))
                     .toList();
             if (!missing.isEmpty()) {
-                log.info("PipelineSyncRefTriggerHandler: dag {} readiness waiting for target {} missing inputs {}",
+                log.info("PipelineSyncRefTriggerHandler：dag {} 等待目标节点 {} 的输入就绪，缺少 {}",
                         dagId, targetKey, missing);
                 return false;
             }

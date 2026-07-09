@@ -8,6 +8,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 流水线节点持久化访问接口。
+ */
 @Repository
 public interface PipelineTaskRepository extends JpaRepository<PipelineTask, UUID> {
 

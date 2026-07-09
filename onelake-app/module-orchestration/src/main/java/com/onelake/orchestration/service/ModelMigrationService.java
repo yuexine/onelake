@@ -7,8 +7,8 @@ import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
-import com.onelake.orchestration.dto.PipelineBackfillResult;
-import com.onelake.orchestration.dto.PipelineBackfillResult.BackfillItem;
+import com.onelake.orchestration.dto.ModelMigrationResult;
+import com.onelake.orchestration.dto.ModelMigrationResult.MigrationItem;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
@@ -20,35 +20,32 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
- * Backfills historical {@code modeling.data_model} rows into pipeline v2 entities
- * (orchestration.dag + pipeline_task + pipeline_task_edge).
+ * 历史模型迁移服务：把 {@code modeling.data_model} 存量记录迁移成流水线 V2 实体
+ * （{@code orchestration.dag + pipeline_task + pipeline_task_edge}）。
  *
- * <p><b>C4 (docs/流水线模块重设计方案.md §7 P1 / §6.5)</b>: backfills historical
- * {@code modeling.data_model} rows into unified Spark pipeline entities so existing
- * governance models can be observed and triggered through orchestration.
+ * <p><b>模型迁移</b>：面向历史治理模型的一次性结构迁移，使存量模型可以进入编排模块的
+ * 观测与触发链路。它不是按分区或业务日期展开的数据回填。
  *
- * <p><b>Strategy</b>: for each VALIDATED {@code modeling.data_model}, create one
- * Spark-only {@code BLANK} pipeline with:
+ * <p><b>迁移策略</b>：每个 {@code VALIDATED} 状态的 {@code modeling.data_model}
+ * 创建一条仅使用 Spark 执行的 {@code BLANK} 流水线：
  * <ul>
- *   <li>One {@code SYNC_REF} task pointing at {@code model.source_fqn} so the
- *       {@code integration.table.loaded} event is handled by orchestration.</li>
- *   <li>One {@code SPARK_SQL} sink task pointing at the target table.</li>
- *   <li>One {@code PIPELINE} edge: SYNC_REF → SPARK_SQL.</li>
+ *   <li>一个 {@code SYNC_REF} 节点指向 {@code model.source_fqn}，承接 ODS 表就绪事件。</li>
+ *   <li>一个 {@code SPARK_SQL} 目标写入节点指向目标 DWD 表。</li>
+ *   <li>一条 {@code PIPELINE} 边：{@code SYNC_REF -> SPARK_SQL}。</li>
  * </ul>
  *
- * <p><b>Idempotent</b>: by {@code (tenant_id, model_id)}. If a pipeline_task already
- * references the model, skip.
+ * <p><b>幂等口径</b>：以 {@code (tenant_id, model_id)} 为准；若已有
+ * {@code pipeline_task} 引用该模型，则跳过该模型。
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
-public class PipelineBackfillService {
+public class ModelMigrationService {
 
     private static final String KIND_BLANK = "BLANK";
     private static final String STATUS_VALIDATED = "VALIDATED";
@@ -61,13 +58,13 @@ public class PipelineBackfillService {
     private final JdbcTemplate jdbc;
 
     /**
-     * Scan and (optionally) backfill. Call with {@code dryRun=true} first to audit.
+     * 扫描并按需执行迁移。建议先以 {@code dryRun=true} 干跑审计候选清单。
      */
     @Transactional
-    public PipelineBackfillResult backfill(boolean dryRun) {
+    public ModelMigrationResult migrate(boolean dryRun) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
-            throw new BizException(40100, "Tenant context required for pipeline backfill");
+            throw new BizException(40100, "Tenant context required for model migration");
         }
 
         List<Map<String, Object>> models = jdbc.queryForList("""
@@ -77,7 +74,7 @@ public class PipelineBackfillService {
             ORDER BY created_at
             """, tenantId, STATUS_VALIDATED);
 
-        List<BackfillItem> planned = new ArrayList<>();
+        List<MigrationItem> planned = new ArrayList<>();
         List<UUID> createdIds = new ArrayList<>();
         List<UUID> skippedIds = new ArrayList<>();
         List<String> errors = new ArrayList<>();
@@ -101,13 +98,13 @@ public class PipelineBackfillService {
                 continue;
             }
 
-            // Idempotency check: skip if a pipeline_task already references this model
+            // 幂等检查：只要当前租户下已有 pipeline_task 引用该模型，就不重复创建流水线。
             if (taskRepo.countByTenantIdAndModelId(tenantId, modelId) > 0) {
                 skippedIds.add(modelId);
                 continue;
             }
 
-            planned.add(new BackfillItem(modelId, name, modelNameHint, sourceFqn, targetFqn));
+            planned.add(new MigrationItem(modelId, name, modelNameHint, sourceFqn, targetFqn));
 
             if (dryRun) {
                 continue;
@@ -117,27 +114,27 @@ public class PipelineBackfillService {
                 UUID pipelineId = createPipelineForModel(tenantId, modelId, name,
                         modelNameHint, sourceFqn, targetFqn);
                 createdIds.add(pipelineId);
-                log.info("Backfilled model {} → pipeline {}", modelId, pipelineId);
+                log.info("历史模型 {} 已迁移为流水线 {}", modelId, pipelineId);
             } catch (RuntimeException e) {
-                errors.add("failed to backfill model " + modelId + ": " + e.getMessage());
-                log.warn("Backfill failed for model {}: {}", modelId, e.getMessage());
+                errors.add("failed to migrate model " + modelId + ": " + e.getMessage());
+                log.warn("历史模型 {} 迁移失败：{}", modelId, e.getMessage());
             }
         }
 
-        log.info("Pipeline backfill dryRun={} tenant={} candidates={} planned={} created={} skipped={} errors={}",
+        log.info("模型迁移完成 dryRun={} tenant={} candidates={} planned={} created={} skipped={} errors={}",
                 dryRun, tenantId, models.size(), planned.size(), createdIds.size(),
                 skippedIds.size(), errors.size());
 
-        return new PipelineBackfillResult(
+        return new ModelMigrationResult(
                 dryRun, models.size(), planned, createdIds, skippedIds, errors);
     }
 
     private UUID createPipelineForModel(UUID tenantId, UUID modelId, String modelName,
                                         String modelNameHint, String sourceFqn, String targetFqn) {
-        // 1. Create Dag (pipeline)
+        // 1. 创建流水线主体。历史模型迁移出的流水线默认保持 VALIDATED，后续可直接纳入发布/运行链路。
         Dag dag = new Dag();
         dag.setTenantId(tenantId);
-        dag.setName("backfill_" + sanitize(modelName) + "_" + modelNameSuffix(modelId));
+        dag.setName("model_migration_" + sanitize(modelName) + "_" + modelNameSuffix(modelId));
         dag.setDagsterJob("onelake_pipeline_run");
         dag.setDefinition("{}");
         dag.setScheduleCron(null);
@@ -150,7 +147,7 @@ public class PipelineBackfillService {
         dag.setComputeProfile("spark-small");
         dag = dagRepo.save(dag);
 
-        // 2. SYNC_REF task — points at ODS source table
+        // 2. 创建 SYNC_REF 源节点，用 target_fqn 关联 ODS 源表就绪事件。
         String syncKey = "sync_ref_" + sanitize(modelName);
         PipelineTask syncTask = new PipelineTask();
         syncTask.setTenantId(tenantId);
@@ -161,10 +158,10 @@ public class PipelineBackfillService {
         syncTask.setEngine(ENGINE_SPARK_SQL);
         syncTask.setTargetFqn(sourceFqn);
         syncTask.setConfig("{}");
-        // sync_task_id is intentionally null: SYNC_REF only needs target_fqn for event matching.
+        // 字段 sync_task_id 故意为空：迁移场景只需要 target_fqn 参与事件匹配。
         syncTask = taskRepo.save(syncTask);
 
-        // 3. SPARK_SQL sink task — points at the target DWD table.
+        // 3. 创建 SPARK_SQL 目标写入节点，保留 model_id 作为后续幂等判断与审计线索。
         String sparkKey = "spark_dwd_" + sanitize(modelName);
         PipelineTask sparkTask = new PipelineTask();
         sparkTask.setTenantId(tenantId);
@@ -180,7 +177,7 @@ public class PipelineBackfillService {
             """.trim());
         taskRepo.save(sparkTask);
 
-        // 4. PIPELINE edge: SYNC_REF → SPARK_SQL
+        // 4. 建立流水线边：ODS 源表就绪后驱动 DWD Spark Sink。
         PipelineTaskEdge edge = new PipelineTaskEdge();
         edge.setTenantId(tenantId);
         edge.setDagId(dag.getId());

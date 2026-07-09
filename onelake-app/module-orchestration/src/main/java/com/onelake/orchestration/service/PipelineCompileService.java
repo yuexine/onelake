@@ -34,10 +34,10 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Compiles a pipeline (DAG + tasks) into a {@link PipelineCompileResult}.
+ * 将流水线（DAG + 节点）编译为 {@link PipelineCompileResult}。
  *
- * <p><b>C1 (docs/流水线模块重设计方案.md §6.1) — single source of truth</b>: this service
- * does not write to {@code modeling.*} schema. The unified pipeline mainline is Spark-only.
+ * <p><b>单一事实来源</b>：本服务只读取编排模块的流水线节点与边契约，
+ * 不写入 {@code modeling.*} schema；统一流水线主路径以 Spark 为准。
  */
 @Service
 @RequiredArgsConstructor
@@ -49,8 +49,8 @@ public class PipelineCompileService {
     private final PipelineTaskEdgeRepository edgeRepo;
 
     /**
-     * Compile a pipeline. Updates each task's {@code compileStatus} / {@code executable} /
-     * {@code compileError} in place (within the same transaction as the caller).
+     * 编译单条流水线，并在调用方事务内回写每个节点的
+     * {@code compileStatus}、{@code executable} 和 {@code compileError}。
      */
     @Transactional
     public PipelineCompileResult compile(UUID dagId) {
@@ -64,12 +64,11 @@ public class PipelineCompileService {
         List<PipelineTask> tasks = taskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
         List<PipelineTaskEdge> edges = new ArrayList<>(edgeRepo.findByDagId(dagId));
 
-        // Stage 108: data-flow edges are the source of truth for downstream inputs.
-        // A Spark task reads incoming edge assets, so users wire tables once on the
-        // canvas instead of duplicating from_tables manually in every task config.
+        // 数据流边是下游输入的事实来源。Spark 节点从入边资产推导输入表，
+        // 用户只需要在画布连线一次，不必在每个节点 config 中重复维护 from_tables。
         applyDataflowInputs(tasks, edges);
 
-        // 1. Per-task validation
+        // 1. 节点级校验。
         Map<UUID, TaskCompileResult> resultsById = new LinkedHashMap<>();
         Map<String, PipelineTask> taskByKey = new HashMap<>();
         for (PipelineTask t : tasks) {
@@ -79,10 +78,10 @@ public class PipelineCompileService {
             applyCompileResult(t, r);
         }
 
-        // 2. Graph-level validation (cycle detection, dangling edges, reverse cross-engine)
+        // 2. 图级校验：环路、悬空边、反向跨引擎边等。
         List<String> graphErrors = new ArrayList<>(validateGraph(tasks, edges, taskByKey));
 
-        // 3. Topological sort over PIPELINE edges
+        // 3. 按 PIPELINE 边做拓扑排序。
         List<PipelineTask> ordered;
         try {
             ordered = topologicalSort(tasks, edges);
@@ -91,7 +90,7 @@ public class PipelineCompileService {
             ordered = tasks;
         }
 
-        // 4. Save updated task states
+        // 4. 保存更新后的节点编译状态。
         taskRepo.saveAll(tasks);
 
         boolean allValidated = graphErrors.isEmpty()
@@ -573,8 +572,7 @@ public class PipelineCompileService {
     private record DerivedColumn(String name, String expression) {}
 
     /**
-     * Topological sort over PIPELINE-layer edges (C2 — L2 dependency layer).
-     * Data dependencies are encoded by explicit pipeline_task_edge contracts.
+     * 按 PIPELINE 层边做拓扑排序；数据依赖由显式的 {@code pipeline_task_edge} 契约表达。
      */
     private List<PipelineTask> topologicalSort(List<PipelineTask> tasks,
                                                List<PipelineTaskEdge> edges) {
@@ -606,7 +604,7 @@ public class PipelineCompileService {
                 ready.add(e.getKey());
             }
         }
-        // Preserve original task ordering for ties — deterministic compile output.
+        // 入度并列时保留原始节点顺序，确保编译结果稳定。
         ready.sort((a, b) -> Integer.compare(indexOf(tasks, a), indexOf(tasks, b)));
         Set<String> visited = new HashSet<>();
         while (!ready.isEmpty()) {

@@ -73,6 +73,23 @@ export interface PageResult<T> {
 
 const unwrap = <T>(request: Promise<unknown>) => request as Promise<T>;
 
+type ModelMigrationResult = {
+  dryRun: boolean;
+  totalCandidates: number;
+  plannedItems?: unknown[];
+  createdPipelineIds?: string[];
+  skippedModelIds?: string[];
+  errors: string[];
+};
+
+const modelMigrationDryRun = () =>
+  unwrap<ModelMigrationResult>(http.get('/orchestration/pipelines/model-migration'));
+
+const modelMigrationExecute = (dryRun = false) =>
+  unwrap<ModelMigrationResult>(
+    http.post('/orchestration/pipelines/model-migration', null, { params: { dryRun } }),
+  );
+
 export interface TenantOption {
   id: string;
   code: string;
@@ -326,13 +343,12 @@ export const OrchestrationAPI = {
 };
 
 /**
- * Pipeline v2 API — used by the Unified Pipeline Editor (P2).
- * See docs/流水线模块重设计方案.md §4 (IA) and §6.7 (validation contract).
+ * 流水线 V2 API：统一流水线编辑器使用的前端接口门面。
  *
- * Convention: /api/v1/orchestration/pipelines/*
+ * 约定：后端统一挂载在 /api/v1/orchestration/pipelines/*。
  */
 export const PipelineAPI = {
-  // pipeline (dag) lifecycle
+  // 流水线（Dag）生命周期。
   create: (payload: { name: string; pipelineKind?: PipelineKind }) =>
     unwrap<Pipeline>(http.post('/orchestration/pipelines', payload)),
   get: (id: string) =>
@@ -340,7 +356,7 @@ export const PipelineAPI = {
   updateStatus: (id: string, status: PipelineStatus) =>
     unwrap<Pipeline>(http.put(`/orchestration/pipelines/${id}/status`, { status })),
 
-  // tasks
+  // 流水线节点。
   listTasks: (id: string) =>
     unwrap<PipelineTask[]>(http.get(`/orchestration/pipelines/${id}/tasks`)),
   createTask: (id: string, payload: PipelineTaskRequest) =>
@@ -350,7 +366,7 @@ export const PipelineAPI = {
   deleteTask: (id: string, taskKey: string) =>
     unwrap<void>(http.delete(`/orchestration/pipelines/${id}/tasks/${encodeURIComponent(taskKey)}`)),
 
-  // edges
+  // 流水线边。
   listEdges: (id: string) =>
     unwrap<PipelineTaskEdge[]>(http.get(`/orchestration/pipelines/${id}/edges`)),
   createEdge: (id: string, payload: PipelineTaskEdgeRequest) =>
@@ -358,15 +374,15 @@ export const PipelineAPI = {
   deleteEdge: (id: string, sourceKey: string, targetKey: string) =>
     unwrap<void>(http.delete(`/orchestration/pipelines/${id}/edges`, { params: { sourceKey, targetKey } })),
 
-  // L1+L2 validation (§6.7)
+  // L1 + L2 校验。
   validate: (id: string) =>
     unwrap<PipelineValidationResult>(http.post(`/orchestration/pipelines/${id}/validate`, null)),
 
-  // trigger (P1 triggerPipelineRun path)
+  // 触发运行，进入 triggerPipelineRun 链路。
   trigger: (id: string, trigger = 'MANUAL') =>
     unwrap<{ runId: string }>(http.post(`/orchestration/pipelines/${id}/trigger`, null, { params: { trigger } })),
 
-  // task runs
+  // 节点运行记录与节点级操作。
   listTaskRuns: (id: string, runId: string) =>
     unwrap<TaskRun[]>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks`)),
   rerunTask: (id: string, runId: string, taskKey: string, mode: TaskRerunMode = 'SINGLE') =>
@@ -374,8 +390,7 @@ export const PipelineAPI = {
       `/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/rerun`,
       { mode },
     )),
-  // New callers pass log options explicitly; keep the numeric-tail wrapper below
-  // for older task-log consumers that have not moved to the options object.
+  // 新调用方显式传入日志选项；下面保留数字 tail 包装方法，兼容尚未切到 options 对象的旧调用方。
   getTaskLog: (id: string, runId: string, taskKey: string, options: TaskRunLogOptions = {}) =>
     unwrap<string>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
       params: { tail: options.tail },
@@ -395,17 +410,15 @@ export const PipelineAPI = {
       headers: { Accept: 'text/plain' },
     }) as unknown as Promise<import('./http').AxiosResponse<Blob>>,
 
-  // C4 backfill (admin)
-  backfillDryRun: () =>
-    unwrap<{ dryRun: boolean; totalCandidates: number; plannedItems: unknown[]; errors: string[] }>(
-      http.get('/orchestration/pipelines/backfill')
-    ),
-  backfillExecute: (dryRun = false) =>
-    unwrap<{ dryRun: boolean; totalCandidates: number; createdPipelineIds: string[]; skippedModelIds: string[]; errors: string[] }>(
-      http.post('/orchestration/pipelines/backfill', null, { params: { dryRun } })
-    ),
+  // 历史模型迁移到流水线实体（管理员能力）。
+  modelMigrationDryRun,
+  modelMigrationExecute,
+  // @deprecated 请使用 modelMigrationDryRun。保留一版，等待调用方迁移。
+  backfillDryRun: modelMigrationDryRun,
+  // @deprecated 请使用 modelMigrationExecute。保留一版，等待调用方迁移。
+  backfillExecute: modelMigrationExecute,
 
-  // P3: ODS→DWD template
+  // P3：ODS→DWD 模板。
   applyOdsDwdTemplate: (payload: {
     pipelineName?: string;
     modelId: string;

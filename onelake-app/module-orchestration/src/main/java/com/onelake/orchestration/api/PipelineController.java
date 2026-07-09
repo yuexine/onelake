@@ -37,10 +37,9 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Pipeline v2 REST API — used by the Unified Pipeline Editor (P2).
- * See docs/流水线模块重设计方案.md §4 (IA) and §6.7 (validation API contract).
+ * 流水线 V2 REST API，供统一流水线编辑器使用。
  *
- * <p>URL convention: {@code /api/v1/orchestration/pipelines/...}
+ * <p>URL 约定：{@code /api/v1/orchestration/pipelines/...}
  */
 @RestController
 @RequestMapping("/api/v1/orchestration/pipelines")
@@ -50,7 +49,7 @@ public class PipelineController {
     private final PipelineService pipelineService;
     private final OrchestrationService orchestrationService;
 
-    // ---------- pipeline (dag) ----------
+    // ---------- 流水线（dag） ----------
 
     @PostMapping
     @PreAuthorize("hasRole('DE')")
@@ -73,7 +72,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.updatePipelineStatus(dagId, body.get("status")));
     }
 
-    // ---------- tasks ----------
+    // ---------- 节点 ----------
 
     @GetMapping("/{dagId}/tasks")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
@@ -104,7 +103,7 @@ public class PipelineController {
         return ApiResponse.ok(null);
     }
 
-    // ---------- edges ----------
+    // ---------- 边 ----------
 
     @GetMapping("/{dagId}/edges")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
@@ -128,7 +127,7 @@ public class PipelineController {
         return ApiResponse.ok(null);
     }
 
-    // ---------- validate (L1+L2, §6.7) ----------
+    // ---------- L1 + L2 校验 ----------
 
     @PostMapping("/{dagId}/validate")
     @PreAuthorize("hasRole('DE')")
@@ -136,7 +135,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.validate(dagId));
     }
 
-    // ---------- trigger ----------
+    // ---------- 触发 ----------
 
     @PostMapping("/{dagId}/trigger")
     @PreAuthorize("hasRole('DE')")
@@ -157,7 +156,7 @@ public class PipelineController {
         return ApiResponse.ok(orchestrationService.rerunTask(dagId, runId, taskKey, mode));
     }
 
-    // ---------- ODS→DWD template (P3) ----------
+    // ---------- ODS→DWD 模板（P3） ----------
 
     @PostMapping("/templates/ods-dwd")
     @PreAuthorize("hasRole('DE')")
@@ -165,7 +164,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.applyOdsDwdTemplate(req));
     }
 
-    // ---------- task runs ----------
+    // ---------- 节点运行 ----------
 
     @GetMapping("/{dagId}/runs/{runId}/tasks")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")

@@ -1,5 +1,8 @@
 package com.onelake.orchestration.domain.enums;
 
+/**
+ * 算子分类。
+ */
 public enum OperatorCategory {
     INPUT,
     TRANSFORM,

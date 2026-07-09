@@ -18,14 +18,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * P-Spark: builds Dagster runConfig for the {@code run_spark_task_op}.
+ * P-Spark：为 {@code run_spark_task_op} 构建 Dagster runConfig。
  *
- * <p><b>C2</b> (§6.3.1): one op invocation receives the Spark task bundle. The unified
- * pipeline mainline is Spark-only; external model-run ordering is no longer part of this job.
- * <b>C5</b> (§6.4): resource_profile (executor_memory/cores/num_executors/driver_memory) is
- * honored as actual spark-submit flags — no longer just logged.
- * <b>C1</b>: reads only {@code pipeline_task.config} (Spark tasks have no model_id).
- * QUALITY_GATE tasks render to PySpark assertions and run in the same Spark task bundle.
+ * <p>单次 op 调用接收一批 Spark 节点。统一流水线主路径以 Spark 为准，
+ * 外部模型运行顺序不再进入该作业。
+ *
+ * <p>{@code resource_profile}（executor_memory/cores/num_executors/driver_memory）
+ * 会作为真实 spark-submit 参数生效，而不只是记录日志。
+ *
+ * <p>构建器只读取 {@code pipeline_task.config}；{@code QUALITY_GATE}
+ * 会渲染成 PySpark 断言脚本，并放入同一个 Spark 节点包中执行。
  */
 @Component
 @Slf4j
@@ -140,7 +142,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
     }
 
     /**
-     * Build per-task op config for one Spark task (used by OrchestrationService when launching).
+     * 为单个 Spark 节点构建 op 配置，供 {@code OrchestrationService} 触发时使用。
      */
     public Map<String, Object> buildPerTaskOpConfig(PipelineTask task, Map<String, Object> resourceProfile) {
         Map<String, Object> opConfig = new LinkedHashMap<>();
@@ -149,7 +151,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("task_type", taskType);
         opConfig.put("target_fqn", task.getTargetFqn() == null ? "" : task.getTargetFqn());
 
-        // Parse config jsonb to extract script/sql/from_tables
+        // 解析 config jsonb，提取 script/sql/from_tables。
         JsonNode cfg = parseSafe(task.getConfig());
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
             opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task));
@@ -231,7 +233,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         try {
             return JsonUtil.mapper().readTree(json);
         } catch (Exception e) {
-            log.warn("SparkRunConfigBuilder: failed to parse config: {}", e.getMessage());
+            log.warn("SparkRunConfigBuilder：解析 config 失败：{}", e.getMessage());
             return JsonUtil.mapper().nullNode();
         }
     }

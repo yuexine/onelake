@@ -1,5 +1,8 @@
 package com.onelake.orchestration.dto;
 
+/**
+ * 创建或更新计算画像的请求体。
+ */
 public record ComputeProfileRequest(
     String code,
     String displayName,

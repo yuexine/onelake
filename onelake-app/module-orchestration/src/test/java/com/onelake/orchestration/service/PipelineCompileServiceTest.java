@@ -29,10 +29,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 /**
- * P1 unit tests for {@link PipelineCompileService}.
+ * {@link PipelineCompileService} 的 P1 单元测试。
  *
- * <p>Verifies C1 (single-source-of-truth), C2 (topological sort over PIPELINE edges),
- * cycle detection, and per-task validation without touching the real DB.
+ * <p>覆盖 C1 单一事实来源、C2 基于 PIPELINE 边的拓扑排序、环路检测和节点级校验。
  */
 @ExtendWith(MockitoExtension.class)
 class PipelineCompileServiceTest {
@@ -76,7 +75,7 @@ class PipelineCompileServiceTest {
 
         assertThat(result.allValidated()).isTrue();
         assertThat(result.graphErrors()).isEmpty();
-        // topological order: upstream first, then downstream
+        // 拓扑顺序应为上游在前、下游在后。
         assertThat(result.tasks()).extracting("taskKey")
                 .containsExactly("t_upstream", "t_downstream");
         assertThat(result.pipelineTag()).startsWith("pipeline_");
@@ -188,7 +187,7 @@ class PipelineCompileServiceTest {
         TenantContext.clear();
         assertThatThrownBy(() -> service.compile(dagId))
                 .isInstanceOf(BizException.class);
-        TenantContext.setTenantId(tenantId); // restore for @AfterEach
+        TenantContext.setTenantId(tenantId); // 为 @AfterEach 恢复租户上下文。
     }
 
     @Test
@@ -219,7 +218,7 @@ class PipelineCompileServiceTest {
         t.setName("sync_ref");
         t.setEngine("SPARK");
         t.setConfig("{}");
-        // missing targetFqn
+        // 缺少 targetFqn。
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(t));
         when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
 
@@ -254,7 +253,7 @@ class PipelineCompileServiceTest {
         assertThat(t.getExecutable()).isFalse();
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private Dag newPipelineDag() {
         Dag d = new Dag();

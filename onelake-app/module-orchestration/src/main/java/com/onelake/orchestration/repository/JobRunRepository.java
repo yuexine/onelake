@@ -13,6 +13,9 @@ import java.util.Collection;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * DAG 运行实例持久化访问接口。
+ */
 public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
     Page<JobRun> findByDagIdOrderByStartedAtDesc(UUID dagId, Pageable pageable);
 

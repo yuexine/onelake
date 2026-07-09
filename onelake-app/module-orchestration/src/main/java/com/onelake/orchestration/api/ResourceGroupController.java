@@ -20,6 +20,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
+/**
+ * 编排资源组与计算画像接口。
+ */
 @RestController
 @RequestMapping("/api/v1/orchestration/resource-groups")
 @RequiredArgsConstructor

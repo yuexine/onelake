@@ -8,6 +8,11 @@ import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
 
+/**
+ * Dagster 节点执行器回调的请求体。
+ *
+ * <p>该对象只承载节点状态、运行指标和日志/产物位置；租户身份由 runId 反查得到。
+ */
 public record TaskRunCallbackRequest(
         @NotNull TaskRunStatus status,
         Instant startedAt,

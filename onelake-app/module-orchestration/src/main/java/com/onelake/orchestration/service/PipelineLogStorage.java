@@ -11,6 +11,11 @@ import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 
+/**
+ * 流水线节点日志对象存储访问组件。
+ *
+ * <p>当前通过 MinIO 读取 Dagster/Spark 写入的日志对象，供节点运行详情接口流式返回。
+ */
 @Component
 @Slf4j
 public class PipelineLogStorage {
@@ -42,7 +47,7 @@ public class PipelineLogStorage {
                     .object(objectKey)
                     .build());
         } catch (Exception e) {
-            log.warn("Pipeline log open failed bucket={} key={}: {}", bucket, objectKey, e.getMessage());
+            log.warn("流水线日志读取失败 bucket={} key={}：{}", bucket, objectKey, e.getMessage());
             throw new DataplaneException("读取节点日志失败", e);
         }
     }
@@ -54,7 +59,7 @@ public class PipelineLogStorage {
                     .object(objectKey)
                     .build()).size();
         } catch (Exception e) {
-            log.warn("Pipeline log stat failed bucket={} key={}: {}", bucket, objectKey, e.getMessage());
+            log.warn("流水线日志元数据读取失败 bucket={} key={}：{}", bucket, objectKey, e.getMessage());
             throw new DataplaneException("读取节点日志元数据失败", e);
         }
     }

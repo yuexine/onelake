@@ -1,13 +1,13 @@
 package com.onelake.orchestration.domain.enums;
 
 /**
- * Unified RunStatus (C8 — see docs/RUNSTATUS_ENUM_AUDIT.md).
+ * 运行状态统一口径。
  *
- * <p>Canonical terminal success is
- * {@link #SUCCEEDED}, matching {@code TaskRunStatus} and Outbox payload schema v2.
+ * <p>标准成功终态为 {@link #SUCCEEDED}，与 {@code TaskRunStatus}
+ * 和 Outbox v2 载荷保持一致。
  *
- * <p>Backward compat for status strings coming from external sources (e.g. Dagster
- * raw responses) is handled in {@code OrchestrationService.mapDagsterStatus}.
+ * <p>来自外部系统的状态字符串（例如 Dagster 原始响应）由
+ * {@code OrchestrationService.mapDagsterStatus} 做兼容映射。
  */
 public enum DagStatus {
     QUEUED,

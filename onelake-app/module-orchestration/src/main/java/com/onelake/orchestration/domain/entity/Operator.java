@@ -17,6 +17,12 @@ import lombok.Setter;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 算子主表实体。
+ *
+ * <p>记录算子引用、分类、作用域和当前最新版本；版本化 Manifest 存放在
+ * {@link OperatorVersion} 中。
+ */
 @Entity
 @Table(name = "operator", schema = "orchestration")
 @Getter

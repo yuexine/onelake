@@ -15,6 +15,11 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
+/**
+ * 内部节点状态回调接口。
+ *
+ * <p>该接口仅供 Dagster/Spark 执行器通过内部令牌调用，不面向前端用户。
+ */
 @RestController
 @RequestMapping("/api/v1/internal/orchestration")
 @RequiredArgsConstructor

@@ -54,23 +54,24 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * End-to-end orchestration test: serializes the full pipeline v2 lifecycle through every
- * service boundary (PipelineService → PipelineCompileService → OrchestrationService →
- * OutboxPublisher), verifying contracts and event flow without a real DB.
+ * 编排端到端测试：串起流水线 V2 的完整生命周期。
  *
- * <p>Tests the happy path that production will exercise:
+ * <p>该测试跨越 {@link PipelineService}、{@link PipelineCompileService}、
+ * {@link OrchestrationService} 和 {@link OutboxPublisher}，在不依赖真实数据库的情况下
+ * 验证服务间契约与事件流。
+ *
+ * <p>覆盖生产主路径：
  * <ol>
- *   <li>Create blank pipeline</li>
- *   <li>Add SYNC_REF + SPARK_SQL tasks</li>
- *   <li>Validate the Spark executable baseline</li>
- *   <li>Transition DRAFT → VALIDATED (validation enforces pass)</li>
- *   <li>Transition VALIDATED → PUBLISHED (emits pipeline.published)</li>
- *   <li>Trigger run (creates TaskRun per task, launches Dagster)</li>
- *   <li>Refresh status (terminal → emits pipeline.run.succeeded + pipeline.task.loaded)</li>
+ *   <li>创建空白流水线。</li>
+ *   <li>添加 SYNC_REF + SPARK_SQL 节点。</li>
+ *   <li>校验 Spark 可执行基线。</li>
+ *   <li>状态从 DRAFT 流转到 VALIDATED。</li>
+ *   <li>状态从 VALIDATED 流转到 PUBLISHED，并发布 pipeline.published。</li>
+ *   <li>触发运行，为每个节点创建 TaskRun 并启动 Dagster。</li>
+ *   <li>刷新终态，发布 pipeline.run.succeeded 与 pipeline.task.loaded。</li>
  * </ol>
  *
- * <p>This is the single integration point that catches wiring bugs across services that
- * unit tests on individual services might miss.
+ * <p>这是覆盖跨服务装配问题的集成锚点，补足单服务单元测试可能遗漏的链路问题。
  */
 @ExtendWith(MockitoExtension.class)
 class PipelineEndToEndTest {
@@ -91,7 +92,7 @@ class PipelineEndToEndTest {
     private PipelineCompileService compileService;
     private OrchestrationService orchestrationService;
 
-    // Per-test pipeline state
+    // 每个测试用例独立维护的内存流水线状态。
     private UUID tenantId;
     private UUID dagId;
     private UUID modelId;
@@ -134,7 +135,7 @@ class PipelineEndToEndTest {
         lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.empty());
 
-        // Wire repo mocks to operate on in-memory state
+        // 将 Repository mock 接到内存状态上，模拟最小持久化行为。
         lenient().when(dagRepo.findByIdAndTenantId(eq(dagId), eq(tenantId))).thenReturn(Optional.of(dag));
         lenient().when(dagRepo.findById(eq(dagId))).thenReturn(Optional.of(dag));
         lenient().when(dagRepo.findByTenantId(eq(tenantId))).thenReturn(List.of(dag));
@@ -208,7 +209,7 @@ class PipelineEndToEndTest {
                     List.of(r), inv.getArgument(1), 1);
         });
 
-        // Outbox capture
+        // 捕获 Outbox 发布内容，供后续断言。
         lenient().when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
         lenient().doAnswer(inv -> {
             outboxTypes.add(inv.getArgument(0));
@@ -216,7 +217,7 @@ class PipelineEndToEndTest {
             return null;
         }).when(outboxPublisher).publish(anyString(), anyString(), any());
 
-        // Run-time contract: v2 path unblocked
+        // 运行契约：V2 主路径在测试中保持可触发。
         lenient().when(runtimeContractService.triggerBlockedReason(anyString(), any())).thenReturn(Optional.empty());
     }
 
@@ -231,9 +232,9 @@ class PipelineEndToEndTest {
     }
 
     @Test
-    @DisplayName("Full lifecycle: create → add Spark tasks → validate → publish → trigger → terminal → outbox")
+    @DisplayName("完整生命周期：创建 → 添加 Spark 节点 → 校验 → 发布 → 触发 → 终态 → Outbox")
     void fullLifecycleHappyPath() {
-        // === Step 1: create tasks via service (simulating API calls) ===
+        // === 步骤 1：通过服务创建节点，模拟 API 调用 ===
         PipelineTask syncTask = new PipelineTask();
         syncTask.setId(UUID.randomUUID());
         syncTask.setTenantId(tenantId);
@@ -243,7 +244,7 @@ class PipelineEndToEndTest {
         syncTask.setName("ODS source");
         syncTask.setEngine("SPARK_SQL");
         syncTask.setTargetFqn("iceberg.ods.orders");
-        syncTask.setSyncTaskId(UUID.randomUUID());  // structurally valid
+        syncTask.setSyncTaskId(UUID.randomUUID());  // 结构上有效。
         syncTask.setConfig("{}");
         tasks.put("sync_ref_ods", syncTask);
 
@@ -259,19 +260,19 @@ class PipelineEndToEndTest {
         sparkTask.setConfig("{\"sql\":\"CREATE OR REPLACE TABLE iceberg.dwd.orders AS SELECT * FROM iceberg.ods.orders\"}");
         tasks.put("spark_dwd_sink", sparkTask);
 
-        // PIPELINE edge: sync → spark
+        // PIPELINE 边：sync → spark。
         edges.add(pipeEdge("sync_ref_ods", "spark_dwd_sink"));
 
-        // === Step 2: validate ===
+        // === 步骤 2：校验 ===
         PipelineValidationResult validation = pipelineService.validate(dagId);
         assertThat(validation.valid()).as("validate should pass").isTrue();
 
-        // === Step 3: status DRAFT → VALIDATED ===
+        // === 步骤 3：状态 DRAFT → VALIDATED ===
         Dag validated = pipelineService.updatePipelineStatus(dagId, "VALIDATED");
         assertThat(validated.getStatus()).isEqualTo("VALIDATED");
         assertThat(validated.getVersion()).isEqualTo(2);
 
-        // === Step 4: VALIDATED → PUBLISHED (emits pipeline.published) ===
+        // === 步骤 4：状态 VALIDATED → PUBLISHED，并发布 pipeline.published ===
         Dag published = pipelineService.updatePipelineStatus(dagId, "PUBLISHED");
         assertThat(published.getStatus()).isEqualTo("PUBLISHED");
         assertThat(published.getVersion()).isEqualTo(3);
@@ -286,7 +287,7 @@ class PipelineEndToEndTest {
         assertThat(publishedTargets)
                 .containsExactlyInAnyOrder("iceberg.ods.orders", "iceberg.dwd.orders");
 
-        // === Step 5: trigger ===
+        // === 步骤 5：触发运行 ===
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-xyz");
         UUID runId = orchestrationService.triggerPipelineRun(dagId, TriggerType.MANUAL);
@@ -295,31 +296,31 @@ class PipelineEndToEndTest {
         assertThat(run).isNotNull();
         assertThat(run.getStatus().name()).isEqualTo("RUNNING");
         assertThat(run.getDagsterRunId()).isEqualTo("dagster-run-xyz");
-        // SYNC_REF is an already satisfied event dependency in run instances;
-        // Spark task is the first runnable node and is sent to the execution bundle.
+        // SYNC_REF 在运行实例中表示已满足的事件依赖；
+        // Spark 节点是第一个可运行节点，会被发送到执行包。
         assertThat(taskRuns).hasSize(2);
         assertThat(taskRuns).extracting(TaskRun::getTaskKey)
                 .containsExactly("sync_ref_ods", "spark_dwd_sink");
         assertThat(taskRuns).extracting(TaskRun::getStatus)
                 .containsExactly(TaskRunStatus.SUCCEEDED, TaskRunStatus.RUNNING);
 
-        // === Step 6: refresh status to terminal (SUCCEEDED) ===
-        // Simulate Dagster reporting SUCCESS
+        // === 步骤 6：刷新到终态 SUCCEEDED ===
+        // 模拟 Dagster 返回 SUCCESS。
         when(dagster.getRunStatus("dagster-run-xyz"))
                 .thenReturn(new DagsterClient.RunStatus("dagster-run-xyz", "SUCCESS",
                         Instant.now().minusSeconds(60), Instant.now()));
         orchestrationService.listRuns(org.springframework.data.domain.PageRequest.of(0, 10));
-        // ^ listRuns internally calls refreshRunStatus → triggers terminal Outbox events
+        // listRuns 内部会调用 refreshRunStatus，并触发终态 Outbox 事件。
         assertThat(taskRuns).extracting(TaskRun::getStatus)
                 .containsExactly(TaskRunStatus.SUCCEEDED, TaskRunStatus.SUCCEEDED);
 
-        // === Step 7: verify Outbox events ===
-        // Expect at least: pipeline.run.succeeded + 1x pipeline.task.loaded
+        // === 步骤 7：校验 Outbox 事件 ===
+        // 至少应包含 pipeline.run.succeeded 和一条 pipeline.task.loaded。
         assertThat(outboxTypes).contains("pipeline.run.succeeded");
         long taskLoadedCount = outboxTypes.stream().filter("pipeline.task.loaded"::equals).count();
         assertThat(taskLoadedCount).as("each SUCCEEDED task_run emits pipeline.task.loaded").isEqualTo(1);
 
-        // Verify pipeline.run.succeeded payload
+        // 校验 pipeline.run.succeeded 载荷。
         int runSucceededIdx = outboxTypes.indexOf("pipeline.run.succeeded");
         Map<String, Object> runPayload = outboxPayloads.get(runSucceededIdx);
         assertThat(runPayload.get("pipelineId")).isEqualTo(dagId.toString());
@@ -327,23 +328,23 @@ class PipelineEndToEndTest {
     }
 
     @Test
-    @DisplayName("ODS→DWD template creates 3-task pipeline with proper edges")
+    @DisplayName("ODS→DWD 模板会创建标准节点和边")
     void odsDwdTemplateHappyPath() {
         OdsDwdTemplateResult result = pipelineService.applyOdsDwdTemplate(new OdsDwdTemplateRequest(
                 "ods_dwd_test", modelId, "iceberg.ods.orders", "iceberg.dwd.orders",
                 "dwd_orders", true, true));
 
         assertThat(result.pipelineId()).isEqualTo(dagId);
-        assertThat(result.taskIds()).hasSize(4);  // SYNC_REF + Spark governance + Spark sink + QUALITY_GATE
-        assertThat(edges).hasSizeGreaterThanOrEqualTo(3); // sync→governance, governance→sink, sink→gate
+        assertThat(result.taskIds()).hasSize(4);  // SYNC_REF + Spark 治理 + Spark 落表 + QUALITY_GATE。
+        assertThat(edges).hasSizeGreaterThanOrEqualTo(3); // sync→governance、governance→sink、sink→gate。
         assertThat(tasks.keySet())
                 .contains("sync_ref_ods", "spark_field_governance", "spark_dwd_sink", "quality_gate");
     }
 
     @Test
-    @DisplayName("Backfill dry-run doesn't write, execute creates pipeline per model")
-    void backfillDryRunAndExecute() {
-        // pretend there's one validated data_model in modeling
+    @DisplayName("模型迁移干跑不写入，执行时为每个模型创建流水线")
+    void modelMigrationDryRunAndExecute() {
+        // 模拟 modeling 库中存在一条已校验的历史模型。
         UUID anotherModel = UUID.randomUUID();
         when(jdbc.queryForList(anyString(), eq(tenantId), eq("VALIDATED")))
                 .thenReturn(List.of(Map.of(
@@ -354,22 +355,22 @@ class PipelineEndToEndTest {
                         "target_fqn", "iceberg.dwd.orders",
                         "status", "VALIDATED")));
 
-        PipelineBackfillService backfillService = new PipelineBackfillService(
+        ModelMigrationService modelMigrationService = new ModelMigrationService(
                 dagRepo, taskRepo, edgeRepo, jdbc);
 
-        // dry-run
-        var dryRun = backfillService.backfill(true);
+        // 干跑只返回迁移计划，不写入任何流水线节点。
+        var dryRun = modelMigrationService.migrate(true);
         assertThat(dryRun.dryRun()).isTrue();
         assertThat(dryRun.plannedItems()).hasSize(1);
-        assertThat(tasks).isEmpty(); // nothing written
+        assertThat(tasks).isEmpty(); // 未产生写入。
 
-        // execute
-        var executed = backfillService.backfill(false);
+        // 真实执行迁移后会创建对应流水线。
+        var executed = modelMigrationService.migrate(false);
         assertThat(executed.createdPipelineIds()).isNotEmpty();
     }
 
     @Test
-    @DisplayName("Validation fails when Spark SQL task has no sql config")
+    @DisplayName("Spark SQL 节点缺少 sql 配置时校验失败")
     void validationFailsForC1Violation() {
         PipelineTask t = new PipelineTask();
         t.setId(UUID.randomUUID());
@@ -390,7 +391,7 @@ class PipelineEndToEndTest {
     }
 
     @Test
-    @DisplayName("Cannot publish from DRAFT directly (must VALIDATED first)")
+    @DisplayName("不能从 DRAFT 直接发布，必须先进入 VALIDATED")
     void cannotSkipValidated() {
         assertThatThrownBy(() -> pipelineService.updatePipelineStatus(dagId, "PUBLISHED"))
                 .isInstanceOf(BizException.class)
@@ -398,7 +399,7 @@ class PipelineEndToEndTest {
     }
 
     @Test
-    @DisplayName("Cannot mark as VALIDATED if validation fails")
+    @DisplayName("校验失败时不能标记为 VALIDATED")
     void cannotValidateIfCompileFails() {
         PipelineTask t = new PipelineTask();
         t.setId(UUID.randomUUID());
@@ -417,10 +418,9 @@ class PipelineEndToEndTest {
     }
 
     @Test
-    @DisplayName("Trigger fails when no executable tasks")
+    @DisplayName("没有可执行节点时触发失败")
     void triggerFailsWithoutExecutableTasks() {
-        // Add a SYNC_REF (not executable) — must be structurally valid for compile to pass,
-        // then fail at the executableCount check.
+        // 添加结构有效但不可执行的 SYNC_REF，让编译先通过，再在可执行节点数量检查处失败。
         PipelineTask sync = new PipelineTask();
         sync.setId(UUID.randomUUID());
         sync.setTenantId(tenantId);
@@ -431,7 +431,7 @@ class PipelineEndToEndTest {
         sync.setEngine("SPARK_SQL");
         sync.setTargetFqn("iceberg.ods.x");
         sync.setConfig("{}");
-        sync.setSyncTaskId(UUID.randomUUID());  // make it valid structurally
+        sync.setSyncTaskId(UUID.randomUUID());  // 让结构校验通过。
         tasks.put("sync_only", sync);
 
         assertThatThrownBy(() -> orchestrationService.triggerPipelineRun(dagId, TriggerType.MANUAL))
@@ -439,7 +439,7 @@ class PipelineEndToEndTest {
                 .hasMessageContaining("可执行任务");
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private PipelineTaskEdge pipeEdge(String src, String tgt) {
         PipelineTaskEdge e = new PipelineTaskEdge();

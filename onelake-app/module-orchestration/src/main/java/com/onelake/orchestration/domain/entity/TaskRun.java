@@ -16,10 +16,9 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Per-task run instance. One row per task per {@link JobRun}.
+ * 节点级运行实例。每个 {@link JobRun} 中的每个节点对应一条记录。
  *
- * <p>Status uses the unified RunStatus (C8 — QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED),
- * independent of the aggregate {@code JobRun.status}.
+ * <p>状态使用统一运行状态口径，独立于 {@code JobRun.status} 的聚合状态。
  */
 @Entity
 @Table(name = "task_run", schema = "orchestration")

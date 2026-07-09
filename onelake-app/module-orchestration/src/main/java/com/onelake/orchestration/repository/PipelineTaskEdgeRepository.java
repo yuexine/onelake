@@ -7,6 +7,9 @@ import org.springframework.stereotype.Repository;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 流水线边持久化访问接口。
+ */
 @Repository
 public interface PipelineTaskEdgeRepository extends JpaRepository<PipelineTaskEdge, UUID> {
 

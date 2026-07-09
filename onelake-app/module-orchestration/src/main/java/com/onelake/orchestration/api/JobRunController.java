@@ -18,6 +18,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
+/**
+ * DAG 运行实例查询与取消接口。
+ */
 @RestController
 @RequestMapping("/api/v1/orchestration/runs")
 @RequiredArgsConstructor

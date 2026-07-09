@@ -7,6 +7,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 资源组持久化访问接口。
+ */
 public interface ResourceGroupRepository extends JpaRepository<ResourceGroup, UUID> {
 
     List<ResourceGroup> findByTenantIdIsNullOrderByCodeAsc();

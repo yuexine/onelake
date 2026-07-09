@@ -158,9 +158,9 @@ public class DagsterClient {
     }
 
     /**
-     * Request Dagster to terminate a run.
+     * 请求 Dagster 终止一次运行。
      *
-     * @return true when Dagster accepts the request, or the run is already gone/terminal.
+     * @return Dagster 接受终止请求，或该运行已经不存在/已进入终态时返回 true。
      */
     public boolean terminate(String dagsterRunId, boolean force) {
         if (!StringUtils.hasText(dagsterRunId)) {
@@ -263,5 +263,8 @@ public class DagsterClient {
         return Instant.ofEpochMilli((long) (seconds * 1000));
     }
 
+    /**
+     * Dagster 运行状态查询结果。
+     */
     public record RunStatus(String runId, String status, Instant startedAt, Instant finishedAt) {}
 }

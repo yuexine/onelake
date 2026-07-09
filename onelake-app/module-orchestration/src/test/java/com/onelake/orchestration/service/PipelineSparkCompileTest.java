@@ -28,8 +28,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Spark pipeline tests: inputs are resolved from explicit pipeline edges and Spark tasks
- * compile to executable Dagster run_spark_task_op inputs.
+ * Spark 流水线编译测试。
+ *
+ * <p>验证输入由显式流水线边解析，Spark 节点会编译为可执行的 Dagster
+ * {@code run_spark_task_op} 输入。
  */
 @ExtendWith(MockitoExtension.class)
 class PipelineSparkCompileTest {
@@ -393,7 +395,7 @@ class PipelineSparkCompileTest {
         spark.setTaskType(TaskType.SPARK_SQL);
         spark.setName("spark_empty");
         spark.setEngine("SPARK_SQL");
-        spark.setConfig("{}");  // no sql/script
+        spark.setConfig("{}");  // 缺少 sql/script。
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(spark));
         when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
 
@@ -403,7 +405,7 @@ class PipelineSparkCompileTest {
         assertThat(result.tasks().get(0).errorMessage()).contains("config.sql");
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private Dag pipelineDag() {
         Dag d = new Dag();

@@ -35,9 +35,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * P4-D tests for {@link PipelineService#updatePipelineStatus} status machine.
+ * {@link PipelineService#updatePipelineStatus} 的 P4-D 状态机测试。
  *
- * <p>Verifies DRAFT→VALIDATED→PUBLISHED transitions + Outbox event on PUBLISHED.
+ * <p>验证 DRAFT→VALIDATED→PUBLISHED 流转，以及进入 PUBLISHED 时的 Outbox 事件。
  */
 @ExtendWith(MockitoExtension.class)
 class PipelineStatusMachineTest {
@@ -79,7 +79,7 @@ class PipelineStatusMachineTest {
     void validatedTransitionRequiresValidationPass() {
         Dag dag = dag("DRAFT");
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
-        // compile returns invalid plan → validate() returns invalid result
+        // 编译返回无效计划，validate() 也应返回无效结果。
         lenient().when(compileService.compile(dagId)).thenReturn(invalidCompileResult());
         lenient().when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of());
 
@@ -99,7 +99,7 @@ class PipelineStatusMachineTest {
         Dag updated = service.updatePipelineStatus(dagId, "VALIDATED");
 
         assertThat(updated.getStatus()).isEqualTo("VALIDATED");
-        assertThat(updated.getVersion()).isEqualTo(2); // incremented
+        assertThat(updated.getVersion()).isEqualTo(2); // 已自增。
     }
 
     @Test
@@ -138,7 +138,7 @@ class PipelineStatusMachineTest {
         Dag updated = service.updatePipelineStatus(dagId, "DRAFT");
 
         assertThat(updated.getStatus()).isEqualTo("DRAFT");
-        assertThat(updated.getVersion()).isEqualTo(1); // unchanged
+        assertThat(updated.getVersion()).isEqualTo(1); // 未变化。
     }
 
     @Test

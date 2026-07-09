@@ -38,11 +38,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * P1 tests for {@link PipelineSyncRefTriggerHandler} — C4 (docs/流水线模块重设计方案.md §6.5 / §7 P1).
+ * {@link PipelineSyncRefTriggerHandler} 的 P1 单元测试。
  *
- * <p>Verifies the new orchestration-side handler matches SYNC_REF.target_fqn against the
- * event payload's targetTable and triggers the right pipeline via
- * {@link OrchestrationService#triggerPipelineRun}.
+ * <p>验证编排侧事件处理器会用 {@code SYNC_REF.target_fqn} 匹配事件载荷中的
+ * {@code targetTable}，并通过 {@link OrchestrationService#triggerPipelineRun}
+ * 触发正确流水线。
  */
 @ExtendWith(MockitoExtension.class)
 class PipelineSyncRefTriggerHandlerTest {
@@ -83,7 +83,7 @@ class PipelineSyncRefTriggerHandlerTest {
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
 
         verify(orchestrationService).triggerPipelineRun(dagId, TriggerType.EVENT);
-        // tenant context was set during trigger and restored after
+        // 触发期间会设置租户上下文，触发后必须恢复为空。
         assertThat(TenantContext.getTenantId()).isNull();
     }
 
@@ -116,7 +116,7 @@ class PipelineSyncRefTriggerHandlerTest {
         when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
                 .thenReturn(List.of(
                         syncRefTask(tenantId, UUID.randomUUID(), "iceberg.ods.orders"),
-                        syncRefTask(tenantId, UUID.randomUUID(), "iceberg.ods.users")  // not the one we want
+                        syncRefTask(tenantId, UUID.randomUUID(), "iceberg.ods.users")  // 非目标表，应该跳过。
                 ));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.nonexistent"));
@@ -130,7 +130,7 @@ class PipelineSyncRefTriggerHandlerTest {
         UUID dagId = UUID.randomUUID();
         when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
                 .thenReturn(List.of(syncRefTask(tenantId, dagId, "iceberg.ods.orders")));
-        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", false);  // disabled
+        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", false);  // 已禁用，应该跳过。
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
@@ -144,7 +144,7 @@ class PipelineSyncRefTriggerHandlerTest {
         UUID dagId = UUID.randomUUID();
         when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
                 .thenReturn(List.of(syncRefTask(tenantId, dagId, "iceberg.ods.orders")));
-        Dag dag = pipelineDag(tenantId, dagId, "DRAFT", true);  // not VALIDATED/PUBLISHED
+        Dag dag = pipelineDag(tenantId, dagId, "DRAFT", true);  // 非 VALIDATED/PUBLISHED，应该跳过。
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
@@ -163,7 +163,7 @@ class PipelineSyncRefTriggerHandlerTest {
         doThrow(new BizException(40060, "compile failed"))
                 .when(orchestrationService).triggerPipelineRun(eq(dagId), any());
 
-        // Should not propagate — outbox handler must not break on biz errors
+        // 业务异常不应向外抛出，避免 Outbox 后台消费被单条事件打断。
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
     }
 
@@ -179,7 +179,7 @@ class PipelineSyncRefTriggerHandlerTest {
         verify(taskRepo, never()).findByTenantIdAndTaskType(any(), any());
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private OutboxEvent tableLoadedEvent(UUID tenantId, String targetTable) {
         OutboxEvent e = new OutboxEvent();

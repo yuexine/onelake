@@ -6,6 +6,9 @@ import com.onelake.orchestration.domain.enums.EdgeLayer;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 流水线边接口响应对象。
+ */
 public record PipelineTaskEdgeDTO(
         UUID id,
         UUID dagId,

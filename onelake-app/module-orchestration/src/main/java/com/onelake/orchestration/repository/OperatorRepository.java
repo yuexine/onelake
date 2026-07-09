@@ -9,6 +9,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 算子主表持久化访问接口。
+ */
 public interface OperatorRepository extends JpaRepository<Operator, UUID> {
 
     List<Operator> findByScopeAndTenantIdIsNull(OperatorScope scope);

@@ -1,8 +1,7 @@
 package com.onelake.orchestration.domain.enums;
 
 /**
- * Pipeline lifecycle status (draft→validated→published workflow).
- * See docs/流水线模块重设计方案.md §6.1, §7 P4.
+ * 流水线生命周期状态：草稿 → 已校验 → 已发布。
  */
 public enum PipelineStatus {
     DRAFT,

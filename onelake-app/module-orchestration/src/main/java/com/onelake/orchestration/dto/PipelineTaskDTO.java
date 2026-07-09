@@ -9,7 +9,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Read-side projection of a {@link PipelineTask} for API responses.
+ * {@link PipelineTask} 的接口响应投影。
  */
 public record PipelineTaskDTO(
         UUID id,

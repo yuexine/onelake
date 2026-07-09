@@ -18,10 +18,10 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Pipeline v2 task — first-class entity for one node in a pipeline DAG.
+ * 流水线 V2 节点实体：流水线 DAG 中的一个一等节点。
  *
- * <p>The pipeline mainline is Spark-only: tasks use {@code SPARK_SQL} /
- * {@code PYSPARK} plus structured dataflow config.
+ * <p>当前流水线主路径以 Spark 为执行底座：节点使用 {@code SPARK_SQL} /
+ * {@code PYSPARK}，并通过结构化 {@code config} 描述数据流参数。
  */
 @Entity
 @Table(name = "pipeline_task", schema = "orchestration")
@@ -55,15 +55,14 @@ public class PipelineTask {
     @Column(length = 256)
     private String targetFqn;
 
-    /** Deprecated after the Spark-only cutover. Nullable for all new tasks. */
+    /** Spark-only 切换后的历史兼容字段；新节点允许为空。 */
     private UUID modelId;
 
-    /** SYNC_REF only. Nullable otherwise. */
+    /** 仅 {@code SYNC_REF} 节点使用，其他节点允许为空。 */
     private UUID syncTaskId;
 
     /**
-     * Engine/task-specific config. For Spark pipeline nodes, this holds SQL/script and
-     * structured dataflow parameters.
+     * 引擎或节点类型专属配置。Spark 流水线节点在这里保存 SQL/脚本和结构化数据流参数。
      */
     @Column(columnDefinition = "jsonb", nullable = false)
     @ColumnTransformer(write = "?::jsonb")

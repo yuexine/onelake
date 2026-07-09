@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * L1 + L2 validation result for a pipeline (§6.7 of design doc).
+ * 流水线 L1 + L2 校验结果。
  */
 public record PipelineValidationResult(
         UUID pipelineId,
@@ -21,8 +21,11 @@ public record PipelineValidationResult(
             String errorCode
     ) {}
 
+    /**
+     * 图级校验错误。
+     */
     public record GraphError(
-            String level,        // ERROR | WARN
+            String level,        // 错误级别，取值为 ERROR | WARN。
             String code,
             String message,
             List<String> taskKeys

@@ -13,6 +13,11 @@ import org.hibernate.annotations.ColumnTransformer;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 编排资源组实体。
+ *
+ * <p>资源组定义运行引擎、并发和配额边界，供流水线与算子运行契约校验复用。
+ */
 @Entity
 @Table(name = "resource_group", schema = "orchestration")
 @Getter

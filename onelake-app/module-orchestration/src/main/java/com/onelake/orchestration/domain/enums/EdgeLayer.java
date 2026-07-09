@@ -1,12 +1,12 @@
 package com.onelake.orchestration.domain.enums;
 
 /**
- * Edge layer for pipeline_task_edge.
+ * {@code pipeline_task_edge} 的边类型。
  *
- * <p>See C2 in docs/流水线模块重设计方案.md §6.3.1 (edge contract semantics).
+ * <p>用于区分流水线内部任务依赖和未来跨执行引擎边界。
  * <ul>
- *   <li>{@code PIPELINE} — task-level ordering and data-flow wiring within a Spark pipeline.</li>
- *   <li>{@code CROSS_ENGINE} — reserved for future external runtime boundaries.</li>
+ *   <li>{@code PIPELINE}：Spark 流水线内部的任务顺序与数据流连线。</li>
+ *   <li>{@code CROSS_ENGINE}：预留给未来外部运行时/跨引擎边界。</li>
  * </ul>
  */
 public enum EdgeLayer {

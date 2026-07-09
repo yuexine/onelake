@@ -6,6 +6,9 @@ import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 节点运行实例接口响应对象。
+ */
 public record TaskRunDTO(
         UUID id,
         UUID jobRunId,

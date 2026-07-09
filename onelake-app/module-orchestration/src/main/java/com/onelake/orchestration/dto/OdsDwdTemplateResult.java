@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Result of applying an ODS→DWD template (P3).
+ * ODS→DWD 模板应用结果。
  */
 public record OdsDwdTemplateResult(
         UUID pipelineId,

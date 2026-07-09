@@ -1,11 +1,12 @@
 package com.onelake.orchestration.dto;
 
-import java.util.UUID;
-
+/**
+ * 创建流水线边的请求体。
+ */
 public record PipelineTaskEdgeRequest(
         String sourceKey,
         String targetKey,
-        String edgeLayer,    // PIPELINE | CROSS_ENGINE; defaults to PIPELINE
+        String edgeLayer,    // 边类型：PIPELINE | CROSS_ENGINE；默认 PIPELINE。
         String sourcePort,
         String targetPort,
         String sourceOutput,

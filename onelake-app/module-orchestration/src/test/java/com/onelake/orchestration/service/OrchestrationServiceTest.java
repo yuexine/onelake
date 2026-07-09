@@ -34,7 +34,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
-// Pipeline dependencies used by the unified Spark runtime path.
+// 统一 Spark 运行路径依赖。
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
@@ -93,7 +93,7 @@ class OrchestrationServiceTest {
     @Mock
     private RuntimeContractService runtimeContractService;
 
-    // Pipeline dependencies shared by orchestration runtime tests.
+    // 编排运行测试共享的流水线依赖。
     @Mock private PipelineCompileService pipelineCompileService;
     @Mock private PipelineTaskRepository pipelineTaskRepo;
     @Mock private PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
@@ -199,7 +199,7 @@ class OrchestrationServiceTest {
         assertThat(dto.startedAt()).isEqualTo(startedAt);
         assertThat(dto.finishedAt()).isEqualTo(finishedAt);
         verify(runRepo).save(run);
-        // Runtime status refresh must not write back into modeling-owned tables.
+        // 运行状态刷新不得回写建模模块持有的表。
         verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
     }
 
@@ -289,7 +289,7 @@ class OrchestrationServiceTest {
 
         assertThat(page.getContent().get(0).status()).isEqualTo("SUCCEEDED");
         verify(dagster, never()).getRunStatus("dagster-run-1");
-        // Runtime status reads stay inside orchestration.
+        // 运行状态读取应只停留在编排模块内。
         verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
     }
 

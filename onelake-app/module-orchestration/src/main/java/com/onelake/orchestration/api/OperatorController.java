@@ -24,6 +24,11 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 算子市场与 Manifest 管理接口。
+ *
+ * <p>覆盖算子查询、校验、注册、版本发布、元信息更新和租户安装。
+ */
 @RestController
 @RequestMapping("/api/v1/orchestration/operators")
 @RequiredArgsConstructor

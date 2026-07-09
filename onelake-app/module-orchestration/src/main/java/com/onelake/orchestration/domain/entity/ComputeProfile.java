@@ -12,6 +12,11 @@ import lombok.Setter;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 计算画像实体。
+ *
+ * <p>计算画像挂在资源组下，用于表达一次 Spark 运行可使用的资源规格。
+ */
 @Entity
 @Table(name = "compute_profile", schema = "orchestration")
 @Getter

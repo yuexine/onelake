@@ -16,10 +16,9 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Edge between pipeline tasks.
+ * 流水线节点之间的有向边。
  *
- * <p><b>C2 (docs/流水线模块重设计方案.md §6.3.1)</b>: stores Spark pipeline data-flow
- * edges and their port/asset contracts.
+ * <p>用于保存 Spark 流水线内部的数据流连线，以及端口、资产和触发策略等契约。
  */
 @Entity
 @Table(name = "pipeline_task_edge", schema = "orchestration")

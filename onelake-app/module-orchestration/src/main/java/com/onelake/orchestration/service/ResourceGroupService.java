@@ -29,6 +29,11 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+/**
+ * 编排资源组领域服务。
+ *
+ * <p>负责租户资源组、计算画像和默认 Spark 资源契约的查询与校验。
+ */
 @Service
 @RequiredArgsConstructor
 public class ResourceGroupService {

@@ -54,15 +54,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * P1 tests for {@link OrchestrationService#triggerPipelineRun}.
+ * {@link OrchestrationService#triggerPipelineRun} 的 P1 单元测试。
  *
- * <p>Verifies the new pipeline v2 trigger path:
+ * <p>验证流水线 V2 触发路径：
  * <ul>
- *   <li>Compiles pipeline before launching.</li>
- *   <li>Creates one TaskRun per observable task and initializes status by topology.</li>
- *   <li>Launches Dagster {@code onelake_pipeline_run}.</li>
- *   <li>Publishes {@code pipeline.run.failed} Outbox event on launch failure (C4).</li>
- *   <li><b>Never writes modeling.* schema</b> (cross-schema direct write removed in new path).</li>
+ *   <li>启动前先编译流水线。</li>
+ *   <li>为每个可观测节点创建 TaskRun，并按拓扑初始化状态。</li>
+ *   <li>启动 Dagster {@code onelake_pipeline_run}。</li>
+ *   <li>启动失败时发布 {@code pipeline.run.failed} Outbox 事件（C4）。</li>
+ *   <li><b>不写入 modeling.* schema</b>，新路径已移除跨 schema 直接写入。</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
@@ -95,8 +95,8 @@ class OrchestrationPipelineTriggerTest {
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
 
-        // Simulate DB-generated UUID on save (JobRun/TaskRun.id are DB-generated in production).
-        // lenient() because not every test reaches the save point (e.g. early validation failures).
+        // 模拟数据库保存时生成 UUID，生产环境中 JobRun/TaskRun.id 由数据库生成。
+        // 使用 lenient() 是因为部分用例会在保存前提前失败。
         org.mockito.Mockito.lenient().doAnswer(inv -> {
             JobRun r = inv.getArgument(0);
             if (r.getId() == null) r.setId(UUID.randomUUID());
@@ -126,7 +126,7 @@ class OrchestrationPipelineTriggerTest {
         when(compileService.compile(DAG_ID)).thenReturn(validPlan("t1", "t2", "t3"));
         PipelineTask t1 = task("t1", true);
         PipelineTask t2 = task("t2", true);
-        PipelineTask t3 = task("t3", false); // observation-only node
+        PipelineTask t3 = task("t3", false); // 仅观测节点。
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(t1, t2, t3));
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-abc");
@@ -135,15 +135,15 @@ class OrchestrationPipelineTriggerTest {
 
         assertThat(runId).isNotNull();
 
-        // JobRun saved twice (create + update with dagsterRunId)
+        // JobRun 会保存两次：先创建，再写入 dagsterRunId。
         ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
         verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
         JobRun saved = runCaptor.getValue();
         assertThat(saved.getDagId()).isEqualTo(DAG_ID);
         assertThat(saved.getDagsterRunId()).isEqualTo("dagster-run-abc");
 
-        // TaskRun is created for every valid task so the UI can observe all nodes.
-        // Dagster runConfig is still built only from real executable engine tasks.
+        // 每个有效节点都会创建 TaskRun，保证 UI 能观察整张图。
+        // Dagster runConfig 仍然只包含真正可执行的引擎节点。
         ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
         verify(taskRunRepo, org.mockito.Mockito.atLeast(3)).save(taskRunCaptor.capture());
         List<TaskRun> taskRuns = taskRunCaptor.getAllValues();
@@ -152,7 +152,7 @@ class OrchestrationPipelineTriggerTest {
         assertThat(taskRuns).allSatisfy(tr ->
                 assertThat(tr.getStatus()).isEqualTo(TaskRunStatus.RUNNING));
 
-        // C4 verified: NO modeling.* writes through JdbcTemplate
+        // C4 校验：不通过 JdbcTemplate 写 modeling.* 表。
         verify(jdbc, never()).update(anyString(), any(Object[].class));
         verify(jdbc, never()).update(anyString(), any(Object.class));
     }
@@ -248,7 +248,7 @@ class OrchestrationPipelineTriggerTest {
         assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
                 .isInstanceOf(BizException.class);
 
-        // C4: pipeline.run.failed Outbox event published
+        // C4：应发布 pipeline.run.failed Outbox 事件。
         ArgumentCaptor<String> typeCaptor = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
         verify(outboxPublisher).publish(typeCaptor.capture(), anyString(), payloadCaptor.capture());
@@ -450,7 +450,7 @@ class OrchestrationPipelineTriggerTest {
                 .isInstanceOf(BizException.class);
     }
 
-    // ---------- helpers ----------
+    // ---------- 辅助方法 ----------
 
     private Dag pipelineDag() {
         Dag d = new Dag();

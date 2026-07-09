@@ -48,7 +48,7 @@ public class SyncRunSucceededEventHandler implements DomainEventHandler {
             String tenantIdRaw = p.path("tenantId").asText("");
 
             if (targetTable.isBlank() || tenantIdRaw.isBlank()) {
-                log.warn("SyncRunSucceededEventHandler: missing targetTable/tenantId");
+                log.warn("SyncRunSucceededEventHandler：缺少 targetTable/tenantId");
                 return;
             }
 
@@ -63,19 +63,19 @@ public class SyncRunSucceededEventHandler implements DomainEventHandler {
                     try {
                         orchestrationService.triggerDag(dag.getId(), TriggerType.EVENT);
                         triggered++;
-                        log.info("SyncRunSucceededEventHandler: triggered DAG {} ({}) after {} sync",
-                            dag.getName(), dag.getId(), targetTable);
+                        log.info("SyncRunSucceededEventHandler：表 {} 同步后已触发 DAG {} ({})",
+                            targetTable, dag.getName(), dag.getId());
                     } catch (Exception e) {
-                        log.warn("SyncRunSucceededEventHandler: failed to trigger DAG {}: {}",
+                        log.warn("SyncRunSucceededEventHandler：触发 DAG {} 失败：{}",
                             dag.getName(), e.getMessage());
                     }
                 }
             }
             if (triggered == 0) {
-                log.debug("SyncRunSucceededEventHandler: no DAGs depend on {} — skipping", targetTable);
+                log.debug("SyncRunSucceededEventHandler：没有 DAG 依赖 {}，跳过", targetTable);
             }
         } catch (Exception e) {
-            log.error("SyncRunSucceededEventHandler failed for event {}: {}", event.getId(), e.getMessage(), e);
+            log.error("SyncRunSucceededEventHandler 处理事件 {} 失败：{}", event.getId(), e.getMessage(), e);
             throw new RuntimeException(e);
         }
     }
@@ -99,7 +99,7 @@ public class SyncRunSucceededEventHandler implements DomainEventHandler {
                 }
             }
         } catch (Exception e) {
-            log.warn("dagDependsOn: failed to parse definition for DAG {}: {}", dag.getName(), e.getMessage());
+            log.warn("dagDependsOn：解析 DAG {} 的 definition 失败：{}", dag.getName(), e.getMessage());
         }
         return false;
     }

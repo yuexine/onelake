@@ -17,6 +17,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * 通用 DAG 编排接口。
+ *
+ * <p>该 Controller 面向旧版 DAG 画布和 SQL 工作台发布路径；统一流水线接口在
+ * {@link PipelineController} 中承载。
+ */
 @RestController
 @RequestMapping("/api/v1/orchestration/dags")
 @RequiredArgsConstructor

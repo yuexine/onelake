@@ -55,6 +55,12 @@ public class PipelineTask {
     @Column(length = 256)
     private String targetFqn;
 
+    @Column(length = 64)
+    private String partitionKey;
+
+    @Column(length = 16)
+    private String partitionGrain;
+
     /** Spark-only 切换后的历史兼容字段；新节点允许为空。 */
     private UUID modelId;
 

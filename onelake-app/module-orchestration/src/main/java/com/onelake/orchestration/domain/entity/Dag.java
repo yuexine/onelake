@@ -51,6 +51,7 @@ public class Dag {
     private String engine;           // 当前流水线主路径使用 SPARK。
     private String resourceGroup;    // 例如 spark-default。
     private String computeProfile;   // 例如 spark-small。
+    private String partitionGrain = "DAY";
 
     private Instant createdAt = Instant.now();
 }

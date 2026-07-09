@@ -32,6 +32,7 @@ import com.onelake.orchestration.service.spi.TaskBundleContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -57,6 +58,7 @@ public class OrchestrationService {
 
     private static final String DRAFT_DAGSTER_JOB = "sql_workbench_draft";
     private static final String PIPELINE_JOB_NAME = "onelake_pipeline_run";
+    private static final String PIPELINE_GRAPH_JOB_NAME = "onelake_pipeline_graph_run";
 
     private final DagRepository dagRepo;
     private final JobRunRepository runRepo;
@@ -71,6 +73,15 @@ public class OrchestrationService {
     private final TaskRunRepository taskRunRepo;
     private final SparkRunConfigBuilder sparkBuilder;
     private final ObjectProvider<OutboxPublisher> outboxPublisher;
+
+    @Value("${onelake.orchestration.pipeline-execution-mode:LEGACY}")
+    private String pipelineExecutionMode = "LEGACY";
+
+    @Value("${onelake.orchestration.callback-base-url:}")
+    private String pipelineCallbackBaseUrl = "";
+
+    @Value("${onelake.orchestration.max-parallel:4}")
+    private int pipelineMaxParallel = 4;
 
     @Transactional
     public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
@@ -181,6 +192,8 @@ public class OrchestrationService {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag dag = findTenantDag(dagId);
+        String activeJobName = activePipelineDagsterJob();
+        validatePipelineRuntimeContract(dag, activeJobName);
 
         // 1. Compile
         PipelineCompileResult plan = pipelineCompileService.compile(dagId);
@@ -215,8 +228,8 @@ public class OrchestrationService {
         // DAG so the run instance reflects direct-upstream readiness instead of
         // flattening every node to QUEUED.
         List<PipelineTask> observable = observableTasks(plan, tasks);
-        Map<String, TaskRunStatus> initialStatuses = initialTaskRunStatuses(observable,
-                pipelineTaskEdgeRepo.findByDagId(dagId));
+        List<PipelineTaskEdge> pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
+        Map<String, TaskRunStatus> initialStatuses = initialTaskRunStatuses(observable, pipelineEdges);
         for (PipelineTask t : observable) {
             TaskRun tr = new TaskRun();
             tr.setTenantId(tenantId);
@@ -243,7 +256,7 @@ public class OrchestrationService {
                 dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
                 dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
         );
-        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks);
+        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges);
 
         // 6. Launch Dagster
         try {
@@ -255,7 +268,7 @@ public class OrchestrationService {
                     Map.of("key", "onelake.engine", "value", pipelineEngineTag(tasks))
             );
             String dagsterRunId = dagster.launch(
-                    PIPELINE_JOB_NAME, "onelake", "onelake-loc",
+                    runConfig.jobName(), "onelake", "onelake-loc",
                     runConfig.opConfig(), tags);
             run.setDagsterRunId(dagsterRunId);
             run.setStatus(DagStatus.RUNNING);
@@ -342,8 +355,39 @@ public class OrchestrationService {
         return statuses;
     }
 
-    private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx, List<PipelineTask> tasks) {
+    private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx,
+                                                    List<PipelineTask> tasks,
+                                                    List<PipelineTaskEdge> pipelineEdges) {
+        // GRAPH/LEGACY 只影响 Dagster 作业与 runConfig 形状，C3 仍保持 Java 生成、Dagster 执行。
+        if (isGraphPipelineExecutionMode()) {
+            return sparkBuilder.buildGraphRunConfig(
+                    ctx,
+                    tasks,
+                    pipelineEdges,
+                    pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
+                    Math.max(1, pipelineMaxParallel));
+        }
         return sparkBuilder.build(ctx, tasks);
+    }
+
+    private String activePipelineDagsterJob() {
+        return isGraphPipelineExecutionMode() ? PIPELINE_GRAPH_JOB_NAME : PIPELINE_JOB_NAME;
+    }
+
+    private void validatePipelineRuntimeContract(Dag dag, String activeJobName) {
+        // 先校验当前开关真正会 launch 的 job，避免 GRAPH job 缺失时先写入 JobRun/TaskRun 再失败。
+        @SuppressWarnings("unchecked")
+        Map<String, Object> definition = dag.getDefinition() == null || dag.getDefinition().isBlank()
+                ? Map.of()
+                : JsonUtil.fromJson(dag.getDefinition(), Map.class);
+        runtimeContractService.launchBlockedReason(activeJobName, definition)
+                .ifPresent(reason -> {
+                    throw new BizException(40012, reason);
+                });
+    }
+
+    private boolean isGraphPipelineExecutionMode() {
+        return "GRAPH".equalsIgnoreCase(pipelineExecutionMode);
     }
 
     private String pipelineEngineTag(List<PipelineTask> tasks) {
@@ -490,6 +534,10 @@ public class OrchestrationService {
      * terminal state so the UI and Outbox do not stay stuck at QUEUED.
      */
     private void syncTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
+        if (isGraphPipelineExecutionMode()) {
+            compensateGraphTaskRunsFromTerminalRun(run, terminalStatus);
+            return;
+        }
         TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
                 ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
@@ -517,6 +565,33 @@ public class OrchestrationService {
             }
             if (mapped == TaskRunStatus.SUCCEEDED) {
                 enrichTaskRunSummary(task, tr);
+            }
+            taskRunRepo.save(tr);
+        }
+    }
+
+    private void compensateGraphTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
+        TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
+                ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+        Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
+        if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
+            propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
+        }
+        for (TaskRun tr : taskRuns) {
+            if (isTerminalTaskRunStatus(tr.getStatus())) {
+                continue;
+            }
+            PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(run.getDagId(), tr.getTaskKey()).orElse(null);
+            tr.setStatus(mapped);
+            if (tr.getStartedAt() == null) {
+                tr.setStartedAt(run.getStartedAt());
+            }
+            tr.setFinishedAt(run.getFinishedAt() == null ? Instant.now() : run.getFinishedAt());
+            if (mapped == TaskRunStatus.SUCCEEDED) {
+                enrichTaskRunSummary(task, tr);
+            } else if (!StringUtils.hasText(tr.getErrorMsg())) {
+                tr.setErrorMsg("Dagster graph run reported " + terminalStatus.name() + " before node callback completed");
             }
             taskRunRepo.save(tr);
         }
@@ -679,7 +754,8 @@ public class OrchestrationService {
             Dag dag = dagRepo.findById(run.getDagId()).orElse(null);
             if (dag == null) return;
             // Only v2 pipeline job
-            if (!PIPELINE_JOB_NAME.equals(dag.getDagsterJob())) return;
+            if (!PIPELINE_JOB_NAME.equals(dag.getDagsterJob())
+                    && !PIPELINE_GRAPH_JOB_NAME.equals(dag.getDagsterJob())) return;
 
             boolean succeeded = terminalStatus == DagStatus.SUCCEEDED;
             // 1. pipeline.task.loaded for each executable task_run in this job

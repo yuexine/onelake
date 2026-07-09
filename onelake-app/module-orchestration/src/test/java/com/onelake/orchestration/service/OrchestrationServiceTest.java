@@ -5,10 +5,15 @@ import com.onelake.common.exception.BizException;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
+import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
+import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -22,12 +27,14 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 // Pipeline dependencies used by the unified Spark runtime path.
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
+import com.onelake.orchestration.service.spi.DagsterRunConfig;
 import com.onelake.orchestration.service.spi.SparkRunConfigBuilder;
 
 import java.sql.Timestamp;
@@ -41,6 +48,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -89,6 +98,7 @@ class OrchestrationServiceTest {
     void setUp() {
         TenantContext.setTenantId(TENANT_ID);
         lenient().when(runtimeContractService.triggerBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
+        lenient().when(runtimeContractService.launchBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
             runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
             sparkBuilder, outboxPublisher);
@@ -338,6 +348,78 @@ class OrchestrationServiceTest {
         verifyNoInteractions(dagster);
     }
 
+    @Test
+    void triggerPipelineRunUsesLegacyJobByDefault() {
+        List<DagStatus> statuses = captureRunStatuses();
+        Dag dag = dag();
+        dag.setDagsterJob("onelake_pipeline_run");
+        PipelineTask task = pipelineTask("spark_node");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
+        when(sparkBuilder.build(any(), anyList()))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
+                .thenReturn("dagster-legacy");
+
+        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+
+        assertThat(runId).isEqualTo(RUN_ID);
+        assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
+        verify(sparkBuilder).build(any(), anyList());
+        verify(sparkBuilder, never()).buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt());
+        verify(dagster).launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList());
+    }
+
+    @Test
+    void triggerPipelineRunUsesGraphJobWhenConfigured() {
+        List<DagStatus> statuses = captureRunStatuses();
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        ReflectionTestUtils.setField(service, "pipelineCallbackBaseUrl", "http://localhost:8080");
+        ReflectionTestUtils.setField(service, "pipelineMaxParallel", 8);
+        Dag dag = dag();
+        dag.setDagsterJob("onelake_pipeline_run");
+        PipelineTask task = pipelineTask("spark_node");
+        PipelineTaskEdge edge = pipelineEdge("source", "spark_node");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8)))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
+                .thenReturn("dagster-graph");
+
+        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+
+        assertThat(runId).isEqualTo(RUN_ID);
+        assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
+        verify(sparkBuilder, never()).build(any(), anyList());
+        verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8));
+        verify(dagster).launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList());
+    }
+
+    @Test
+    void triggerPipelineRunValidatesGraphJobBeforeCreatingRun() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        dag.setDagsterJob("onelake_pipeline_run");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runtimeContractService.launchBlockedReason(eq("onelake_pipeline_graph_run"), anyMap()))
+                .thenReturn(Optional.of("Dagster repository 未暴露作业: onelake_pipeline_graph_run"));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("onelake_pipeline_graph_run");
+
+        verify(pipelineCompileService, never()).compile(any());
+        verifyNoInteractions(runRepo);
+        verifyNoInteractions(dagster);
+    }
+
     private Dag dag() {
         Dag dag = new Dag();
         dag.setId(DAG_ID);
@@ -360,6 +442,41 @@ class OrchestrationServiceTest {
         run.setStartedAt(Instant.parse("2026-06-23T01:02:03Z"));
         run.setFinishedAt(Instant.parse("2026-06-23T01:03:04Z"));
         return run;
+    }
+
+    private PipelineTask pipelineTask(String key) {
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(TENANT_ID);
+        task.setDagId(DAG_ID);
+        task.setTaskKey(key);
+        task.setName(key);
+        task.setTaskType(TaskType.SPARK_SQL);
+        task.setEngine("SPARK_SQL");
+        task.setTargetFqn("onelake.dwd." + key);
+        task.setExecutable(true);
+        task.setConfig("{\"sql\":\"SELECT 1\"}");
+        return task;
+    }
+
+    private PipelineCompileResult pipelinePlan(PipelineTask task) {
+        return new PipelineCompileResult(
+                DAG_ID,
+                "pipeline_" + DAG_ID,
+                TENANT_ID,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                        true, task.getTargetFqn(), null)),
+                true,
+                List.of());
+    }
+
+    private PipelineTaskEdge pipelineEdge(String sourceKey, String targetKey) {
+        PipelineTaskEdge edge = new PipelineTaskEdge();
+        edge.setSourceKey(sourceKey);
+        edge.setTargetKey(targetKey);
+        edge.setEdgeLayer(EdgeLayer.PIPELINE);
+        return edge;
     }
 
     private List<DagStatus> captureRunStatuses() {

@@ -27,19 +27,17 @@ class RuntimeContractServiceTest {
     void listRuntimeContractsMarksSparkReady() {
         RuntimeContractService service = new RuntimeContractService(dagster);
         when(dagster.listJobs("onelake", "onelake-loc"))
-            .thenReturn(List.of("onelake_pipeline_run"));
+            .thenReturn(List.of("onelake_pipeline_run", "onelake_pipeline_graph_run"));
 
         List<RuntimeContractDTO> result = service.listRuntimeContracts();
 
-        assertThat(result).extracting(RuntimeContractDTO::compileTarget)
-            .containsExactly("SPARK");
+        assertThat(result).extracting(RuntimeContractDTO::dagsterJob)
+            .containsExactly("onelake_pipeline_run", "onelake_pipeline_graph_run");
 
-        assertThat(result).filteredOn(c -> c.compileTarget().equals("SPARK"))
-            .singleElement()
-            .satisfies(c -> {
+        assertThat(result).allSatisfy(c -> {
                 assertThat(c.status()).isEqualTo("READY");
+                assertThat(c.compileTarget()).isEqualTo("SPARK");
                 assertThat(c.graphExecutionSupported()).isTrue();
-                assertThat(c.dagsterJob()).isEqualTo("onelake_pipeline_run");
             });
     }
 
@@ -54,6 +52,16 @@ class RuntimeContractServiceTest {
     }
 
     @Test
+    void triggerBlockedReasonAllowsSparkWhenGraphPipelineJobIsUsed() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+
+        Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
+            Map.of("compileTarget", "SPARK", "engine", "SPARK"));
+
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
     void triggerBlockedReasonRejectsNonSparkOnPipelineJob() {
         RuntimeContractService service = new RuntimeContractService(dagster);
 
@@ -62,5 +70,41 @@ class RuntimeContractServiceTest {
 
         assertThat(reason).isPresent();
         assertThat(reason.get()).contains("Spark");
+    }
+
+    @Test
+    void triggerBlockedReasonRejectsNonSparkOnGraphPipelineJob() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+
+        Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
+            Map.of("compileTarget", "LEGACY", "engine", "LEGACY"));
+
+        assertThat(reason).isPresent();
+        assertThat(reason.get()).contains("Spark");
+    }
+
+    @Test
+    void launchBlockedReasonAllowsGraphPipelineJobWhenAvailable() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+        when(dagster.listJobs("onelake", "onelake-loc"))
+            .thenReturn(List.of("onelake_pipeline_run", "onelake_pipeline_graph_run"));
+
+        Optional<String> reason = service.launchBlockedReason("onelake_pipeline_graph_run",
+            Map.of("compileTarget", "SPARK", "engine", "SPARK"));
+
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
+    void launchBlockedReasonRejectsGraphPipelineJobWhenMissingFromDagster() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+        when(dagster.listJobs("onelake", "onelake-loc"))
+            .thenReturn(List.of("onelake_pipeline_run"));
+
+        Optional<String> reason = service.launchBlockedReason("onelake_pipeline_graph_run",
+            Map.of("compileTarget", "SPARK", "engine", "SPARK"));
+
+        assertThat(reason).isPresent();
+        assertThat(reason.get()).contains("onelake_pipeline_graph_run");
     }
 }

@@ -1,6 +1,8 @@
 package com.onelake.orchestration.service.spi;
 
 import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.PipelineCompileResult.TaskCompileResult;
@@ -31,6 +33,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
     private static final String JOB_NAME = "onelake_pipeline_run";
     private static final String OP_NAME = "run_spark_task_op";
+    private static final String GRAPH_JOB_NAME = "onelake_pipeline_graph_run";
+    private static final String GRAPH_OP_NAME = "run_pipeline_graph_op";
 
     @Override
     public EngineType engine() {
@@ -63,6 +67,57 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("resource_profile", defaultSparkProfile());
         return new DagsterRunConfig(JOB_NAME, Map.of(
                 "ops", Map.of(OP_NAME, Map.of("config", opConfig))
+        ));
+    }
+
+    public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
+                                                List<PipelineTask> tasks,
+                                                List<PipelineTaskEdge> pipelineEdges,
+                                                String callbackBaseUrl,
+                                                int maxParallel) {
+        // GRAPH 模式把可观测节点和 PIPELINE 边完整交给 Dagster op 内置调度器，旧 build(...) 保持扁平 tasks[] 回退。
+        PipelineCompileResult plan = ctx.compileResult();
+        Map<String, PipelineTask> taskByKey = tasks.stream()
+                .collect(java.util.stream.Collectors.toMap(PipelineTask::getTaskKey, t -> t, (a, b) -> a,
+                        LinkedHashMap::new));
+        List<Map<String, Object>> nodes = new ArrayList<>();
+        for (TaskCompileResult result : plan.tasks()) {
+            PipelineTask task = taskByKey.get(result.taskKey());
+            if (task == null) {
+                continue;
+            }
+            Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(task, null));
+            node.put("max_retries", resolveMaxRetries(task));
+            nodes.add(node);
+        }
+
+        List<Map<String, Object>> edges = new ArrayList<>();
+        List<PipelineTaskEdge> safeEdges = pipelineEdges == null ? List.of() : pipelineEdges;
+        for (PipelineTaskEdge edge : safeEdges) {
+            if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
+                continue;
+            }
+            if (!taskByKey.containsKey(edge.getSourceKey()) || !taskByKey.containsKey(edge.getTargetKey())) {
+                continue;
+            }
+            Map<String, Object> edgeConfig = new LinkedHashMap<>();
+            edgeConfig.put("source_key", edge.getSourceKey());
+            edgeConfig.put("target_key", edge.getTargetKey());
+            edges.add(edgeConfig);
+        }
+
+        Map<String, Object> opConfig = new LinkedHashMap<>();
+        opConfig.put("pipeline_id", ctx.pipelineId().toString());
+        opConfig.put("run_id", ctx.runId().toString());
+        opConfig.put("tenant_id", ctx.tenantId().toString());
+        opConfig.put("iceberg_catalog", "onelake");
+        opConfig.put("execution_mode", "GRAPH");
+        opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
+        opConfig.put("max_parallel", Math.max(1, maxParallel));
+        opConfig.put("nodes", nodes);
+        opConfig.put("edges", edges);
+        return new DagsterRunConfig(GRAPH_JOB_NAME, Map.of(
+                "ops", Map.of(GRAPH_OP_NAME, Map.of("config", opConfig))
         ));
     }
 
@@ -106,6 +161,34 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         putIfText(node, profile, "num_executors");
         putIfText(node, profile, "driver_memory");
         return profile;
+    }
+
+    private static int resolveMaxRetries(PipelineTask task) {
+        // 节点级重试参数先从任务 config 读取；不存在时保持 0，兼容旧流水线定义。
+        JsonNode cfg = parseSafe(task.getConfig());
+        int retries = intField(cfg, "max_retries");
+        if (retries < 0) {
+            retries = intField(cfg, "maxRetries");
+        }
+        return Math.max(0, retries);
+    }
+
+    private static int intField(JsonNode node, String field) {
+        if (node == null) {
+            return -1;
+        }
+        JsonNode value = node.path(field);
+        if (value.isInt() || value.isLong()) {
+            return value.asInt(-1);
+        }
+        if (value.isTextual()) {
+            try {
+                return Integer.parseInt(value.asText());
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
     }
 
     private static Map<String, Object> defaultSparkProfile() {

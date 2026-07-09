@@ -20,10 +20,13 @@ public class RuntimeContractService {
 
     private static final String REPOSITORY = "onelake";
     private static final String LOCATION = "onelake-loc";
+    private static final Set<String> PIPELINE_JOBS = Set.of("onelake_pipeline_run", "onelake_pipeline_graph_run");
 
     private static final List<RuntimeSpec> SPECS = List.of(
         new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_run", true, true,
-            "SPARK 已接入 Dagster onelake_pipeline_run / run_spark_task_op")
+            "SPARK 已接入 Dagster onelake_pipeline_run / run_spark_task_op"),
+        new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_graph_run", true, true,
+            "SPARK 已接入 Dagster onelake_pipeline_graph_run / run_pipeline_graph_op")
     );
 
     private final DagsterClient dagster;
@@ -41,7 +44,7 @@ public class RuntimeContractService {
                 text(safeDefinition.get("compileTarget")), text(safeDefinition.get("engine"))));
         if (StringUtils.hasText(requestedTarget)
                 && !"SPARK".equals(requestedTarget)
-                && "onelake_pipeline_run".equals(dagsterJob)) {
+                && PIPELINE_JOBS.contains(dagsterJob)) {
             return Optional.of("流水线运行时已收敛为 Spark 引擎，不再支持 " + requestedTarget);
         }
         RuntimeSpec spec = specFor(dagsterJob, safeDefinition).orElse(null);
@@ -52,6 +55,17 @@ public class RuntimeContractService {
             return Optional.empty();
         }
         return Optional.of(spec.blockedReason());
+    }
+
+    public Optional<String> launchBlockedReason(String dagsterJob, Map<String, Object> definition) {
+        // 真正触发前额外确认 Dagster 当前 code location 暴露该 job，避免先落库再在 launch 阶段失败。
+        Optional<String> contractReason = triggerBlockedReason(dagsterJob, definition);
+        if (contractReason.isPresent()) {
+            return contractReason;
+        }
+        return availableDagsterJobs().contains(dagsterJob)
+                ? Optional.empty()
+                : Optional.of("Dagster repository 未暴露作业: " + dagsterJob);
     }
 
     private Set<String> availableDagsterJobs() {
@@ -88,6 +102,13 @@ public class RuntimeContractService {
     }
 
     private Optional<RuntimeSpec> specFor(String dagsterJob, Map<String, Object> definition) {
+        // 触发前校验必须优先尊重调用方实际选择的 Dagster job；compileTarget 只作为旧数据的兜底推断。
+        Optional<RuntimeSpec> byJob = SPECS.stream()
+            .filter(spec -> spec.dagsterJob().equals(dagsterJob))
+            .findFirst();
+        if (byJob.isPresent()) {
+            return byJob;
+        }
         String compileTarget = firstText(text(definition.get("compileTarget")), text(definition.get("engine")));
         if (!StringUtils.hasText(compileTarget) && definition.get("operatorGraph") instanceof Map<?, ?> rawGraph) {
             compileTarget = firstText(text(rawGraph.get("compileTarget")), text(rawGraph.get("engine")));
@@ -101,12 +122,7 @@ public class RuntimeContractService {
                 return byTarget;
             }
         }
-        if (!StringUtils.hasText(dagsterJob)) {
-            return Optional.empty();
-        }
-        return SPECS.stream()
-            .filter(spec -> spec.dagsterJob().equals(dagsterJob))
-            .findFirst();
+        return Optional.empty();
     }
 
     private String normalizeTarget(String value) {

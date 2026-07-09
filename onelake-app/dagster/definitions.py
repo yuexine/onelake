@@ -1,7 +1,11 @@
 import os
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
-from dagster import Array, Field, Shape, String, job, op, repository
+from dagster import Array, AssetMaterialization, Field, Int, Shape, String, job, op, repository
 
 @op(
     name="reconcile_sync_task_schedule",
@@ -34,6 +38,93 @@ def onelake_sync_task_schedule_reconcile():
 # ---------------------------------------------------------------------------
 # Spark task op — real execution path for unified pipeline SPARK_SQL / PYSPARK tasks.
 # ---------------------------------------------------------------------------
+
+
+def _default_resource_profile():
+    return {
+        "executor_memory": "2g",
+        "executor_cores": "2",
+        "num_executors": "2",
+        "driver_memory": "1g",
+    }
+
+
+def _build_spark_submit(node, iceberg_catalog, spark_master):
+    # 旧单 op 路径和新图执行路径共用同一段 spark-submit 组装，避免 Iceberg/S3/资源参数漂移。
+    import tempfile
+
+    task_type = node["task_type"]
+    resource = node.get("resource_profile") or _default_resource_profile()
+    temp_paths = []
+    if task_type in ("PYSPARK", "QUALITY_GATE"):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(node["sql_or_script"])
+            script_path = f.name
+        temp_paths.append(script_path)
+        app_args = []
+    else:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as sql_file:
+            sql_file.write(node["sql_or_script"])
+            sql_path = sql_file.name
+        temp_paths.append(sql_path)
+        wrapper = """
+import re
+import sys
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("onelake-spark-sql").getOrCreate()
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    sql_text = f.read()
+statements = [s.strip() for s in sql_text.split(";") if s.strip()]
+for statement in statements:
+    df = spark.sql(statement)
+    if re.match(r"^\\s*(select|show|describe|explain)\\b", statement, re.IGNORECASE):
+        df.show(20, truncate=False)
+spark.stop()
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(wrapper)
+            script_path = f.name
+        temp_paths.append(script_path)
+        app_args = [sql_path]
+
+    cmd = [
+        "spark-submit",
+        "--master", spark_master,
+        "--executor-memory", resource["executor_memory"],
+        "--executor-cores", resource["executor_cores"],
+        "--num-executors", resource["num_executors"],
+        "--driver-memory", resource["driver_memory"],
+        "--packages",
+        "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2,"
+        "org.apache.iceberg:iceberg-aws-bundle:1.5.2,"
+        "org.apache.hadoop:hadoop-aws:3.3.4,"
+        "org.postgresql:postgresql:42.7.3,"
+        "com.mysql:mysql-connector-j:8.4.0",
+        "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+        "--conf", f"spark.sql.defaultCatalog={iceberg_catalog}",
+        "--conf", "spark.sql.catalog.onelake=org.apache.iceberg.spark.SparkCatalog",
+        "--conf", "spark.sql.catalog.onelake.type=hive",
+        "--conf", "spark.sql.catalog.onelake.uri=thrift://hive-metastore:9083",
+        "--conf", "spark.sql.catalog.onelake.warehouse=s3a://onelake/warehouse",
+        "--conf", "spark.sql.catalog.onelake.io-impl=org.apache.iceberg.aws.s3.S3FileIO",
+        "--conf", "spark.sql.catalog.onelake.s3.endpoint=http://minio:9000",
+        "--conf", "spark.sql.catalog.onelake.s3.path-style-access=true",
+        "--conf", "spark.sql.catalog.onelake.s3.access-key-id=minio",
+        "--conf", "spark.sql.catalog.onelake.s3.secret-access-key=minio12345",
+        "--conf", "spark.sql.catalog.onelake.client.region=us-east-1",
+        "--conf", "spark.hadoop.fs.s3a.endpoint=http://minio:9000",
+        "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
+        "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
+        "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "--conf", "spark.executorEnv.AWS_ACCESS_KEY_ID=minio",
+        "--conf", "spark.executorEnv.AWS_SECRET_ACCESS_KEY=minio12345",
+        "--conf", "spark.yarn.appMasterEnv.AWS_ACCESS_KEY_ID=minio",
+        "--conf", "spark.yarn.appMasterEnv.AWS_SECRET_ACCESS_KEY=minio12345",
+        script_path,
+    ]
+    cmd.extend(app_args)
+    return cmd, temp_paths
 
 
 @op(
@@ -90,9 +181,6 @@ def run_spark_task_op(context):
     The unified pipeline mainline is Spark-only; upstream readiness is enforced by
     orchestration.task_run and pipeline_task_edge before this op is launched.
     """
-    import tempfile
-    import os
-
     cfg = context.op_config
     iceberg_catalog = cfg["iceberg_catalog"]
     spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
@@ -118,77 +206,10 @@ def run_spark_task_op(context):
             task_type, resource, task.get("from_tables", []), task.get("target_fqn", ""),
         )
 
-        temp_paths = []
+        node = dict(task)
+        node["resource_profile"] = resource
+        cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
         try:
-            if task_type in ("PYSPARK", "QUALITY_GATE"):
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-                    f.write(task["sql_or_script"])
-                    script_path = f.name
-                temp_paths.append(script_path)
-                app_args = []
-            else:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as sql_file:
-                    sql_file.write(task["sql_or_script"])
-                    sql_path = sql_file.name
-                temp_paths.append(sql_path)
-                wrapper = """
-import re
-import sys
-from pyspark.sql import SparkSession
-
-spark = SparkSession.builder.appName("onelake-spark-sql").getOrCreate()
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    sql_text = f.read()
-statements = [s.strip() for s in sql_text.split(";") if s.strip()]
-for statement in statements:
-    df = spark.sql(statement)
-    if re.match(r"^\\s*(select|show|describe|explain)\\b", statement, re.IGNORECASE):
-        df.show(20, truncate=False)
-spark.stop()
-"""
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-                    f.write(wrapper)
-                    script_path = f.name
-                temp_paths.append(script_path)
-                app_args = [sql_path]
-
-            cmd = [
-                "spark-submit",
-                "--master", spark_master,
-                "--executor-memory", resource["executor_memory"],
-                "--executor-cores", resource["executor_cores"],
-                "--num-executors", resource["num_executors"],
-                "--driver-memory", resource["driver_memory"],
-                "--packages",
-                "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2,"
-                "org.apache.iceberg:iceberg-aws-bundle:1.5.2,"
-                "org.apache.hadoop:hadoop-aws:3.3.4,"
-                "org.postgresql:postgresql:42.7.3,"
-                "com.mysql:mysql-connector-j:8.4.0",
-                "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-                "--conf", f"spark.sql.defaultCatalog={iceberg_catalog}",
-                "--conf", "spark.sql.catalog.onelake=org.apache.iceberg.spark.SparkCatalog",
-                "--conf", "spark.sql.catalog.onelake.type=hive",
-                "--conf", "spark.sql.catalog.onelake.uri=thrift://hive-metastore:9083",
-                "--conf", "spark.sql.catalog.onelake.warehouse=s3a://onelake/warehouse",
-                "--conf", "spark.sql.catalog.onelake.io-impl=org.apache.iceberg.aws.s3.S3FileIO",
-                "--conf", "spark.sql.catalog.onelake.s3.endpoint=http://minio:9000",
-                "--conf", "spark.sql.catalog.onelake.s3.path-style-access=true",
-                "--conf", "spark.sql.catalog.onelake.s3.access-key-id=minio",
-                "--conf", "spark.sql.catalog.onelake.s3.secret-access-key=minio12345",
-                "--conf", "spark.sql.catalog.onelake.client.region=us-east-1",
-                "--conf", "spark.hadoop.fs.s3a.endpoint=http://minio:9000",
-                "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
-                "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
-                "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
-                "--conf", "spark.executorEnv.AWS_ACCESS_KEY_ID=minio",
-                "--conf", "spark.executorEnv.AWS_SECRET_ACCESS_KEY=minio12345",
-                "--conf", "spark.yarn.appMasterEnv.AWS_ACCESS_KEY_ID=minio",
-                "--conf", "spark.yarn.appMasterEnv.AWS_SECRET_ACCESS_KEY=minio12345",
-                script_path,
-            ]
-            cmd.extend(app_args)
-
             context.log.info("spark-submit cmd: %s", " ".join(cmd))
             result = subprocess.run(
                 cmd,
@@ -230,6 +251,274 @@ spark.stop()
 def onelake_pipeline_run():
     """Pipeline v2 job: Spark-only pipeline execution."""
     run_spark_task_op()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline graph op — fixed Dagster job with in-op DAG scheduling.
+# ---------------------------------------------------------------------------
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _tail(value, max_length):
+    if value is None or len(value) <= max_length:
+        return value
+    return value[-max_length:]
+
+
+def _table_artifact(node):
+    fqn = node.get("target_fqn") or ""
+    return f"table:{fqn}" if fqn else ""
+
+
+def _callback(base_url, run_id, task_key, payload, log):
+    # 1.3 会把这里替换为真实 HTTP 回调；本步骤只保留不可失败的占位日志。
+    log.info(
+        "callback placeholder base_url=%s run=%s task=%s payload=%s",
+        base_url or "",
+        run_id,
+        task_key,
+        payload,
+    )
+
+
+def _upload_log(tenant_id, run_id, task_key, content, log):
+    # 1.4 会把这里替换为 MinIO 写入；当前返回空引用，保证调度语义先闭环。
+    log.info(
+        "log upload placeholder tenant=%s run=%s task=%s bytes=%s",
+        tenant_id,
+        run_id,
+        task_key,
+        len(content or ""),
+    )
+    return ""
+
+
+@op(
+    name="run_pipeline_graph_op",
+    config_schema={
+        "pipeline_id": Field(String),
+        "run_id": Field(String),
+        "tenant_id": Field(String),
+        "iceberg_catalog": Field(String, default_value="onelake"),
+        "execution_mode": Field(String, default_value="GRAPH"),
+        "callback_base_url": Field(String, default_value=""),
+        "max_parallel": Field(Int, default_value=4),
+        "nodes": Field(
+            Array(Shape({
+                "task_key": Field(String),
+                "task_type": Field(String),
+                "sql_or_script": Field(String, default_value=""),
+                "target_fqn": Field(String, default_value=""),
+                "from_tables": Field(Array(String), default_value=[]),
+                "resource_profile": Field(
+                    Shape({
+                        "executor_memory": Field(String, default_value="2g"),
+                        "executor_cores": Field(String, default_value="2"),
+                        "num_executors": Field(String, default_value="2"),
+                        "driver_memory": Field(String, default_value="1g"),
+                    }),
+                    is_required=False,
+                ),
+                "max_retries": Field(Int, default_value=0),
+            })),
+            default_value=[],
+        ),
+        "edges": Field(
+            Array(Shape({
+                "source_key": Field(String),
+                "target_key": Field(String),
+            })),
+            default_value=[],
+        ),
+    },
+)
+def run_pipeline_graph_op(context):
+    cfg = context.op_config
+    base_url = cfg.get("callback_base_url", "")
+    run_id = cfg["run_id"]
+    tenant_id = cfg["tenant_id"]
+    iceberg_catalog = cfg.get("iceberg_catalog", "onelake")
+    spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
+    max_parallel = max(1, int(cfg.get("max_parallel") or 1))
+    nodes = {node["task_key"]: node for node in cfg.get("nodes", [])}
+    # 运行时 runConfig 描述任意 DAG；Dagster 仍只有一个固定 op，拓扑调度在 op 内完成。
+    downstream = {key: [] for key in nodes}
+    indegree = {key: 0 for key in nodes}
+    for edge in cfg.get("edges", []):
+        source = edge["source_key"]
+        target = edge["target_key"]
+        if source in nodes and target in nodes:
+            downstream[source].append(target)
+            indegree[target] += 1
+
+    status = {key: "QUEUED" for key in nodes}
+    lock = threading.Lock()
+
+    def materialize_success(task_key):
+        node = nodes[task_key]
+        context.log_event(AssetMaterialization(
+            asset_key=node.get("target_fqn") or task_key,
+            description=f"pipeline node {task_key}",
+        ))
+
+    def mark_downstream_failed(root_key):
+        # 失败节点只短路仍未开始的下游；已经运行的并发分支继续完成。
+        stack = list(downstream.get(root_key, []))
+        while stack:
+            task_key = stack.pop()
+            with lock:
+                if status.get(task_key) != "QUEUED":
+                    continue
+                status[task_key] = "UPSTREAM_FAILED"
+            message = f"upstream failed: {root_key}"
+            log_ref = _upload_log(tenant_id, run_id, task_key, message, context.log)
+            _callback(base_url, run_id, task_key, {
+                "status": "UPSTREAM_FAILED",
+                "errorMsg": message,
+                "finishedAt": _now(),
+                "logRef": log_ref,
+            }, context.log)
+            stack.extend(downstream.get(task_key, []))
+
+    def run_node(task_key):
+        node = nodes[task_key]
+        task_type = node["task_type"]
+        _callback(base_url, run_id, task_key, {
+            "status": "RUNNING",
+            "startedAt": _now(),
+            "dagsterStepKey": task_key,
+        }, context.log)
+
+        if task_type == "SYNC_REF":
+            log_ref = _upload_log(tenant_id, run_id, task_key, "SYNC_REF completed", context.log)
+            materialize_success(task_key)
+            _callback(base_url, run_id, task_key, {
+                "status": "SUCCEEDED",
+                "finishedAt": _now(),
+                "artifactPath": _table_artifact(node),
+                "logRef": log_ref,
+            }, context.log)
+            return "SUCCEEDED"
+
+        attempts = max(1, int(node.get("max_retries", 0)) + 1)
+        last_log = ""
+        last_log_ref = ""
+        for attempt in range(1, attempts + 1):
+            temp_paths = []
+            try:
+                cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
+                context.log.info("[%s] attempt %s spark-submit cmd: %s", task_key, attempt, " ".join(cmd))
+                result = subprocess.run(
+                    cmd,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                last_log = (result.stdout or "") + "\n" + (result.stderr or "")
+                if result.stdout:
+                    context.log.info(result.stdout)
+                if result.stderr:
+                    context.log.warning(result.stderr)
+                last_log_ref = _upload_log(tenant_id, run_id, task_key, last_log, context.log)
+                if result.returncode == 0:
+                    materialize_success(task_key)
+                    _callback(base_url, run_id, task_key, {
+                        "status": "SUCCEEDED",
+                        "finishedAt": _now(),
+                        "artifactPath": _table_artifact(node),
+                        "logRef": last_log_ref,
+                        "attempt": attempt,
+                    }, context.log)
+                    return "SUCCEEDED"
+                context.log.warning(
+                    "[%s] attempt %s failed with exit code %s",
+                    task_key,
+                    attempt,
+                    result.returncode,
+                )
+            except Exception as exc:
+                last_log = str(exc)
+                last_log_ref = _upload_log(tenant_id, run_id, task_key, last_log, context.log)
+                context.log.warning("[%s] attempt %s failed: %s", task_key, attempt, exc)
+            finally:
+                for path in temp_paths:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+        _callback(base_url, run_id, task_key, {
+            "status": "FAILED",
+            "finishedAt": _now(),
+            "errorMsg": _tail(last_log, 3900),
+            "logRef": last_log_ref,
+            "attempt": attempts,
+        }, context.log)
+        return "FAILED"
+
+    failures = []
+    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        futures = {}
+
+        def submit_ready():
+            # 就绪即调度：入度归零的 QUEUED 节点立即进入线程池，受 max_parallel 限流。
+            with lock:
+                ready = [
+                    key for key in nodes
+                    if status[key] == "QUEUED" and indegree[key] == 0 and key not in futures
+                ]
+                for key in ready:
+                    status[key] = "RUNNING"
+                    futures[key] = pool.submit(run_node, key)
+
+        submit_ready()
+        while futures:
+            done_key = None
+            for key, future in list(futures.items()):
+                if future.done():
+                    done_key = key
+                    break
+            if done_key is None:
+                time.sleep(0.05)
+                continue
+
+            future = futures.pop(done_key)
+            result = future.result()
+            with lock:
+                status[done_key] = result
+                if result == "SUCCEEDED":
+                    for child in downstream.get(done_key, []):
+                        indegree[child] -= 1
+                else:
+                    failures.append(done_key)
+            if result != "SUCCEEDED":
+                mark_downstream_failed(done_key)
+            submit_ready()
+
+    blocked = [key for key, value in status.items() if value == "QUEUED"]
+    for task_key in blocked:
+        status[task_key] = "FAILED"
+        message = "pipeline graph could not schedule task"
+        log_ref = _upload_log(tenant_id, run_id, task_key, message, context.log)
+        _callback(base_url, run_id, task_key, {
+            "status": "FAILED",
+            "errorMsg": message,
+            "finishedAt": _now(),
+            "logRef": log_ref,
+        }, context.log)
+    failures.extend(blocked)
+    if failures:
+        raise RuntimeError("pipeline nodes failed: " + ", ".join(failures))
+    return {"run_id": run_id, "nodes": list(nodes.keys()), "status": status}
+
+
+@job(name="onelake_pipeline_graph_run")
+def onelake_pipeline_graph_run():
+    run_pipeline_graph_op()
 
 
 # ---------------------------------------------------------------------------
@@ -312,5 +601,6 @@ def onelake_repository():
     return [
         onelake_sync_task_schedule_reconcile,
         onelake_pipeline_run,
+        onelake_pipeline_graph_run,
         onelake_notebook_run,
     ]

@@ -130,6 +130,8 @@ class PipelineEndToEndTest {
         dag.setEngine("SPARK");
         dag.setResourceGroup("spark-default");
         dag.setComputeProfile("spark-small");
+        lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
+                .thenReturn(Optional.empty());
 
         // Wire repo mocks to operate on in-memory state
         lenient().when(dagRepo.findByIdAndTenantId(eq(dagId), eq(tenantId))).thenReturn(Optional.of(dag));

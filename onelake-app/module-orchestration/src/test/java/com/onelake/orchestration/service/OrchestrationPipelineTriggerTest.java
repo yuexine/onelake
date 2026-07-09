@@ -108,6 +108,8 @@ class OrchestrationPipelineTriggerTest {
         }).when(taskRunRepo).save(any(TaskRun.class));
         org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of()));
+        org.mockito.Mockito.lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
+                .thenReturn(Optional.empty());
     }
 
     @AfterEach

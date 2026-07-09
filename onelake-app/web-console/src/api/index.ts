@@ -364,6 +364,18 @@ export const PipelineAPI = {
   // task runs
   listTaskRuns: (id: string, runId: string) =>
     unwrap<TaskRun[]>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks`)),
+  readTaskRunLog: (id: string, runId: string, taskKey: string, tail = 300) =>
+    unwrap<string>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
+      params: { tail },
+      responseType: 'text',
+      headers: { Accept: 'text/plain' },
+    })),
+  downloadTaskRunLog: (id: string, runId: string, taskKey: string) =>
+    http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
+      params: { download: true },
+      responseType: 'blob',
+      headers: { Accept: 'text/plain' },
+    }) as unknown as Promise<import('./http').AxiosResponse<Blob>>,
 
   // C4 backfill (admin)
   backfillDryRun: () =>

@@ -1,5 +1,9 @@
 COMPOSE := docker compose -f docker-compose.yml
 MVN := mvn -q
+ONELAKE_INTERNAL_TOKEN ?= $(ONELAKE_ORCHESTRATION_INTERNAL_TOKEN)
+ifeq ($(strip $(ONELAKE_INTERNAL_TOKEN)),)
+ONELAKE_INTERNAL_TOKEN := dev-internal-token
+endif
 
 .PHONY: up up-core dagster-up dagster-down airbyte-up airbyte-status airbyte-credentials airbyte-down apisix-routes mall-mysql-ods-load down ps logs seed migrate ods-dwd-baseline ods-dwd-verify backend debug frontend dev clean help fmt
 
@@ -71,7 +75,7 @@ logs:
 
 seed:
 	./scripts/keycloak-realm.sh
-	./scripts/minio-bucket.sh warehouse
+	./scripts/minio-bucket.sh warehouse onelake-logs
 	./scripts/apisix-routes.sh
 
 migrate:
@@ -85,11 +89,11 @@ ods-dwd-verify:
 
 backend:
 	$(MVN) -pl bootstrap -am install -DskipTests -Djacoco.skip=true
-	$(MVN) -pl bootstrap spring-boot:run
+	ONELAKE_INTERNAL_TOKEN="$(ONELAKE_INTERNAL_TOKEN)" ONELAKE_ORCHESTRATION_INTERNAL_TOKEN="$(ONELAKE_INTERNAL_TOKEN)" $(MVN) -pl bootstrap spring-boot:run
 
 debug:
 	$(MVN) -pl bootstrap -am install -DskipTests -Djacoco.skip=true
-	$(MVN) -pl bootstrap spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+	ONELAKE_INTERNAL_TOKEN="$(ONELAKE_INTERNAL_TOKEN)" ONELAKE_ORCHESTRATION_INTERNAL_TOKEN="$(ONELAKE_INTERNAL_TOKEN)" $(MVN) -pl bootstrap spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
 
 frontend:
 	cd web-console && pnpm install && pnpm gen:api && pnpm dev

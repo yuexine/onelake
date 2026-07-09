@@ -6,6 +6,7 @@ MC_ALIAS="${MC_ALIAS:-local}"
 MC_URL="${MC_URL:-http://localhost:9000}"
 MC_USER="${MC_USER:-minio}"
 MC_PASS="${MC_PASS:-minio12345}"
+MINIO_LOG_RETENTION_DAYS="${MINIO_LOG_RETENTION_DAYS:-30}"
 
 run_mc() {
   if command -v "${MC}" >/dev/null 2>&1; then
@@ -46,6 +47,11 @@ run_mc alias set "${MC_ALIAS}" "${MC_URL}" "${MC_USER}" "${MC_PASS}" --api S3v4
 for BUCKET in "$@"; do
   echo "[minio] 创建 bucket: ${BUCKET}"
   run_mc mb -p "${MC_ALIAS}/${BUCKET}" || true
+  if [[ "${BUCKET}" == "onelake-logs" && "${MINIO_LOG_RETENTION_DAYS}" != "0" ]]; then
+    echo "[minio] 配置日志 bucket ${MINIO_LOG_RETENTION_DAYS} 天过期策略"
+    run_mc ilm rule add --expire-days "${MINIO_LOG_RETENTION_DAYS}" "${MC_ALIAS}/${BUCKET}" || \
+      echo "[minio] 跳过生命周期规则（当前 mc/MinIO 版本可能不支持 ilm rule add）。" >&2
+  fi
 done
 
 echo "[minio] 完成。"

@@ -258,6 +258,8 @@ export interface TaskRun {
   jobRunId: UUID;
   taskKey: string;
   status: TaskRunStatus;
+  attempt?: number;
+  logRef?: string;
   rowsWritten?: number;
   scanBytes?: number;
   errorMsg?: string;

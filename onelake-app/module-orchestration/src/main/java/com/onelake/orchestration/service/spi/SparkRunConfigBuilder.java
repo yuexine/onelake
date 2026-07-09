@@ -47,6 +47,10 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
     }
 
     public DagsterRunConfig build(TaskBundleContext ctx, List<PipelineTask> tasks) {
+        return build(ctx, tasks, "");
+    }
+
+    public DagsterRunConfig build(TaskBundleContext ctx, List<PipelineTask> tasks, String callbackBaseUrl) {
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -63,6 +67,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("run_id", ctx.runId().toString());
         opConfig.put("tenant_id", ctx.tenantId().toString());
         opConfig.put("iceberg_catalog", "onelake");
+        opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
         opConfig.put("tasks", sparkTasks);
         opConfig.put("resource_profile", defaultSparkProfile());
         return new DagsterRunConfig(JOB_NAME, Map.of(

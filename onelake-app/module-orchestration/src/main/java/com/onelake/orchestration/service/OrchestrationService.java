@@ -42,8 +42,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,6 +69,7 @@ public class OrchestrationService {
     private static final String DRAFT_DAGSTER_JOB = "sql_workbench_draft";
     private static final String PIPELINE_JOB_NAME = "onelake_pipeline_run";
     private static final String PIPELINE_GRAPH_JOB_NAME = "onelake_pipeline_graph_run";
+    private static final int MAX_LOG_TAIL_LINES = 10_000;
 
     private final DagRepository dagRepo;
     private final JobRunRepository runRepo;
@@ -75,6 +84,7 @@ public class OrchestrationService {
     private final TaskRunRepository taskRunRepo;
     private final SparkRunConfigBuilder sparkBuilder;
     private final ObjectProvider<OutboxPublisher> outboxPublisher;
+    private final PipelineLogStorage pipelineLogStorage;
 
     @Value("${onelake.orchestration.pipeline-execution-mode:LEGACY}")
     private String pipelineExecutionMode = "LEGACY";
@@ -369,7 +379,10 @@ public class OrchestrationService {
                     pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                     Math.max(1, pipelineMaxParallel));
         }
-        return sparkBuilder.build(ctx, tasks);
+        return sparkBuilder.build(
+                ctx,
+                tasks,
+                pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim());
     }
 
     private String activePipelineDagsterJob() {
@@ -524,6 +537,40 @@ public class OrchestrationService {
             propagateUpstreamFailures(run, lockedTaskRuns, new HashSet<>(Set.of(taskKey)));
         }
         return new TaskRunCallbackResult(true, taskRun.getStatus());
+    }
+
+    @Transactional(readOnly = true)
+    public TaskRunLogResource readTaskRunLog(UUID dagId, UUID runId, String taskKey, Integer tailLines) {
+        if (!StringUtils.hasText(taskKey)) {
+            throw new BizException(40021, "taskKey 不能为空");
+        }
+        if (tailLines != null && tailLines < 0) {
+            throw new BizException(40023, "tail 必须大于等于 0");
+        }
+        if (tailLines != null && tailLines > MAX_LOG_TAIL_LINES) {
+            throw new BizException(40023, "tail 不能超过 " + MAX_LOG_TAIL_LINES);
+        }
+        Dag dag = findTenantDag(dagId);
+        runRepo.findByIdAndDagIdIn(runId, Set.of(dag.getId()))
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        TaskRun taskRun = taskRunRepo.findByJobRunIdAndTaskKey(runId, taskKey)
+                .orElseThrow(() -> new BizException(40400, "task_run 不存在: " + taskKey));
+        if (dag.getTenantId() != null && taskRun.getTenantId() != null
+                && !dag.getTenantId().equals(taskRun.getTenantId())) {
+            throw new BizException(40400, "task_run 不存在: " + taskKey);
+        }
+        if (!StringUtils.hasText(taskRun.getLogRef())) {
+            throw new BizException(40420, "节点日志不存在");
+        }
+
+        String objectKey = validateTaskLogRef(dag.getTenantId(), runId, taskRun.getLogRef());
+        String filename = taskKey + ".log";
+        if (tailLines != null && tailLines > 0) {
+            byte[] bytes = tailLogBytes(pipelineLogStorage.open(objectKey), tailLines);
+            return new TaskRunLogResource(objectKey, filename, bytes.length, new ByteArrayInputStream(bytes));
+        }
+        long size = pipelineLogStorage.size(objectKey);
+        return new TaskRunLogResource(objectKey, filename, size, pipelineLogStorage.open(objectKey));
     }
 
     private void validateDag(String name, Map<String, Object> definition) {
@@ -1049,6 +1096,38 @@ public class OrchestrationService {
         return value.substring(0, maxLength);
     }
 
+    private String validateTaskLogRef(UUID tenantId, UUID runId, String logRef) {
+        String objectKey = logRef == null ? "" : logRef.trim();
+        String expectedPrefix = tenantId + "/" + runId + "/";
+        if (!StringUtils.hasText(objectKey)
+                || objectKey.startsWith("/")
+                || objectKey.contains("..")
+                || !objectKey.startsWith(expectedPrefix)) {
+            throw new BizException(40024, "节点日志引用非法");
+        }
+        return objectKey;
+    }
+
+    private byte[] tailLogBytes(InputStream inputStream, int tailLines) {
+        Deque<String> lines = new ArrayDeque<>(Math.max(1, tailLines));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (lines.size() == tailLines) {
+                    lines.removeFirst();
+                }
+                lines.addLast(line);
+            }
+        } catch (IOException e) {
+            throw new com.onelake.common.exception.DataplaneException("读取节点日志失败", e);
+        }
+        String text = String.join("\n", lines);
+        if (!text.isEmpty()) {
+            text += "\n";
+        }
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
     private String currentTriggerActorName() {
         String username = TenantContext.getUsername();
         return StringUtils.hasText(username) ? username.trim() : "system";
@@ -1081,4 +1160,6 @@ public class OrchestrationService {
     private record TriggerReadiness(boolean triggerable, String reason) {}
 
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
+
+    public record TaskRunLogResource(String objectKey, String filename, long contentLength, InputStream content) {}
 }

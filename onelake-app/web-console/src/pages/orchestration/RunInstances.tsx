@@ -4,9 +4,9 @@
  * <p>P4: supports {@code ?pipelineId=} (alias of {@code ?dagId=}) per design doc §4.1,
  * plus expandable row showing per-task task_run status from PipelineAPI.listTaskRuns.
  */
-import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from 'react';
-import { Alert, App as AntApp, Descriptions, Table, Tag, Space, Button, Typography } from 'antd';
-import { ArrowLeftOutlined, ReloadOutlined, HistoryOutlined, UpOutlined } from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
+import { Alert, App as AntApp, Descriptions, Drawer, Select, Space, Button, Table, Tabs, Tag, Typography } from 'antd';
+import { ArrowLeftOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, ReloadOutlined, UpOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
 import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
@@ -14,6 +14,8 @@ import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, T
 import { normalizeCatalogAssets } from '../lakehouse/assetAdapter';
 
 const { Text } = Typography;
+const DEFAULT_LOG_TAIL_LINES = 300;
+const LOG_TAIL_OPTIONS = [100, 300, 500, 1000];
 
 function formatDate(value?: string) {
   if (!value) return '-';
@@ -39,6 +41,30 @@ function triggerActorName(run: JobRun) {
 function triggerActorTitle(run: JobRun) {
   if (!run.triggeredBy) return triggerActorName(run);
   return `${triggerActorName(run)} · ${run.triggeredBy}`;
+}
+
+function filenameFromContentDisposition(header?: string) {
+  if (!header) return undefined;
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.replace(/^"|"$/g, ''));
+    } catch {
+      return encoded.replace(/^"|"$/g, '');
+    }
+  }
+  return header.match(/filename="?([^";]+)"?/i)?.[1];
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 type RunDisplayStatus = TaskRun['status'] | 'NOT_STARTED' | 'BLOCKED';
@@ -204,6 +230,7 @@ function TableFqnLink({
 
   const path = `/lakehouse/tables/${encodeURIComponent(asset.id)}`;
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.stopPropagation();
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
       return;
     }
@@ -401,11 +428,13 @@ function RunTaskGraph({
   tasks,
   edges,
   assetByFqn,
+  onOpenTask,
 }: {
   rows: TaskRunDisplayRow[];
   tasks: PipelineTask[];
   edges: PipelineTaskEdge[];
   assetByFqn: AssetByFqn;
+  onOpenTask?: (row: TaskRunDisplayRow) => void;
 }) {
   const taskByKey = useMemo(() => new Map(tasks.map((task) => [task.taskKey, task])), [tasks]);
   const levels = useMemo(() => taskLevels(tasks, edges), [tasks, edges]);
@@ -602,6 +631,14 @@ function RunTaskGraph({
             const borderColor = statusTone(node.row.status);
             const targetFqn = node.task?.targetFqn || artifactTableFqn(node.row.run?.artifactPath);
             const degree = degreeByKey.get(node.key) || { in: 0, out: 0 };
+            const openNode = () => onOpenTask?.(node.row);
+            const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+              if (!onOpenTask) return;
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openNode();
+              }
+            };
             const nodeStyle: CSSProperties = {
               position: 'absolute',
               left: pos.x,
@@ -618,9 +655,17 @@ function RunTaskGraph({
               display: 'flex',
               flexDirection: 'column',
               justifyContent: 'space-between',
+              cursor: onOpenTask ? 'pointer' : 'default',
             };
             return (
-              <div key={node.key} style={nodeStyle}>
+              <div
+                key={node.key}
+                role={onOpenTask ? 'button' : undefined}
+                tabIndex={onOpenTask ? 0 : undefined}
+                onClick={openNode}
+                onKeyDown={handleKeyDown}
+                style={nodeStyle}
+              >
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Text strong ellipsis style={{ flex: 1, fontSize: 13 }}>
@@ -979,6 +1024,255 @@ function ExpandedTaskRunsPanel({ run, onCollapse }: { run: JobRun; onCollapse: (
   );
 }
 
+function TaskRunOverviewPanel({
+  row,
+  assetByFqn,
+}: {
+  row: TaskRunDisplayRow;
+  assetByFqn: AssetByFqn;
+}) {
+  const task = row.task;
+  const run = row.run;
+  return (
+    <Descriptions size="small" column={1} bordered>
+      <Descriptions.Item label="节点名称">{task?.name || row.taskKey}</Descriptions.Item>
+      <Descriptions.Item label="Task Key">
+        <Text code copyable style={{ wordBreak: 'break-all' }}>{row.taskKey}</Text>
+      </Descriptions.Item>
+      <Descriptions.Item label="类型">{taskTypeLabel(task?.taskType)}</Descriptions.Item>
+      <Descriptions.Item label="状态">
+        <StatusBadge
+          status={row.status}
+          label={RUN_STATUS_LABEL[row.status]}
+          tooltip={row.blockedBy.length > 0 ? `上游失败：${row.blockedBy.join('、')}` : undefined}
+        />
+      </Descriptions.Item>
+      <Descriptions.Item label="Attempt">{run?.attempt ?? '-'}</Descriptions.Item>
+      <Descriptions.Item label="开始时间">{formatDate(run?.startedAt)}</Descriptions.Item>
+      <Descriptions.Item label="结束时间">{formatDate(run?.finishedAt)}</Descriptions.Item>
+      <Descriptions.Item label="耗时">{formatTaskDuration(run)}</Descriptions.Item>
+      <Descriptions.Item label="目标表">
+        {task?.targetFqn ? <TableFqnLink fqn={task.targetFqn} assetByFqn={assetByFqn} /> : '-'}
+      </Descriptions.Item>
+      <Descriptions.Item label="产物">
+        <ArtifactPathValue path={run?.artifactPath} assetByFqn={assetByFqn} />
+      </Descriptions.Item>
+      <Descriptions.Item label="行数">{run?.rowsWritten == null ? '-' : run.rowsWritten.toLocaleString()}</Descriptions.Item>
+      <Descriptions.Item label="扫描字节">{run?.scanBytes == null ? '-' : `${(run.scanBytes / 1024 / 1024).toFixed(1)} MB`}</Descriptions.Item>
+      <Descriptions.Item label="Log Ref">
+        {run?.logRef ? <Text code copyable style={{ wordBreak: 'break-all' }}>{run.logRef}</Text> : '-'}
+      </Descriptions.Item>
+      <Descriptions.Item label="错误">
+        {run?.errorMsg ? <Text type="danger">{run.errorMsg}</Text> : '-'}
+      </Descriptions.Item>
+    </Descriptions>
+  );
+}
+
+function TaskRunLogPanel({
+  dagId,
+  runId,
+  row,
+  enabled,
+}: {
+  dagId: string;
+  runId: string;
+  row: TaskRunDisplayRow;
+  enabled: boolean;
+}) {
+  const { message } = AntApp.useApp();
+  const [tailLines, setTailLines] = useState(DEFAULT_LOG_TAIL_LINES);
+  const [logText, setLogText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const canReadLog = Boolean(row.run?.logRef);
+
+  useEffect(() => {
+    setTailLines(DEFAULT_LOG_TAIL_LINES);
+    setLogText('');
+    setLoaded(false);
+    setError(null);
+  }, [row.taskKey, row.run?.id, row.run?.logRef]);
+
+  const loadLog = useCallback(() => {
+    if (!canReadLog) return;
+    setLoading(true);
+    setError(null);
+    PipelineAPI.readTaskRunLog(dagId, runId, row.taskKey, tailLines)
+      .then((text) => {
+        setLogText(text || '');
+        setLoaded(true);
+      })
+      .catch((e) => {
+        const msg = e.message || '节点日志加载失败';
+        setError(msg);
+      })
+      .finally(() => setLoading(false));
+  }, [canReadLog, dagId, row.taskKey, runId, tailLines]);
+
+  useEffect(() => {
+    if (enabled && canReadLog) {
+      loadLog();
+    }
+  }, [canReadLog, enabled, loadLog]);
+
+  const downloadLog = () => {
+    if (!canReadLog || downloading) return;
+    setDownloading(true);
+    PipelineAPI.downloadTaskRunLog(dagId, runId, row.taskKey)
+      .then((response) => {
+        const disposition = response.headers['content-disposition'] || response.headers['Content-Disposition'];
+        const filename = filenameFromContentDisposition(disposition as string | undefined) || `${row.taskKey}.log`;
+        downloadBlob(response.data, filename);
+        message.success('日志下载完成');
+      })
+      .catch((e) => message.error(e.message || '日志下载失败'))
+      .finally(() => setDownloading(false));
+  };
+
+  if (!row.run) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        message="暂无节点日志"
+        description="该节点还没有对应 task_run 记录。"
+      />
+    );
+  }
+
+  if (!canReadLog) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        message="暂无节点日志"
+        description="当前 task_run 尚未写入 log_ref。"
+      />
+    );
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Space size={8} wrap>
+          <Text type="secondary">Tail</Text>
+          <Select
+            size="small"
+            value={tailLines}
+            style={{ width: 112 }}
+            onChange={setTailLines}
+            options={LOG_TAIL_OPTIONS.map((value) => ({ value, label: `${value} 行` }))}
+          />
+          {row.run.attempt && <Tag style={{ margin: 0 }}>attempt {row.run.attempt}</Tag>}
+        </Space>
+        <Space size={8} wrap>
+          <Button size="small" icon={<ReloadOutlined />} onClick={loadLog} loading={loading}>
+            刷新
+          </Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={downloadLog} loading={downloading}>
+            全量下载
+          </Button>
+        </Space>
+      </div>
+
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          message={error}
+          action={<Button size="small" onClick={loadLog}>重试</Button>}
+        />
+      )}
+
+      {loading && !loaded ? (
+        <StateView state="loading" rows={5} />
+      ) : (
+        <pre
+          style={{
+            margin: 0,
+            maxHeight: 'min(58vh, 560px)',
+            overflow: 'auto',
+            padding: 12,
+            border: '1px solid var(--ol-line-soft)',
+            borderRadius: 8,
+            background: 'var(--ol-fill-soft)',
+            color: 'var(--ol-ink)',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: 12,
+            lineHeight: 1.55,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {logText || '暂无日志内容'}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function TaskRunDrawer({
+  row,
+  dagId,
+  runId,
+  assetByFqn,
+  activeTab,
+  onTabChange,
+  onClose,
+}: {
+  row: TaskRunDisplayRow | null;
+  dagId: string;
+  runId: string;
+  assetByFqn: AssetByFqn;
+  activeTab: string;
+  onTabChange: (key: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Drawer
+      open={Boolean(row)}
+      onClose={onClose}
+      width={720}
+      title={row ? (row.task?.name || row.taskKey) : '节点详情'}
+      destroyOnClose
+      extra={row?.run?.logRef ? <Tag style={{ margin: 0 }}>attempt {row.run.attempt ?? 1}</Tag> : undefined}
+    >
+      {row && (
+        <Tabs
+          activeKey={activeTab}
+          onChange={onTabChange}
+          items={[
+            {
+              key: 'overview',
+              label: '概览',
+              children: <TaskRunOverviewPanel row={row} assetByFqn={assetByFqn} />,
+            },
+            {
+              key: 'log',
+              label: (
+                <span>
+                  <FileTextOutlined /> 日志
+                </span>
+              ),
+              children: (
+                <TaskRunLogPanel
+                  dagId={dagId}
+                  runId={runId}
+                  row={row}
+                  enabled={activeTab === 'log'}
+                />
+              ),
+            },
+          ]}
+        />
+      )}
+    </Drawer>
+  );
+}
+
 /**
  * Per-task status panel (P4). Loads via PipelineAPI.listTaskRuns for v2 pipelines.
  * Falls back to "no task_run data" when a run has no task-level rows.
@@ -989,6 +1283,8 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
   const [edges, setEdges] = useState<PipelineTaskEdge[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [selectedRow, setSelectedRow] = useState<TaskRunDisplayRow | null>(null);
+  const [drawerTab, setDrawerTab] = useState('overview');
 
   useEffect(() => {
     let cancelled = false;
@@ -1044,6 +1340,10 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
     return (taskIndexA < 0 ? Number.MAX_SAFE_INTEGER : taskIndexA)
       - (taskIndexB < 0 ? Number.MAX_SAFE_INTEGER : taskIndexB);
   });
+  const openTaskDrawer = (row: TaskRunDisplayRow, tab = 'overview') => {
+    setSelectedRow(row);
+    setDrawerTab(tab);
+  };
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -1055,7 +1355,13 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
           description="下方仍按流水线定义展示完整拓扑，便于确认上游、下游和产物链路。"
         />
       )}
-      <RunTaskGraph rows={rows} tasks={tasks} edges={edges} assetByFqn={assetByFqn} />
+      <RunTaskGraph
+        rows={rows}
+        tasks={tasks}
+        edges={edges}
+        assetByFqn={assetByFqn}
+        onOpenTask={(row) => openTaskDrawer(row)}
+      />
       <Table<TaskRunDisplayRow>
         rowKey="id"
         dataSource={rows}
@@ -1152,7 +1458,42 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
               '-'
             ),
         },
+        {
+          title: '操作',
+          width: 150,
+          fixed: 'right',
+          render: (_: unknown, row: TaskRunDisplayRow) => (
+            <Space size={4}>
+              <Button
+                size="small"
+                type="link"
+                icon={<EyeOutlined />}
+                onClick={() => openTaskDrawer(row)}
+              >
+                详情
+              </Button>
+              <Button
+                size="small"
+                type="link"
+                icon={<FileTextOutlined />}
+                disabled={!row.run?.logRef}
+                onClick={() => openTaskDrawer(row, 'log')}
+              >
+                日志
+              </Button>
+            </Space>
+          ),
+        },
         ]}
+      />
+      <TaskRunDrawer
+        row={selectedRow}
+        dagId={dagId}
+        runId={runId}
+        assetByFqn={assetByFqn}
+        activeTab={drawerTab}
+        onTabChange={setDrawerTab}
+        onClose={() => setSelectedRow(null)}
       />
     </div>
   );

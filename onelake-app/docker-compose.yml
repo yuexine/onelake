@@ -239,6 +239,15 @@ services:
       TRINO_PORT: 8080
       TRINO_USER: onelake
       DBT_SCHEMA: ods
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      MINIO_ENDPOINT: http://minio:9000
+      ONELAKE_LOG_BUCKET: onelake-logs
+      ONELAKE_CALLBACK_BASE_URL: ${ONELAKE_CALLBACK_BASE_URL:-${ONELAKE_ORCHESTRATION_CALLBACK_BASE_URL:-http://host.docker.internal:8080}}
+      ONELAKE_INTERNAL_TOKEN: ${ONELAKE_INTERNAL_TOKEN:-${ONELAKE_ORCHESTRATION_INTERNAL_TOKEN:-dev-internal-token}}
+    depends_on:
+      minio:
+        condition: service_healthy
     volumes:
       - ./dbt:/opt/onelake/dbt
     healthcheck:

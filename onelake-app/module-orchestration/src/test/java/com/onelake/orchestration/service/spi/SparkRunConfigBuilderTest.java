@@ -52,13 +52,17 @@ class SparkRunConfigBuilderTest {
                 pipelineId, tenantId, runId, compile,
                 "pipeline_" + pipelineId, "spark-default", "spark-small");
 
-        DagsterRunConfig config = new SparkRunConfigBuilder().build(context, List.of(gate));
+        DagsterRunConfig config = new SparkRunConfigBuilder().build(
+                context,
+                List.of(gate),
+                "http://localhost:8080");
 
         Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
         Map<String, Object> op = (Map<String, Object>) ops.get("run_spark_task_op");
         Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
         List<Map<String, Object>> tasks = (List<Map<String, Object>>) opConfig.get("tasks");
 
+        assertThat(opConfig).containsEntry("callback_base_url", "http://localhost:8080");
         assertThat(tasks).hasSize(1);
         assertThat(tasks.get(0)).containsEntry("task_key", "quality_gate");
         assertThat(tasks.get(0)).containsEntry("task_type", "QUALITY_GATE");

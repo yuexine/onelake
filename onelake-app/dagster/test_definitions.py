@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from collections import Counter
 
 import pytest
@@ -42,6 +43,23 @@ def _config(nodes, edges, max_parallel=4):
     }
 
 
+def _legacy_config(tasks, callback_base_url=""):
+    return {
+        "pipeline_id": "pipeline-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "iceberg_catalog": "onelake",
+        "callback_base_url": callback_base_url,
+        "resource_profile": {
+            "executor_memory": "2g",
+            "executor_cores": "2",
+            "num_executors": "2",
+            "driver_memory": "1g",
+        },
+        "tasks": tasks,
+    }
+
+
 def _command(exit_code):
     return [sys.executable, "-c", f"import sys; sys.exit({exit_code})"], []
 
@@ -63,6 +81,116 @@ def _run_graph(config):
 
 def _statuses(callbacks, task_key):
     return [payload["status"] for key, payload in callbacks if key == task_key]
+
+
+class _Log:
+    def __init__(self):
+        self.infos = []
+        self.warnings = []
+
+    def info(self, message, *args):
+        self.infos.append(message % args if args else message)
+
+    def warning(self, message, *args):
+        self.warnings.append(message % args if args else message)
+
+
+def test_truncate_keeps_head_and_tail_within_budget():
+    content = "A" * 120 + "B" * 240
+
+    truncated = definitions._truncate(content, max_bytes=180)
+
+    assert len(truncated.encode("utf-8")) <= 180
+    assert truncated.startswith("A" * 36)
+    assert "[log truncated:" in truncated
+    assert truncated.endswith("B" * (180 - 36 - len(
+        "\n... [log truncated: original_bytes=360 max_bytes=180] ...\n".encode("utf-8")
+    )))
+
+
+def test_upload_log_writes_attempt_and_latest(monkeypatch):
+    calls = []
+    client_args = {}
+
+    class FakeClient:
+        def put_object(self, **kwargs):
+            calls.append(kwargs)
+
+    def client(service, **kwargs):
+        client_args["service"] = service
+        client_args.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=client))
+    monkeypatch.setenv("ONELAKE_LOG_BUCKET", "logs")
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://minio.test:9000")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+    key = definitions._upload_log("tenant-1", "run-1", "spark/task", 2, "hello", _Log())
+
+    assert key == "tenant-1/run-1/spark%2Ftask/latest.log"
+    assert client_args["service"] == "s3"
+    assert client_args["endpoint_url"] == "http://minio.test:9000"
+    assert client_args["aws_access_key_id"] == "ak"
+    assert client_args["aws_secret_access_key"] == "sk"
+    assert [call["Key"] for call in calls] == [
+        "tenant-1/run-1/spark%2Ftask/attempt-2.log",
+        "tenant-1/run-1/spark%2Ftask/latest.log",
+    ]
+    assert all(call["Bucket"] == "logs" for call in calls)
+    assert all(call["Body"] == b"hello" for call in calls)
+
+
+def test_upload_log_returns_empty_when_minio_fails(monkeypatch):
+    def client(*args, **kwargs):
+        raise RuntimeError("minio down")
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=client))
+    log = _Log()
+
+    key = definitions._upload_log("tenant-1", "run-1", "spark", 1, "hello", log)
+
+    assert key == ""
+    assert log.warnings
+
+
+def test_spark_log_content_redacts_credentials():
+    result = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    content = definitions._spark_log_content([
+        "spark-submit",
+        "--conf",
+        "spark.hadoop.fs.s3a.access.key=minio",
+        "--conf",
+        "spark.hadoop.fs.s3a.secret.key=minio12345",
+        "--conf",
+        "spark.executorEnv.AWS_SECRET_ACCESS_KEY=minio12345",
+    ], result)
+
+    assert "minio12345" not in content
+    assert "spark.hadoop.fs.s3a.access.key=***REDACTED***" in content
+    assert "spark.hadoop.fs.s3a.secret.key=***REDACTED***" in content
+    assert "spark.executorEnv.AWS_SECRET_ACCESS_KEY=***REDACTED***" in content
+
+
+def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    task = _node("spark_a")
+    task.pop("max_retries")
+
+    monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: _command(0))
+
+    result = definitions.run_spark_task_op(
+        build_op_context(op_config=_legacy_config([task], callback_base_url="http://api"))
+    )
+
+    assert result["tasks"][0]["log_ref"] == "log://placeholder"
+    assert _statuses(callbacks, "spark_a") == ["RUNNING", "SUCCEEDED"]
+    success_payload = callbacks[-1][1]
+    assert success_payload["logRef"] == "log://placeholder"
+    assert success_payload["attempt"] == 1
+    assert success_payload["artifactPath"] == "table:onelake.dwd.spark_a"
 
 
 def test_graph_linear_order_and_sync_ref(monkeypatch):

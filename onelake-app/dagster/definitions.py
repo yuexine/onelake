@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from dagster import Array, AssetMaterialization, Field, Int, Shape, String, job, op, repository
 
@@ -148,6 +149,7 @@ spark.stop()
             },
         ),
         "iceberg_catalog": Field(String, default_value="onelake"),
+        "callback_base_url": Field(String, default_value=""),
         "tasks": Field(
             Array(Shape({
                 "task_key": Field(String),
@@ -182,6 +184,7 @@ def run_spark_task_op(context):
     orchestration.task_run and pipeline_task_edge before this op is launched.
     """
     cfg = context.op_config
+    base_url = cfg.get("callback_base_url", "")
     iceberg_catalog = cfg["iceberg_catalog"]
     spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
     tasks = cfg.get("tasks") or []
@@ -208,8 +211,16 @@ def run_spark_task_op(context):
 
         node = dict(task)
         node["resource_profile"] = resource
-        cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
+        temp_paths = []
+        log_ref = ""
+        terminal_callback_sent = False
+        _callback(base_url, cfg["run_id"], task["task_key"], {
+            "status": "RUNNING",
+            "startedAt": _now(),
+            "dagsterStepKey": task["task_key"],
+        }, context.log)
         try:
+            cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
             context.log.info("spark-submit cmd: %s", " ".join(cmd))
             result = subprocess.run(
                 cmd,
@@ -222,18 +233,62 @@ def run_spark_task_op(context):
                 context.log.info(result.stdout)
             if result.stderr:
                 context.log.warning(result.stderr)
+            log_ref = _upload_log(
+                cfg["tenant_id"],
+                cfg["run_id"],
+                task["task_key"],
+                1,
+                _spark_log_content(cmd, result),
+                context.log,
+            )
 
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"spark-submit failed for task {task['task_key']} (exit {result.returncode})"
-                )
+                message = f"spark-submit failed for task {task['task_key']} (exit {result.returncode})"
+                _callback(base_url, cfg["run_id"], task["task_key"], {
+                    "status": "FAILED",
+                    "finishedAt": _now(),
+                    "errorMsg": _tail(message, 3900),
+                    "logRef": log_ref,
+                    "attempt": 1,
+                }, context.log)
+                terminal_callback_sent = True
+                raise RuntimeError(message)
+
+            _callback(base_url, cfg["run_id"], task["task_key"], {
+                "status": "SUCCEEDED",
+                "finishedAt": _now(),
+                "artifactPath": _table_artifact(task),
+                "logRef": log_ref,
+                "attempt": 1,
+            }, context.log)
+            terminal_callback_sent = True
 
             results.append({
                 "task_key": task["task_key"],
                 "task_type": task_type,
                 "exit_code": result.returncode,
                 "target_fqn": task.get("target_fqn", ""),
+                "log_ref": log_ref,
             })
+        except Exception as exc:
+            if not log_ref:
+                log_ref = _upload_log(
+                    cfg["tenant_id"],
+                    cfg["run_id"],
+                    task["task_key"],
+                    1,
+                    str(exc),
+                    context.log,
+                )
+            if not terminal_callback_sent:
+                _callback(base_url, cfg["run_id"], task["task_key"], {
+                    "status": "FAILED",
+                    "finishedAt": _now(),
+                    "errorMsg": _tail(str(exc), 3900),
+                    "logRef": log_ref,
+                    "attempt": 1,
+                }, context.log)
+            raise
         finally:
             for path in temp_paths:
                 try:
@@ -268,32 +323,141 @@ def _tail(value, max_length):
     return value[-max_length:]
 
 
+def _truncate(content, max_bytes=None):
+    max_bytes = int(max_bytes or os.getenv("ONELAKE_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    text = "" if content is None else str(content)
+    data = text.encode("utf-8")
+    if max_bytes <= 0 or len(data) <= max_bytes:
+        return text
+
+    marker = (
+        f"\n... [log truncated: original_bytes={len(data)} max_bytes={max_bytes}] ...\n"
+    ).encode("utf-8")
+    if len(marker) >= max_bytes:
+        return data[:max_bytes].decode("utf-8", errors="ignore")
+
+    head_bytes = max_bytes // 5
+    tail_bytes = max_bytes - head_bytes - len(marker)
+    return (
+        data[:head_bytes].decode("utf-8", errors="ignore")
+        + marker.decode("utf-8")
+        + data[-tail_bytes:].decode("utf-8", errors="ignore")
+    )
+
+
 def _table_artifact(node):
     fqn = node.get("target_fqn") or ""
     return f"table:{fqn}" if fqn else ""
 
 
 def _callback(base_url, run_id, task_key, payload, log):
-    # 1.3 会把这里替换为真实 HTTP 回调；本步骤只保留不可失败的占位日志。
-    log.info(
-        "callback placeholder base_url=%s run=%s task=%s payload=%s",
-        base_url or "",
-        run_id,
-        task_key,
-        payload,
+    import requests
+
+    target_base_url = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
+    if not target_base_url:
+        log.info("callback skipped run=%s task=%s payload=%s", run_id, task_key, payload)
+        return
+
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Onelake-Internal-Token"] = token
+    url = (
+        f"{target_base_url}/api/v1/internal/orchestration/runs/{run_id}"
+        f"/tasks/{quote(str(task_key), safe='')}/status"
     )
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=5)
+        resp.raise_for_status()
+    except Exception as exc:
+        log.warning("callback failed run=%s task=%s url=%s error=%s", run_id, task_key, url, exc)
 
 
-def _upload_log(tenant_id, run_id, task_key, content, log):
-    # 1.4 会把这里替换为 MinIO 写入；当前返回空引用，保证调度语义先闭环。
-    log.info(
-        "log upload placeholder tenant=%s run=%s task=%s bytes=%s",
-        tenant_id,
-        run_id,
-        task_key,
-        len(content or ""),
+def _safe_key_part(value):
+    return quote(str(value), safe="._=-")
+
+
+def _redact_arg(value):
+    text = str(value)
+    lower = text.lower()
+    secret_markers = (
+        "secret",
+        "password",
+        "token",
+        "access-key",
+        "access_key",
+        "access.key",
+        "credential",
     )
-    return ""
+    if not any(marker in lower for marker in secret_markers):
+        return text
+    if "=" in text:
+        key, _ = text.split("=", 1)
+        return f"{key}=***REDACTED***"
+    return "***REDACTED***"
+
+
+def _spark_log_content(cmd, result):
+    parts = [
+        "$ " + " ".join(_redact_arg(arg) for arg in cmd),
+        f"[exit_code] {result.returncode}",
+    ]
+    if result.stdout:
+        parts.extend(["[stdout]", result.stdout])
+    if result.stderr:
+        parts.extend(["[stderr]", result.stderr])
+    return "\n".join(parts)
+
+
+def _upload_log(tenant_id, run_id, task_key, attempt, content, log):
+    try:
+        import boto3
+
+        bucket = os.getenv("ONELAKE_LOG_BUCKET", "onelake-logs")
+        endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
+        access_key = os.getenv("AWS_ACCESS_KEY_ID", "minio")
+        secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "minio12345")
+        body = _truncate(content).encode("utf-8")
+        safe_task_key = _safe_key_part(task_key)
+        safe_attempt = max(1, int(attempt or 1))
+        prefix = f"{tenant_id}/{run_id}/{safe_task_key}"
+        attempt_key = f"{prefix}/attempt-{safe_attempt}.log"
+        latest_key = f"{prefix}/latest.log"
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+        )
+        for key in (attempt_key, latest_key):
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=body,
+                ContentType="text/plain; charset=utf-8",
+            )
+        log.info(
+            "uploaded task log tenant=%s run=%s task=%s attempt=%s bucket=%s key=%s bytes=%s",
+            tenant_id,
+            run_id,
+            task_key,
+            safe_attempt,
+            bucket,
+            latest_key,
+            len(body),
+        )
+        return latest_key
+    except Exception as exc:
+        log.warning(
+            "task log upload failed tenant=%s run=%s task=%s attempt=%s error=%s",
+            tenant_id,
+            run_id,
+            task_key,
+            attempt,
+            exc,
+        )
+        return ""
 
 
 @op(
@@ -374,7 +538,7 @@ def run_pipeline_graph_op(context):
                     continue
                 status[task_key] = "UPSTREAM_FAILED"
             message = f"upstream failed: {root_key}"
-            log_ref = _upload_log(tenant_id, run_id, task_key, message, context.log)
+            log_ref = _upload_log(tenant_id, run_id, task_key, 1, message, context.log)
             _callback(base_url, run_id, task_key, {
                 "status": "UPSTREAM_FAILED",
                 "errorMsg": message,
@@ -393,7 +557,7 @@ def run_pipeline_graph_op(context):
         }, context.log)
 
         if task_type == "SYNC_REF":
-            log_ref = _upload_log(tenant_id, run_id, task_key, "SYNC_REF completed", context.log)
+            log_ref = _upload_log(tenant_id, run_id, task_key, 1, "SYNC_REF completed", context.log)
             materialize_success(task_key)
             _callback(base_url, run_id, task_key, {
                 "status": "SUCCEEDED",
@@ -423,7 +587,8 @@ def run_pipeline_graph_op(context):
                     context.log.info(result.stdout)
                 if result.stderr:
                     context.log.warning(result.stderr)
-                last_log_ref = _upload_log(tenant_id, run_id, task_key, last_log, context.log)
+                last_log = _spark_log_content(cmd, result)
+                last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
                 if result.returncode == 0:
                     materialize_success(task_key)
                     _callback(base_url, run_id, task_key, {
@@ -442,7 +607,7 @@ def run_pipeline_graph_op(context):
                 )
             except Exception as exc:
                 last_log = str(exc)
-                last_log_ref = _upload_log(tenant_id, run_id, task_key, last_log, context.log)
+                last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
                 context.log.warning("[%s] attempt %s failed: %s", task_key, attempt, exc)
             finally:
                 for path in temp_paths:
@@ -503,7 +668,7 @@ def run_pipeline_graph_op(context):
     for task_key in blocked:
         status[task_key] = "FAILED"
         message = "pipeline graph could not schedule task"
-        log_ref = _upload_log(tenant_id, run_id, task_key, message, context.log)
+        log_ref = _upload_log(tenant_id, run_id, task_key, 1, message, context.log)
         _callback(base_url, run_id, task_key, {
             "status": "FAILED",
             "errorMsg": message,

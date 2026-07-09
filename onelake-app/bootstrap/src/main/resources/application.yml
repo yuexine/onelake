@@ -87,8 +87,8 @@ onelake:
   orchestration:
     # 流水线执行灰度开关：LEGACY 走旧单 op；GRAPH 走节点级图执行器。
     pipeline-execution-mode: ${ONELAKE_PIPELINE_EXECUTION_MODE:LEGACY}
-    callback-base-url: ${ONELAKE_ORCHESTRATION_CALLBACK_BASE_URL:}
-    internal-token: ${ONELAKE_ORCHESTRATION_INTERNAL_TOKEN:}
+    callback-base-url: ${ONELAKE_ORCHESTRATION_CALLBACK_BASE_URL:${ONELAKE_CALLBACK_BASE_URL:}}
+    internal-token: ${ONELAKE_ORCHESTRATION_INTERNAL_TOKEN:${ONELAKE_INTERNAL_TOKEN:}}
     max-parallel: ${ONELAKE_ORCHESTRATION_MAX_PARALLEL:4}
   dataplane:
     airbyte:
@@ -139,8 +139,9 @@ onelake:
       endpoint: ${POSTGREST_URL:http://postgrest:3000}
     minio:
       endpoint: ${MINIO_URL:http://localhost:9000}
-      access-key: ${MINIO_ACCESS_KEY:minioadmin}
-      secret-key: ${MINIO_SECRET_KEY:minioadmin}
+      access-key: ${MINIO_ACCESS_KEY:${AWS_ACCESS_KEY_ID:minio}}
+      secret-key: ${MINIO_SECRET_KEY:${AWS_SECRET_ACCESS_KEY:minio12345}}
+      log-bucket: ${ONELAKE_LOG_BUCKET:onelake-logs}
     kafka:
       bootstrap-servers: ${KAFKA_BOOTSTRAP:kafka:29092}
     flink:

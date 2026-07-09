@@ -42,6 +42,8 @@ import com.onelake.orchestration.service.spi.DagsterRunConfig;
 import com.onelake.orchestration.service.spi.SparkRunConfigBuilder;
 
 import java.sql.Timestamp;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -95,6 +97,7 @@ class OrchestrationServiceTest {
     @Mock private TaskRunRepository taskRunRepo;
     @Mock private SparkRunConfigBuilder sparkBuilder;
     @Mock private ObjectProvider<OutboxPublisher> outboxPublisher;
+    @Mock private PipelineLogStorage pipelineLogStorage;
 
     private OrchestrationService service;
 
@@ -105,7 +108,7 @@ class OrchestrationServiceTest {
         lenient().when(runtimeContractService.launchBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
             runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
-            sparkBuilder, outboxPublisher);
+            sparkBuilder, outboxPublisher, pipelineLogStorage);
     }
 
     @AfterEach
@@ -362,7 +365,8 @@ class OrchestrationServiceTest {
         when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
-        when(sparkBuilder.build(any(), anyList()))
+        ReflectionTestUtils.setField(service, "pipelineCallbackBaseUrl", "http://localhost:8080");
+        when(sparkBuilder.build(any(), anyList(), eq("http://localhost:8080")))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of("ops", Map.of())));
         when(dagster.launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-legacy");
@@ -371,7 +375,7 @@ class OrchestrationServiceTest {
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
-        verify(sparkBuilder).build(any(), anyList());
+        verify(sparkBuilder).build(any(), anyList(), eq("http://localhost:8080"));
         verify(sparkBuilder, never()).buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt());
         verify(dagster).launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
@@ -400,7 +404,7 @@ class OrchestrationServiceTest {
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
-        verify(sparkBuilder, never()).build(any(), anyList());
+        verify(sparkBuilder, never()).build(any(), anyList(), anyString());
         verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8));
         verify(dagster).launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
@@ -595,6 +599,88 @@ class OrchestrationServiceTest {
         assertThat(downstream.getFinishedAt()).isNotNull();
         verify(taskRunRepo).save(failed);
         verify(taskRunRepo).save(downstream);
+    }
+
+    @Test
+    void readTaskRunLogRejectsEmptyLogRef() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.SUCCEEDED);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), argThat(ids -> ids != null && ids.contains(DAG_ID))))
+                .thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdAndTaskKey(RUN_ID, "spark_node")).thenReturn(Optional.of(taskRun));
+
+        assertThatThrownBy(() -> service.readTaskRunLog(DAG_ID, RUN_ID, "spark_node", null))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("节点日志不存在");
+
+        verifyNoInteractions(pipelineLogStorage);
+    }
+
+    @Test
+    void readTaskRunLogRejectsInvalidLogRefPrefix() {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.SUCCEEDED);
+        taskRun.setLogRef("22222222-2222-2222-2222-222222222222/" + RUN_ID + "/spark_node/latest.log");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), argThat(ids -> ids != null && ids.contains(DAG_ID))))
+                .thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdAndTaskKey(RUN_ID, "spark_node")).thenReturn(Optional.of(taskRun));
+
+        assertThatThrownBy(() -> service.readTaskRunLog(DAG_ID, RUN_ID, "spark_node", null))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("节点日志引用非法");
+
+        verifyNoInteractions(pipelineLogStorage);
+    }
+
+    @Test
+    void readTaskRunLogReturnsTailLines() throws Exception {
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.SUCCEEDED);
+        String key = TENANT_ID + "/" + RUN_ID + "/spark_node/latest.log";
+        taskRun.setLogRef(key);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), argThat(ids -> ids != null && ids.contains(DAG_ID))))
+                .thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdAndTaskKey(RUN_ID, "spark_node")).thenReturn(Optional.of(taskRun));
+        when(pipelineLogStorage.open(key)).thenReturn(new ByteArrayInputStream(
+                "line-1\nline-2\nline-3\n".getBytes(StandardCharsets.UTF_8)));
+
+        OrchestrationService.TaskRunLogResource resource =
+                service.readTaskRunLog(DAG_ID, RUN_ID, "spark_node", 2);
+
+        assertThat(resource.objectKey()).isEqualTo(key);
+        assertThat(resource.filename()).isEqualTo("spark_node.log");
+        assertThat(new String(resource.content().readAllBytes(), StandardCharsets.UTF_8))
+                .isEqualTo("line-2\nline-3\n");
+        assertThat(resource.contentLength()).isEqualTo("line-2\nline-3\n".getBytes(StandardCharsets.UTF_8).length);
+        verify(pipelineLogStorage, never()).size(anyString());
+    }
+
+    @Test
+    void readTaskRunLogRejectsTooLargeTail() {
+        assertThatThrownBy(() -> service.readTaskRunLog(DAG_ID, RUN_ID, "spark_node", 10_001))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("tail 不能超过");
+
+        verifyNoInteractions(dagRepo, runRepo, taskRunRepo, pipelineLogStorage);
+    }
+
+    @Test
+    void readTaskRunLogRejectsDagOutsideTenant() {
+        UUID otherTenant = UUID.fromString("99999999-9999-9999-9999-999999999999");
+        TenantContext.setTenantId(otherTenant);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, otherTenant)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.readTaskRunLog(DAG_ID, RUN_ID, "spark_node", null))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("DAG 不存在");
+
+        verifyNoInteractions(runRepo, taskRunRepo, pipelineLogStorage);
     }
 
     @Test

@@ -83,6 +83,7 @@ class OrchestrationPipelineTriggerTest {
     @Mock private SparkRunConfigBuilder sparkBuilder;
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
+    @Mock private PipelineLogStorage pipelineLogStorage;
 
     private OrchestrationService service;
 
@@ -90,7 +91,7 @@ class OrchestrationPipelineTriggerTest {
     void setup() {
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
-                sparkBuilder, outboxProvider);
+                sparkBuilder, outboxProvider, pipelineLogStorage);
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
 
@@ -106,7 +107,7 @@ class OrchestrationPipelineTriggerTest {
             if (t.getId() == null) t.setId(UUID.randomUUID());
             return t;
         }).when(taskRunRepo).save(any(TaskRun.class));
-        org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList()))
+        org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList(), anyString()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of()));
         org.mockito.Mockito.lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.empty());

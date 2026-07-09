@@ -63,6 +63,7 @@ class SparkRunConfigBuilderTest {
         List<Map<String, Object>> tasks = (List<Map<String, Object>>) opConfig.get("tasks");
 
         assertThat(opConfig).containsEntry("callback_base_url", "http://localhost:8080");
+        assertThat(opConfig).doesNotContainKey("callback_internal_token");
         assertThat(tasks).hasSize(1);
         assertThat(tasks.get(0)).containsEntry("task_key", "quality_gate");
         assertThat(tasks.get(0)).containsEntry("task_type", "QUALITY_GATE");
@@ -129,12 +130,62 @@ class SparkRunConfigBuilderTest {
                 .findFirst()
                 .orElseThrow();
         assertThat(sparkNode).containsEntry("task_type", "SPARK_SQL");
+        assertThat(sparkNode).containsEntry("base_attempt", 1);
         assertThat(sparkNode).containsEntry("max_retries", 2);
         assertThat((List<String>) sparkNode.get("from_tables")).containsExactly("onelake.ods.user");
         List<Map<String, Object>> edges = (List<Map<String, Object>>) opConfig.get("edges");
         assertThat(edges).containsExactly(Map.of(
                 "source_key", "sync_user",
                 "target_key", "spark_dwd"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphRunConfigFiltersSubgraphEdgesAndIncludesBaseAttempts() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask root = task(pipelineId, tenantId, "root", TaskType.SPARK_SQL, true, "{}");
+        PipelineTask failed = task(pipelineId, tenantId, "failed", TaskType.SPARK_SQL, true, "{}");
+        PipelineTask downstream = task(pipelineId, tenantId, "downstream", TaskType.SPARK_SQL, true, "{}");
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(root, failed, downstream).stream()
+                        .map(task -> new PipelineCompileResult.TaskCompileResult(
+                                task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                                true, task.getTargetFqn(), null))
+                        .toList(),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+
+        DagsterRunConfig config = new SparkRunConfigBuilder().buildGraphRunConfig(
+                context,
+                List.of(failed, downstream),
+                List.of(
+                        edge("root", "failed", EdgeLayer.PIPELINE),
+                        edge("failed", "downstream", EdgeLayer.PIPELINE),
+                        edge("downstream", "outside", EdgeLayer.PIPELINE)),
+                "",
+                4,
+                Map.of("failed", 3, "downstream", 2));
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> op = (Map<String, Object>) ops.get("run_pipeline_graph_op");
+        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) opConfig.get("nodes");
+        assertThat(nodes).extracting(node -> node.get("task_key"))
+                .containsExactly("failed", "downstream");
+        assertThat(nodes).extracting(node -> node.get("base_attempt"))
+                .containsExactly(3, 2);
+        List<Map<String, Object>> edges = (List<Map<String, Object>>) opConfig.get("edges");
+        assertThat(edges).containsExactly(Map.of(
+                "source_key", "failed",
+                "target_key", "downstream"));
     }
 
     private PipelineTask task(UUID pipelineId, UUID tenantId, String key, TaskType type,

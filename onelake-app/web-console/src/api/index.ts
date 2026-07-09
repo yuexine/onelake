@@ -58,6 +58,8 @@ import type {
   PipelineStatus,
   PipelineTaskType,
   TaskRun,
+  TaskRerunMode,
+  TaskRerunResult,
 } from '../types';
 
 export interface PageResult<T> {
@@ -364,6 +366,11 @@ export const PipelineAPI = {
   // task runs
   listTaskRuns: (id: string, runId: string) =>
     unwrap<TaskRun[]>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks`)),
+  rerunTask: (id: string, runId: string, taskKey: string, mode: TaskRerunMode = 'SINGLE') =>
+    unwrap<TaskRerunResult>(http.post(
+      `/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/rerun`,
+      { mode },
+    )),
   readTaskRunLog: (id: string, runId: string, taskKey: string, tail = 300) =>
     unwrap<string>(http.get(`/orchestration/pipelines/${id}/runs/${runId}/tasks/${encodeURIComponent(taskKey)}/log`, {
       params: { tail },

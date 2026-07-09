@@ -80,11 +80,22 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                                 List<PipelineTaskEdge> pipelineEdges,
                                                 String callbackBaseUrl,
                                                 int maxParallel) {
+        return buildGraphRunConfig(ctx, tasks, pipelineEdges, callbackBaseUrl, maxParallel, Map.of());
+    }
+
+    public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
+                                                List<PipelineTask> tasks,
+                                                List<PipelineTaskEdge> pipelineEdges,
+                                                String callbackBaseUrl,
+                                                int maxParallel,
+                                                Map<String, Integer> baseAttempts) {
         // GRAPH 模式把可观测节点和 PIPELINE 边完整交给 Dagster op 内置调度器，旧 build(...) 保持扁平 tasks[] 回退。
         PipelineCompileResult plan = ctx.compileResult();
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(java.util.stream.Collectors.toMap(PipelineTask::getTaskKey, t -> t, (a, b) -> a,
                         LinkedHashMap::new));
+        // base_attempt 只在重跑子图时由服务层传入；普通触发默认 1，保持旧 GRAPH 行为不变。
+        Map<String, Integer> safeBaseAttempts = baseAttempts == null ? Map.of() : baseAttempts;
         List<Map<String, Object>> nodes = new ArrayList<>();
         for (TaskCompileResult result : plan.tasks()) {
             PipelineTask task = taskByKey.get(result.taskKey());
@@ -92,6 +103,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                 continue;
             }
             Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(task, null));
+            node.put("base_attempt", Math.max(1, safeBaseAttempts.getOrDefault(task.getTaskKey(), 1)));
             node.put("max_retries", resolveMaxRetries(task));
             nodes.add(node);
         }
@@ -102,6 +114,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
                 continue;
             }
+            // 子图重跑只把两端都在本次节点集合内的边交给 Dagster，避免调度等待未提交的上游。
             if (!taskByKey.containsKey(edge.getSourceKey()) || !taskByKey.containsKey(edge.getTargetKey())) {
                 continue;
             }

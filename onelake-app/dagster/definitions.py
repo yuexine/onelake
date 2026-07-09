@@ -358,7 +358,7 @@ def _callback(base_url, run_id, task_key, payload, log):
         log.info("callback skipped run=%s task=%s payload=%s", run_id, task_key, payload)
         return
 
-    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "")
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "") or os.getenv("ONELAKE_ORCHESTRATION_INTERNAL_TOKEN", "")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Onelake-Internal-Token"] = token
@@ -486,6 +486,7 @@ def _upload_log(tenant_id, run_id, task_key, attempt, content, log):
                     }),
                     is_required=False,
                 ),
+                "base_attempt": Field(Int, default_value=1),
                 "max_retries": Field(Int, default_value=0),
             })),
             default_value=[],
@@ -521,6 +522,14 @@ def run_pipeline_graph_op(context):
     status = {key: "QUEUED" for key in nodes}
     lock = threading.Lock()
 
+    def base_attempt(task_key):
+        # Java 侧传入跨 run 累计 attempt；普通首跑没有该字段时从 1 开始。
+        return max(1, int(nodes[task_key].get("base_attempt", 1) or 1))
+
+    def cumulative_attempt(task_key, local_attempt=1):
+        # Dagster op 内自动重试仍从 1 计数，回调给 Java 时转换成累计 attempt。
+        return base_attempt(task_key) + max(1, int(local_attempt or 1)) - 1
+
     def materialize_success(task_key):
         node = nodes[task_key]
         context.log_event(AssetMaterialization(
@@ -538,43 +547,58 @@ def run_pipeline_graph_op(context):
                     continue
                 status[task_key] = "UPSTREAM_FAILED"
             message = f"upstream failed: {root_key}"
-            log_ref = _upload_log(tenant_id, run_id, task_key, 1, message, context.log)
+            attempt = base_attempt(task_key)
+            # 被短路的节点没有本地重试过程，使用本次重跑的 base_attempt 归档日志与回调。
+            log_ref = _upload_log(tenant_id, run_id, task_key, attempt, message, context.log)
             _callback(base_url, run_id, task_key, {
                 "status": "UPSTREAM_FAILED",
                 "errorMsg": message,
                 "finishedAt": _now(),
                 "logRef": log_ref,
+                "attempt": attempt,
             }, context.log)
             stack.extend(downstream.get(task_key, []))
 
     def run_node(task_key):
         node = nodes[task_key]
         task_type = node["task_type"]
+        first_attempt = base_attempt(task_key)
         _callback(base_url, run_id, task_key, {
             "status": "RUNNING",
             "startedAt": _now(),
             "dagsterStepKey": task_key,
+            "attempt": first_attempt,
         }, context.log)
 
         if task_type == "SYNC_REF":
-            log_ref = _upload_log(tenant_id, run_id, task_key, 1, "SYNC_REF completed", context.log)
+            # SYNC_REF 是图内可观测节点但不提交 Spark，同样要用累计 attempt 保持 task_run 单调。
+            log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, "SYNC_REF completed", context.log)
             materialize_success(task_key)
             _callback(base_url, run_id, task_key, {
                 "status": "SUCCEEDED",
                 "finishedAt": _now(),
                 "artifactPath": _table_artifact(node),
                 "logRef": log_ref,
+                "attempt": first_attempt,
             }, context.log)
             return "SUCCEEDED"
 
         attempts = max(1, int(node.get("max_retries", 0)) + 1)
         last_log = ""
         last_log_ref = ""
-        for attempt in range(1, attempts + 1):
+        for local_attempt in range(1, attempts + 1):
+            attempt = cumulative_attempt(task_key, local_attempt)
             temp_paths = []
             try:
                 cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
-                context.log.info("[%s] attempt %s spark-submit cmd: %s", task_key, attempt, " ".join(cmd))
+                context.log.info(
+                    "[%s] attempt %s (local %s/%s) spark-submit cmd: %s",
+                    task_key,
+                    attempt,
+                    local_attempt,
+                    attempts,
+                    " ".join(cmd),
+                )
                 result = subprocess.run(
                     cmd,
                     text=True,
@@ -621,7 +645,7 @@ def run_pipeline_graph_op(context):
             "finishedAt": _now(),
             "errorMsg": _tail(last_log, 3900),
             "logRef": last_log_ref,
-            "attempt": attempts,
+            "attempt": cumulative_attempt(task_key, attempts),
         }, context.log)
         return "FAILED"
 
@@ -668,12 +692,14 @@ def run_pipeline_graph_op(context):
     for task_key in blocked:
         status[task_key] = "FAILED"
         message = "pipeline graph could not schedule task"
-        log_ref = _upload_log(tenant_id, run_id, task_key, 1, message, context.log)
+        attempt = base_attempt(task_key)
+        log_ref = _upload_log(tenant_id, run_id, task_key, attempt, message, context.log)
         _callback(base_url, run_id, task_key, {
             "status": "FAILED",
             "errorMsg": message,
             "finishedAt": _now(),
             "logRef": log_ref,
+            "attempt": attempt,
         }, context.log)
     failures.extend(blocked)
     if failures:

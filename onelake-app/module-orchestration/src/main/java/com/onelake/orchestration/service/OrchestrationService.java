@@ -22,6 +22,7 @@ import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.TaskRunCallbackRequest;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
+import com.onelake.orchestration.dto.TaskRerunResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
@@ -54,8 +55,10 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -307,6 +310,147 @@ public class OrchestrationService {
         return run.getId();
     }
 
+    @Transactional(noRollbackFor = BizException.class)
+    public TaskRerunResult rerunTask(UUID dagId, UUID runId, String taskKey, String modeRaw) {
+        if (!isGraphPipelineExecutionMode()) {
+            throw new BizException(40062, "从失败续跑仅在 GRAPH 执行模式可用");
+        }
+        if (!StringUtils.hasText(taskKey)) {
+            throw new BizException(40021, "taskKey 不能为空");
+        }
+        RerunMode mode = RerunMode.parse(modeRaw);
+        Dag dag = findTenantDag(dagId);
+        validatePipelineRuntimeContract(dag, PIPELINE_GRAPH_JOB_NAME);
+        JobRun run = runRepo.findByIdAndDagIdIn(runId, Set.of(dag.getId()))
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+
+        // 重跑会重置一批节点状态，必须与节点回调和 GRAPH 终态补偿串行化，避免旧回调覆盖新状态。
+        List<TaskRun> lockedTaskRuns = new ArrayList<>(taskRunRepo.findByJobRunIdForUpdate(runId));
+        Map<String, TaskRun> runByTaskKey = lockedTaskRuns.stream()
+                .collect(Collectors.toMap(TaskRun::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        TaskRun target = runByTaskKey.get(taskKey);
+        if (target == null || (dag.getTenantId() != null && target.getTenantId() != null
+                && !dag.getTenantId().equals(target.getTenantId()))) {
+            throw new BizException(40400, "task_run 不存在: " + taskKey);
+        }
+        List<PipelineTaskEdge> pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
+        if (pipelineEdges == null) {
+            pipelineEdges = List.of();
+        }
+        // SINGLE 只重跑目标节点；DOWNSTREAM 沿 PIPELINE 边续跑，但跳过已经成功的下游节点。
+        Set<String> subgraph = resolveRerunSubgraph(taskKey, mode, runByTaskKey, pipelineEdges);
+        boolean canRerunTarget = isRerunnableTaskRunStatus(target.getStatus())
+                || canResumeFromSucceededRoot(taskKey, mode, target, subgraph, runByTaskKey);
+        if (!canRerunTarget) {
+            throw new BizException(40063, "仅可对失败节点重跑，当前状态: " + target.getStatus());
+        }
+        if (mode == RerunMode.DOWNSTREAM) {
+            firstNonSucceededExternalUpstream(taskKey, subgraph, runByTaskKey, pipelineEdges)
+                    .ifPresent(dependency -> {
+                        throw new BizException(40063, "从失败续跑存在未成功的外部上游: " + dependency);
+                    });
+        }
+
+        PipelineCompileResult plan = pipelineCompileService.compile(dagId);
+        if (!plan.allValidated()) {
+            throw new BizException(40060, "Pipeline 编译未通过，无法重跑: "
+                    + String.join("; ",
+                    plan.tasks().stream()
+                            .filter(t -> !t.valid())
+                            .map(t -> t.taskKey() + ": " + t.errorMessage())
+                            .toList())
+                    + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
+        }
+        List<PipelineTask> allTasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
+        List<PipelineTask> observable = observableTasks(plan, allTasks);
+        Map<String, PipelineTask> observableByKey = observable.stream()
+                .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        List<String> missingTaskDefinitions = subgraph.stream()
+                .filter(key -> !observableByKey.containsKey(key))
+                .toList();
+        if (!missingTaskDefinitions.isEmpty()) {
+            throw new BizException(40060, "Pipeline 当前定义缺少可重跑节点: "
+                    + String.join(", ", missingTaskDefinitions));
+        }
+        List<PipelineTask> subgraphTasks = observable.stream()
+                .filter(task -> subgraph.contains(task.getTaskKey()))
+                .toList();
+
+        Instant now = Instant.now();
+        Map<String, Integer> baseAttempts = new LinkedHashMap<>();
+        for (String key : subgraph) {
+            TaskRun tr = runByTaskKey.get(key);
+            // task_run.attempt 保存跨 Dagster run 的累计次数，传给 Dagster 后作为本次本地重试的起点。
+            int nextAttempt = Math.max(1, tr.getAttempt() + 1);
+            tr.setAttempt(nextAttempt);
+            baseAttempts.put(key, nextAttempt);
+            tr.setStatus(key.equals(taskKey) ? TaskRunStatus.RUNNING : TaskRunStatus.QUEUED);
+            tr.setStartedAt(key.equals(taskKey) ? now : null);
+            tr.setFinishedAt(null);
+            tr.setErrorMsg(null);
+            tr.setUpdatedAt(now);
+            taskRunRepo.save(tr);
+        }
+
+        // M1 复用同一个 JobRun：先清掉旧 Dagster runId，launch 成功后再写入本次新值。
+        run.setStatus(DagStatus.RUNNING);
+        run.setDagsterRunId(null);
+        run.setFinishedAt(null);
+        run.setUpdatedAt(now);
+        runRepo.save(run);
+
+        TaskBundleContext ctx = new TaskBundleContext(
+                dagId, dag.getTenantId(), run.getId(), plan,
+                plan.pipelineTag(),
+                dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
+                dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
+        );
+        DagsterRunConfig runConfig = sparkBuilder.buildGraphRunConfig(
+                ctx,
+                subgraphTasks,
+                pipelineEdges,
+                pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
+                Math.max(1, pipelineMaxParallel),
+                baseAttempts);
+
+        try {
+            String dagsterRunId = dagster.launch(
+                    runConfig.jobName(), "onelake", "onelake-loc",
+                    runConfig.opConfig(), pipelineRerunTags(dag, run, taskKey, mode, subgraphTasks));
+            run.setDagsterRunId(dagsterRunId);
+            run.setStatus(DagStatus.RUNNING);
+            run.setUpdatedAt(Instant.now());
+            runRepo.save(run);
+            log.info("Spark pipeline {} rerun launched, runId={}, taskKey={}, mode={}, dagsterRunId={}",
+                    dagId, run.getId(), taskKey, mode, dagsterRunId);
+            return new TaskRerunResult(runId, new ArrayList<>(subgraph), dagsterRunId);
+        } catch (RuntimeException ex) {
+            // launch 失败发生在节点已重置之后，需要像首触发失败一样把子图收口到可观测 FAILED。
+            Instant failedAt = Instant.now();
+            run.setStatus(DagStatus.FAILED);
+            run.setFinishedAt(failedAt);
+            run.setUpdatedAt(failedAt);
+            runRepo.save(run);
+            for (String key : subgraph) {
+                TaskRun tr = runByTaskKey.get(key);
+                if (!isTerminalTaskRunStatus(tr.getStatus())) {
+                    tr.setStatus(TaskRunStatus.FAILED);
+                    tr.setErrorMsg("Dagster rerun launch failed: " + truncate(ex.getMessage(), 3900));
+                    tr.setFinishedAt(failedAt);
+                    tr.setUpdatedAt(failedAt);
+                    taskRunRepo.save(tr);
+                }
+            }
+            publishPipelineRunEvent(dag, run, plan, false, ex.getMessage());
+            if (ex instanceof BizException bizException) {
+                throw bizException;
+            }
+            throw new BizException(50200, "Dagster 重跑触发失败: " + ex.getMessage());
+        }
+    }
+
     private List<PipelineTask> observableTasks(PipelineCompileResult plan, List<PipelineTask> tasks) {
         Map<String, PipelineTask> byKey = tasks.stream()
                 .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
@@ -367,6 +511,107 @@ public class OrchestrationService {
         return statuses;
     }
 
+    private Set<String> resolveRerunSubgraph(String rootKey,
+                                             RerunMode mode,
+                                             Map<String, TaskRun> runByTaskKey,
+                                             List<PipelineTaskEdge> allEdges) {
+        LinkedHashSet<String> selected = new LinkedHashSet<>();
+        selected.add(rootKey);
+        if (mode == RerunMode.SINGLE) {
+            return selected;
+        }
+
+        Map<String, List<String>> downstreamBySource = new LinkedHashMap<>();
+        List<PipelineTaskEdge> edges = allEdges == null ? List.of() : allEdges;
+        for (PipelineTaskEdge edge : edges) {
+            if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
+                continue;
+            }
+            downstreamBySource
+                    .computeIfAbsent(edge.getSourceKey(), ignored -> new ArrayList<>())
+                    .add(edge.getTargetKey());
+        }
+
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(rootKey);
+        while (!queue.isEmpty()) {
+            String current = queue.removeFirst();
+            for (String childKey : downstreamBySource.getOrDefault(current, List.of())) {
+                TaskRun childRun = runByTaskKey.get(childKey);
+                // 已成功节点代表本次续跑不需要重新物化；同时也不再穿透它继续扩展子图。
+                if (childRun == null || childRun.getStatus() == TaskRunStatus.SUCCEEDED) {
+                    continue;
+                }
+                if (selected.add(childKey)) {
+                    queue.addLast(childKey);
+                }
+            }
+        }
+        return selected;
+    }
+
+    private boolean canResumeFromSucceededRoot(String rootKey,
+                                               RerunMode mode,
+                                               TaskRun rootRun,
+                                               Set<String> subgraph,
+                                               Map<String, TaskRun> runByTaskKey) {
+        if (mode != RerunMode.DOWNSTREAM
+                || rootRun == null
+                || rootRun.getStatus() != TaskRunStatus.SUCCEEDED
+                || subgraph == null
+                || subgraph.size() <= 1) {
+            return false;
+        }
+
+        boolean hasBlockedDescendant = false;
+        for (String key : subgraph) {
+            if (key.equals(rootKey)) {
+                continue;
+            }
+            TaskRun run = runByTaskKey.get(key);
+            if (run != null && isRerunnableTaskRunStatus(run.getStatus())) {
+                hasBlockedDescendant = true;
+            }
+        }
+        return hasBlockedDescendant;
+    }
+
+    private Optional<String> firstNonSucceededExternalUpstream(String rootKey,
+                                                              Set<String> subgraph,
+                                                              Map<String, TaskRun> runByTaskKey,
+                                                              List<PipelineTaskEdge> allEdges) {
+        if (subgraph == null || subgraph.size() <= 1) {
+            return Optional.empty();
+        }
+
+        Map<String, List<String>> upstreamByTarget = new LinkedHashMap<>();
+        for (PipelineTaskEdge edge : allEdges == null ? List.<PipelineTaskEdge>of() : allEdges) {
+            if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
+                continue;
+            }
+            upstreamByTarget
+                    .computeIfAbsent(edge.getTargetKey(), ignored -> new ArrayList<>())
+                    .add(edge.getSourceKey());
+        }
+
+        for (String key : subgraph) {
+            if (key.equals(rootKey)) {
+                continue;
+            }
+            for (String upstreamKey : upstreamByTarget.getOrDefault(key, List.of())) {
+                if (subgraph.contains(upstreamKey)) {
+                    continue;
+                }
+                TaskRun upstreamRun = runByTaskKey.get(upstreamKey);
+                // 子图会过滤外部边，只有外部入边已经成功时才允许本次续跑继续调度下游。
+                if (upstreamRun == null || upstreamRun.getStatus() != TaskRunStatus.SUCCEEDED) {
+                    return Optional.of(upstreamKey + " -> " + key);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx,
                                                     List<PipelineTask> tasks,
                                                     List<PipelineTaskEdge> pipelineEdges) {
@@ -377,12 +622,30 @@ public class OrchestrationService {
                     tasks,
                     pipelineEdges,
                     pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
-                    Math.max(1, pipelineMaxParallel));
+                    Math.max(1, pipelineMaxParallel),
+                    Map.of());
         }
         return sparkBuilder.build(
                 ctx,
                 tasks,
                 pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim());
+    }
+
+    private List<Map<String, String>> pipelineRerunTags(Dag dag,
+                                                        JobRun run,
+                                                        String taskKey,
+                                                        RerunMode mode,
+                                                        List<PipelineTask> tasks) {
+        return List.of(
+                Map.of("key", "onelake.pipeline_id", "value", dag.getId().toString()),
+                Map.of("key", "onelake.run_id", "value", run.getId().toString()),
+                Map.of("key", "onelake.tenant_id", "value", asString(dag.getTenantId())),
+                Map.of("key", "onelake.trigger_type", "value", asString(run.getTriggerType())),
+                Map.of("key", "onelake.engine", "value", pipelineEngineTag(tasks)),
+                Map.of("key", "onelake.rerun", "value", "true"),
+                Map.of("key", "onelake.rerun_task", "value", taskKey),
+                Map.of("key", "onelake.rerun_mode", "value", mode.name())
+        );
     }
 
     private String activePipelineDagsterJob() {
@@ -520,10 +783,15 @@ public class OrchestrationService {
                 && !dag.getTenantId().equals(taskRun.getTenantId())) {
             throw new BizException(40400, "task_run 不存在: " + taskKey);
         }
+        if (request.attempt() != null && request.attempt() < 1) {
+            throw new BizException(40022, "attempt 必须大于等于 1");
+        }
 
         TaskRunStatus current = taskRun.getStatus();
-        // 单调状态机：终态不可变，且低 rank 回调不允许把节点状态倒退。
-        if (isTerminalTaskRunStatus(current) || taskRunStatusRank(requested) < taskRunStatusRank(current)) {
+        // 单调状态机：终态不可变，低 rank 或低 attempt 的迟到回调不允许把节点状态倒退。
+        if (isTerminalTaskRunStatus(current)
+                || taskRunStatusRank(requested) < taskRunStatusRank(current)
+                || (request.attempt() != null && request.attempt() < taskRun.getAttempt())) {
             return new TaskRunCallbackResult(false, current);
         }
 
@@ -605,7 +873,11 @@ public class OrchestrationService {
         DagStatus oldStatus = run.getStatus();
         if (isTerminal(run.getStatus())) {
             try {
-                syncTaskRunsFromTerminalRun(run, run.getStatus());
+                DagStatus reconciled = syncTaskRunsFromTerminalRun(run, run.getStatus());
+                if (reconciled != run.getStatus()) {
+                    run.setStatus(reconciled);
+                    runRepo.save(run);
+                }
             } catch (RuntimeException e) {
                 log.warn("Pipeline task run status sync failed for {}: {}", run.getDagsterRunId(), e.getMessage());
             }
@@ -625,8 +897,12 @@ public class OrchestrationService {
 
             // P4-A: publish pipeline.run.succeeded/failed the first time a v2 pipeline enters terminal state.
             if (isTerminal(mapped) && !isTerminal(oldStatus)) {
-                syncTaskRunsFromTerminalRun(run, mapped);
-                publishPipelineRunEventsIfTerminal(run, mapped);
+                DagStatus reconciled = syncTaskRunsFromTerminalRun(run, mapped);
+                if (reconciled != mapped) {
+                    run.setStatus(reconciled);
+                    runRepo.save(run);
+                }
+                publishPipelineRunEventsIfTerminal(run, reconciled);
             }
         } catch (RuntimeException e) {
             log.warn("Dagster run status refresh failed for {}: {}", run.getDagsterRunId(), e.getMessage());
@@ -639,10 +915,9 @@ public class OrchestrationService {
      * Spark artifacts are parsed, every non-terminal task_run follows the Dagster run
      * terminal state so the UI and Outbox do not stay stuck at QUEUED.
      */
-    private void syncTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
+    private DagStatus syncTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
         if (isGraphPipelineExecutionMode()) {
-            compensateGraphTaskRunsFromTerminalRun(run, terminalStatus);
-            return;
+            return compensateGraphTaskRunsFromTerminalRun(run, terminalStatus);
         }
         TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
                 ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
@@ -674,9 +949,10 @@ public class OrchestrationService {
             }
             taskRunRepo.save(tr);
         }
+        return terminalStatus;
     }
 
-    private void compensateGraphTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
+    private DagStatus compensateGraphTaskRunsFromTerminalRun(JobRun run, DagStatus terminalStatus) {
         TaskRunStatus mapped = terminalStatus == DagStatus.SUCCEEDED
                 ? TaskRunStatus.SUCCEEDED : TaskRunStatus.FAILED;
         // GRAPH 模式可能同时收到节点回调和 run 终态兜底；锁住整批 task_run 后再补偿。
@@ -702,6 +978,37 @@ public class OrchestrationService {
             }
             taskRunRepo.save(tr);
         }
+        return reconcileGraphRunStatusFromTaskRuns(taskRuns, terminalStatus);
+    }
+
+    private DagStatus reconcileGraphRunStatusFromTaskRuns(List<TaskRun> taskRuns, DagStatus terminalStatus) {
+        if (taskRuns == null || taskRuns.isEmpty()) {
+            return terminalStatus;
+        }
+        boolean allSucceeded = true;
+        boolean hasCancelled = false;
+        for (TaskRun tr : taskRuns) {
+            TaskRunStatus status = tr.getStatus();
+            if (status != TaskRunStatus.SUCCEEDED) {
+                allSucceeded = false;
+            }
+            // 子图重跑成功只代表本次提交的子图完成，旧的失败/上游失败节点仍决定整条运行失败。
+            if (status == TaskRunStatus.FAILED
+                    || status == TaskRunStatus.UPSTREAM_FAILED
+                    || status == TaskRunStatus.SKIPPED) {
+                return DagStatus.FAILED;
+            }
+            if (status == TaskRunStatus.CANCELLED) {
+                hasCancelled = true;
+            }
+        }
+        if (hasCancelled) {
+            return DagStatus.CANCELLED;
+        }
+        if (terminalStatus == DagStatus.SUCCEEDED && allSucceeded) {
+            return DagStatus.SUCCEEDED;
+        }
+        return terminalStatus;
     }
 
     private Set<String> failedOrBlockedTaskKeys(List<TaskRun> taskRuns) {
@@ -759,6 +1066,11 @@ public class OrchestrationService {
                 || status == TaskRunStatus.SKIPPED;
     }
 
+    private boolean isRerunnableTaskRunStatus(TaskRunStatus status) {
+        return status == TaskRunStatus.FAILED
+                || status == TaskRunStatus.UPSTREAM_FAILED;
+    }
+
     private int taskRunStatusRank(TaskRunStatus status) {
         if (status == null) {
             return -1;
@@ -782,10 +1094,7 @@ public class OrchestrationService {
         Instant now = Instant.now();
         // 可选字段只在回调携带时覆盖，避免较早的空值回调冲掉已写入的观测信息。
         if (request.attempt() != null) {
-            if (request.attempt() < 1) {
-                throw new BizException(40022, "attempt 必须大于等于 1");
-            }
-            taskRun.setAttempt(request.attempt());
+            taskRun.setAttempt(Math.max(taskRun.getAttempt(), request.attempt()));
         }
         if (request.logRef() != null) {
             taskRun.setLogRef(truncate(request.logRef(), 512));
@@ -1162,4 +1471,20 @@ public class OrchestrationService {
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 
     public record TaskRunLogResource(String objectKey, String filename, long contentLength, InputStream content) {}
+
+    private enum RerunMode {
+        SINGLE,
+        DOWNSTREAM;
+
+        private static RerunMode parse(String raw) {
+            if (!StringUtils.hasText(raw)) {
+                return SINGLE;
+            }
+            try {
+                return RerunMode.valueOf(raw.trim().toUpperCase());
+            } catch (IllegalArgumentException ex) {
+                throw new BizException(40022, "mode 非法: " + raw);
+            }
+        }
+    }
 }

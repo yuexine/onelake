@@ -6,11 +6,11 @@
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import { Alert, App as AntApp, Descriptions, Drawer, Select, Space, Button, Table, Tabs, Tag, Typography } from 'antd';
-import { ArrowLeftOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, ReloadOutlined, UpOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, BranchesOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, UpOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
 import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
-import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRun } from '../../types';
+import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRerunMode, TaskRun } from '../../types';
 import { normalizeCatalogAssets } from '../lakehouse/assetAdapter';
 
 const { Text } = Typography;
@@ -90,6 +90,7 @@ const RUN_STATUS_LABEL: Record<RunDisplayStatus, string> = {
   NOT_STARTED: '未开始',
   BLOCKED: '已阻断',
 };
+const RERUNNABLE_TASK_STATUSES = new Set<RunDisplayStatus>(['FAILED', 'UPSTREAM_FAILED']);
 
 function formatTaskDuration(run?: TaskRun) {
   if (!run) return '-';
@@ -850,7 +851,7 @@ export default function RunInstances() {
             </SectionCard>
             <SectionCard title="任务拓扑与节点状态" icon={<HistoryOutlined />} flatBody>
               <div style={{ padding: 12 }}>
-                <TaskRunsPanel runId={detailRun.id} dagId={detailRun.dagId} />
+                <TaskRunsPanel runId={detailRun.id} dagId={detailRun.dagId} onRunChanged={loadRunDetail} />
               </div>
             </SectionCard>
           </>
@@ -900,6 +901,7 @@ export default function RunInstances() {
             expandedRowRender: (run: JobRun) => (
               <ExpandedTaskRunsPanel
                 run={run}
+                onRunChanged={() => loadRuns()}
                 onCollapse={() => setExpandedRunIds((keys) => keys.filter((key) => key !== run.id))}
               />
             ),
@@ -970,7 +972,7 @@ export default function RunInstances() {
   );
 }
 
-function ExpandedTaskRunsPanel({ run, onCollapse }: { run: JobRun; onCollapse: () => void }) {
+function ExpandedTaskRunsPanel({ run, onCollapse, onRunChanged }: { run: JobRun; onCollapse: () => void; onRunChanged?: () => void }) {
   return (
     <div
       className="orchestration-run-expanded-panel"
@@ -1018,7 +1020,7 @@ function ExpandedTaskRunsPanel({ run, onCollapse }: { run: JobRun; onCollapse: (
           padding: 12,
         }}
       >
-        <TaskRunsPanel runId={run.id} dagId={run.dagId} />
+        <TaskRunsPanel runId={run.id} dagId={run.dagId} onRunChanged={onRunChanged} />
       </div>
     </div>
   );
@@ -1277,7 +1279,8 @@ function TaskRunDrawer({
  * Per-task status panel (P4). Loads via PipelineAPI.listTaskRuns for v2 pipelines.
  * Falls back to "no task_run data" when a run has no task-level rows.
  */
-function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
+function TaskRunsPanel({ runId, dagId, onRunChanged }: { runId: string; dagId: string; onRunChanged?: () => void }) {
+  const { message } = AntApp.useApp();
   const [taskRuns, setTaskRuns] = useState<TaskRun[] | null>(null);
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
   const [edges, setEdges] = useState<PipelineTaskEdge[]>([]);
@@ -1285,6 +1288,39 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [selectedRow, setSelectedRow] = useState<TaskRunDisplayRow | null>(null);
   const [drawerTab, setDrawerTab] = useState('overview');
+  const [rerunningTask, setRerunningTask] = useState<string | null>(null);
+
+  const reloadTaskRuns = useCallback(async () => {
+    try {
+      const runs = await PipelineAPI.listTaskRuns(dagId, runId);
+      setTaskRuns(runs);
+      setError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'task_run 加载失败';
+      setError(msg);
+      throw e;
+    }
+  }, [dagId, runId]);
+
+  const handleRerunTask = async (row: TaskRunDisplayRow, mode: TaskRerunMode) => {
+    if (!canRerunTaskForMode(row, mode)) {
+      message.warning(mode === 'DOWNSTREAM' ? '仅失败节点或存在失败下游的已修复节点可从失败续跑' : '仅失败或上游失败节点可重跑');
+      return;
+    }
+    const loadingKey = `${row.taskKey}:${mode}`;
+    setRerunningTask(loadingKey);
+    try {
+      const result = await PipelineAPI.rerunTask(dagId, runId, row.taskKey, mode);
+      const taskScope = result.rerunTasks?.length ? result.rerunTasks.join('、') : row.taskKey;
+      message.success(`${mode === 'DOWNSTREAM' ? '已从失败续跑' : '已发起重跑'}：${taskScope}`);
+      await reloadTaskRuns();
+      onRunChanged?.();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '节点重跑失败');
+    } finally {
+      setRerunningTask(null);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1344,6 +1380,90 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
     setSelectedRow(row);
     setDrawerTab(tab);
   };
+
+  function buildDownstreamSubgraph(rootKey: string) {
+    const runByKey = new Map((taskRuns || []).map((run) => [run.taskKey, run]));
+    const downstreamBySource = new Map<string, string[]>();
+    edges
+      .filter((edge) => edge.edgeLayer === 'PIPELINE')
+      .forEach((edge) => {
+        const children = downstreamBySource.get(edge.sourceKey) || [];
+        children.push(edge.targetKey);
+        downstreamBySource.set(edge.sourceKey, children);
+      });
+
+    const selected = new Set<string>([rootKey]);
+    const queue = [rootKey];
+    while (queue.length) {
+      const current = queue.shift()!;
+      (downstreamBySource.get(current) || []).forEach((childKey) => {
+        const childRun = runByKey.get(childKey);
+        if (!childRun || childRun.status === 'SUCCEEDED') return;
+        if (!selected.has(childKey)) {
+          selected.add(childKey);
+          queue.push(childKey);
+        }
+      });
+    }
+    return selected;
+  }
+
+  function canResumeFromSucceededRoot(row: TaskRunDisplayRow) {
+    if (!row.run || row.run.status !== 'SUCCEEDED') return false;
+    const subgraph = buildDownstreamSubgraph(row.taskKey);
+    if (subgraph.size <= 1) return false;
+
+    if (findNonSucceededExternalUpstream(row.taskKey, subgraph)) {
+      return false;
+    }
+    return hasRerunnableDescendant(row.taskKey, subgraph);
+  }
+
+  function hasRerunnableDescendant(rootKey: string, subgraph: Set<string>) {
+    const runByKey = new Map((taskRuns || []).map((run) => [run.taskKey, run]));
+    for (const taskKey of subgraph) {
+      if (taskKey === rootKey) continue;
+      const run = runByKey.get(taskKey);
+      if (run && RERUNNABLE_TASK_STATUSES.has(run.status)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findNonSucceededExternalUpstream(rootKey: string, subgraph: Set<string>) {
+    if (subgraph.size <= 1) return null;
+    const runByKey = new Map((taskRuns || []).map((run) => [run.taskKey, run]));
+    const upstreamByTarget = new Map<string, string[]>();
+    edges
+      .filter((edge) => edge.edgeLayer === 'PIPELINE')
+      .forEach((edge) => {
+        const upstreams = upstreamByTarget.get(edge.targetKey) || [];
+        upstreams.push(edge.sourceKey);
+        upstreamByTarget.set(edge.targetKey, upstreams);
+      });
+
+    for (const taskKey of subgraph) {
+      if (taskKey === rootKey) continue;
+      for (const upstreamKey of upstreamByTarget.get(taskKey) || []) {
+        if (subgraph.has(upstreamKey)) continue;
+        if (runByKey.get(upstreamKey)?.status !== 'SUCCEEDED') {
+          return `${upstreamKey} -> ${taskKey}`;
+        }
+      }
+    }
+    return null;
+  }
+
+  function canRerunTaskForMode(row: TaskRunDisplayRow, mode: TaskRerunMode) {
+    if (!row.run) return false;
+    if (mode === 'SINGLE') return RERUNNABLE_TASK_STATUSES.has(row.run.status);
+    if (RERUNNABLE_TASK_STATUSES.has(row.run.status)) {
+      const subgraph = buildDownstreamSubgraph(row.taskKey);
+      return !findNonSucceededExternalUpstream(row.taskKey, subgraph);
+    }
+    return mode === 'DOWNSTREAM' && canResumeFromSucceededRoot(row);
+  }
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -1460,29 +1580,63 @@ function TaskRunsPanel({ runId, dagId }: { runId: string; dagId: string }) {
         },
         {
           title: '操作',
-          width: 150,
+          width: 320,
           fixed: 'right',
-          render: (_: unknown, row: TaskRunDisplayRow) => (
-            <Space size={4}>
-              <Button
-                size="small"
-                type="link"
-                icon={<EyeOutlined />}
-                onClick={() => openTaskDrawer(row)}
-              >
-                详情
-              </Button>
-              <Button
-                size="small"
-                type="link"
-                icon={<FileTextOutlined />}
-                disabled={!row.run?.logRef}
-                onClick={() => openTaskDrawer(row, 'log')}
-              >
-                日志
-              </Button>
-            </Space>
-          ),
+          render: (_: unknown, row: TaskRunDisplayRow) => {
+            const canRerunSingle = canRerunTaskForMode(row, 'SINGLE');
+            const canRerunDownstream = canRerunTaskForMode(row, 'DOWNSTREAM');
+            const singleKey = `${row.taskKey}:SINGLE`;
+            const downstreamKey = `${row.taskKey}:DOWNSTREAM`;
+            const singleDisabledTitle = canRerunSingle ? undefined : '仅失败或上游失败节点可重跑';
+            const downstreamDisabledTitle = canRerunDownstream ? undefined : '仅失败节点或存在失败下游的已修复节点可从失败续跑';
+            return (
+              <Space size={4} wrap>
+                <Button
+                  size="small"
+                  type="link"
+                  icon={<EyeOutlined />}
+                  onClick={() => openTaskDrawer(row)}
+                >
+                  详情
+                </Button>
+                <Button
+                  size="small"
+                  type="link"
+                  icon={<FileTextOutlined />}
+                  disabled={!row.run?.logRef}
+                  onClick={() => openTaskDrawer(row, 'log')}
+                >
+                  日志
+                </Button>
+                {!row.synthetic && (
+                  <>
+                    <Button
+                      size="small"
+                      type="link"
+                      title={singleDisabledTitle}
+                      icon={<RedoOutlined />}
+                      loading={rerunningTask === singleKey}
+                      disabled={!canRerunSingle || (Boolean(rerunningTask) && rerunningTask !== singleKey)}
+                      onClick={() => handleRerunTask(row, 'SINGLE')}
+                    >
+                      重跑
+                    </Button>
+                    <Button
+                      size="small"
+                      type="link"
+                      title={downstreamDisabledTitle}
+                      icon={<BranchesOutlined />}
+                      loading={rerunningTask === downstreamKey}
+                      disabled={!canRerunDownstream || (Boolean(rerunningTask) && rerunningTask !== downstreamKey)}
+                      onClick={() => handleRerunTask(row, 'DOWNSTREAM')}
+                    >
+                      从失败续跑
+                    </Button>
+                  </>
+                )}
+              </Space>
+            );
+          },
         },
         ]}
       />

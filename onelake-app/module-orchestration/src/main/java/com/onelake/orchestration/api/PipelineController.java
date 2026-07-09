@@ -11,6 +11,8 @@ import com.onelake.orchestration.dto.PipelineTaskEdgeRequest;
 import com.onelake.orchestration.dto.PipelineTaskRequest;
 import com.onelake.orchestration.dto.PipelineValidationResult;
 import com.onelake.orchestration.dto.TaskRunDTO;
+import com.onelake.orchestration.dto.TaskRerunRequest;
+import com.onelake.orchestration.dto.TaskRerunResult;
 import com.onelake.orchestration.service.OrchestrationService;
 import com.onelake.orchestration.service.PipelineService;
 import lombok.RequiredArgsConstructor;
@@ -143,6 +145,16 @@ public class PipelineController {
         TriggerType tt = TriggerType.valueOf(trigger);
         UUID runId = orchestrationService.triggerPipelineRun(dagId, tt);
         return ApiResponse.ok(Map.of("runId", runId));
+    }
+
+    @PostMapping("/{dagId}/runs/{runId}/tasks/{taskKey}/rerun")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<TaskRerunResult> rerunTask(@PathVariable UUID dagId,
+                                                  @PathVariable UUID runId,
+                                                  @PathVariable String taskKey,
+                                                  @RequestBody(required = false) TaskRerunRequest request) {
+        String mode = request == null ? null : request.mode();
+        return ApiResponse.ok(orchestrationService.rerunTask(dagId, runId, taskKey, mode));
     }
 
     // ---------- ODS→DWD template (P3) ----------

@@ -49,6 +49,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -199,6 +200,39 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void graphRefreshKeepsJobRunFailedWhenSucceededSubgraphLeavesBlockedTasks() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.RUNNING);
+        run.setFinishedAt(null);
+        TaskRun upstream = taskRun("sync_ref", TaskRunStatus.SUCCEEDED);
+        TaskRun rerunNode = taskRun("spark_sql", TaskRunStatus.SUCCEEDED);
+        TaskRun blocked = taskRun("quality_gate", TaskRunStatus.UPSTREAM_FAILED);
+        blocked.setErrorMsg("Upstream task failed: spark_sql");
+        Instant startedAt = Instant.parse("2026-07-09T02:00:00Z");
+        Instant finishedAt = Instant.parse("2026-07-09T02:03:00Z");
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(dagster.getRunStatus("dagster-run-1"))
+                .thenReturn(new DagsterClient.RunStatus("dagster-run-1", "SUCCEEDED", startedAt, finishedAt));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(upstream, rerunNode, blocked));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("FAILED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.FAILED);
+        assertThat(run.getFinishedAt()).isEqualTo(finishedAt);
+        assertThat(blocked.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
+        verify(runRepo, times(2)).save(run);
+        verify(taskRunRepo, never()).save(blocked);
+    }
+
+    @Test
     void listRunsKeepsTerminalRunLocalWithoutDagsterRefresh() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());
@@ -220,6 +254,31 @@ class OrchestrationServiceTest {
         verify(dagster, never()).getRunStatus("dagster-run-1");
         // Runtime status reads stay inside orchestration.
         verify(jdbc, never()).update(startsWith("UPDATE modeling.model_run"), any(), any(), any(), any());
+    }
+
+    @Test
+    void graphTerminalRunReconcilesPersistedSuccessWhenTasksRemainBlocked() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.SUCCEEDED);
+        TaskRun upstream = taskRun("sync_ref", TaskRunStatus.SUCCEEDED);
+        TaskRun rerunNode = taskRun("spark_sql", TaskRunStatus.SUCCEEDED);
+        TaskRun blocked = taskRun("quality_gate", TaskRunStatus.UPSTREAM_FAILED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(upstream, rerunNode, blocked));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("FAILED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.FAILED);
+        verify(runRepo).save(run);
+        verify(dagster, never()).getRunStatus("dagster-run-1");
     }
 
     @Test
@@ -376,7 +435,8 @@ class OrchestrationServiceTest {
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
         verify(sparkBuilder).build(any(), anyList(), eq("http://localhost:8080"));
-        verify(sparkBuilder, never()).buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt());
+        verify(sparkBuilder, never()).buildGraphRunConfig(
+                any(), anyList(), anyList(), anyString(), anyInt(), anyMap());
         verify(dagster).launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
     }
@@ -395,7 +455,7 @@ class OrchestrationServiceTest {
         when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8)))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
         when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-graph");
@@ -405,7 +465,7 @@ class OrchestrationServiceTest {
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
         verify(sparkBuilder, never()).build(any(), anyList(), anyString());
-        verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8));
+        verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap());
         verify(dagster).launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
     }
@@ -426,6 +486,298 @@ class OrchestrationServiceTest {
         verify(pipelineCompileService, never()).compile(any());
         verifyNoInteractions(runRepo);
         verifyNoInteractions(dagster);
+    }
+
+    @Test
+    void rerunTaskRejectsLegacyExecutionMode() {
+        assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "spark_node", "SINGLE"))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(40062))
+                .hasMessageContaining("GRAPH");
+
+        verifyNoInteractions(dagRepo, taskRunRepo, dagster);
+    }
+
+    @Test
+    void rerunTaskRejectsNonFailedTaskRun() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        TaskRun running = taskRun("spark_node", TaskRunStatus.RUNNING);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(running));
+
+        assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "spark_node", "SINGLE"))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(40063))
+                .hasMessageContaining("仅可对失败节点重跑");
+
+        verify(pipelineCompileService, never()).compile(any());
+        verifyNoInteractions(dagster);
+    }
+
+    @Test
+    void rerunTaskSingleResetsOnlyTargetAndLaunchesSubgraph() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        PipelineTask failedTask = pipelineTask("failed");
+        PipelineTask downstreamTask = pipelineTask("downstream");
+        TaskRun failed = taskRun("failed", TaskRunStatus.FAILED);
+        failed.setAttempt(2);
+        failed.setFinishedAt(Instant.parse("2026-07-09T01:02:00Z"));
+        failed.setErrorMsg("boom");
+        TaskRun downstream = taskRun("downstream", TaskRunStatus.UPSTREAM_FAILED);
+        downstream.setAttempt(1);
+        downstream.setErrorMsg("Upstream task failed: failed");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(failed, downstream));
+        when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(failedTask, downstreamTask));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(failedTask, downstreamTask));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
+                .thenReturn(List.of(pipelineEdge("failed", "downstream")));
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList())).thenReturn("dagster-rerun-single");
+
+        var result = service.rerunTask(DAG_ID, RUN_ID, "failed", "SINGLE");
+
+        assertThat(result.runId()).isEqualTo(RUN_ID);
+        assertThat(result.rerunTasks()).containsExactly("failed");
+        assertThat(result.dagsterRunId()).isEqualTo("dagster-rerun-single");
+        assertThat(failed.getAttempt()).isEqualTo(3);
+        assertThat(failed.getStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(failed.getFinishedAt()).isNull();
+        assertThat(failed.getErrorMsg()).isNull();
+        assertThat(failed.getStartedAt()).isNotNull();
+        assertThat(downstream.getAttempt()).isEqualTo(1);
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
+        assertThat(downstream.getErrorMsg()).isEqualTo("Upstream task failed: failed");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.RUNNING);
+        assertThat(run.getFinishedAt()).isNull();
+        assertThat(run.getDagsterRunId()).isEqualTo("dagster-rerun-single");
+        verify(sparkBuilder).buildGraphRunConfig(
+                any(),
+                argThat(tasks -> tasks.size() == 1 && "failed".equals(tasks.get(0).getTaskKey())),
+                anyList(),
+                eq(""),
+                eq(4),
+                argThat(baseAttempts -> baseAttempts.size() == 1
+                        && Integer.valueOf(3).equals(baseAttempts.get("failed"))));
+    }
+
+    @Test
+    void rerunTaskDownstreamResetsFailedNodeAndNonSucceededDescendants() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        PipelineTask rootTask = pipelineTask("root");
+        PipelineTask leftTask = pipelineTask("left");
+        PipelineTask rightTask = pipelineTask("right");
+        PipelineTask joinTask = pipelineTask("join");
+        TaskRun root = taskRun("root", TaskRunStatus.SUCCEEDED);
+        TaskRun left = taskRun("left", TaskRunStatus.FAILED);
+        left.setAttempt(2);
+        left.setFinishedAt(Instant.parse("2026-07-09T01:02:00Z"));
+        left.setErrorMsg("left failed");
+        TaskRun right = taskRun("right", TaskRunStatus.SUCCEEDED);
+        TaskRun join = taskRun("join", TaskRunStatus.UPSTREAM_FAILED);
+        join.setAttempt(1);
+        join.setErrorMsg("Upstream task failed: left");
+        List<PipelineTaskEdge> edges = List.of(
+                pipelineEdge("root", "left"),
+                pipelineEdge("root", "right"),
+                pipelineEdge("left", "join"),
+                pipelineEdge("right", "join"));
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(root, left, right, join));
+        when(pipelineCompileService.compile(DAG_ID))
+                .thenReturn(pipelinePlan(rootTask, leftTask, rightTask, joinTask));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(rootTask, leftTask, rightTask, joinTask));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList())).thenReturn("dagster-rerun-downstream");
+
+        var result = service.rerunTask(DAG_ID, RUN_ID, "left", "DOWNSTREAM");
+
+        assertThat(result.rerunTasks()).containsExactly("left", "join");
+        assertThat(left.getAttempt()).isEqualTo(3);
+        assertThat(left.getStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(join.getAttempt()).isEqualTo(2);
+        assertThat(join.getStatus()).isEqualTo(TaskRunStatus.QUEUED);
+        assertThat(join.getStartedAt()).isNull();
+        assertThat(join.getFinishedAt()).isNull();
+        assertThat(join.getErrorMsg()).isNull();
+        assertThat(root.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(right.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        verify(sparkBuilder).buildGraphRunConfig(
+                any(),
+                argThat(tasks -> tasks.stream().map(PipelineTask::getTaskKey).toList()
+                        .equals(List.of("left", "join"))),
+                eq(edges),
+                eq(""),
+                eq(4),
+                argThat(baseAttempts -> baseAttempts.equals(Map.of("left", 3, "join", 2))));
+    }
+
+    @Test
+    void rerunTaskDownstreamAllowsSucceededRootWhenBlockedDescendantCanResume() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        PipelineTask upstreamTask = pipelineTask("sync_ref");
+        PipelineTask sparkTask = pipelineTask("spark_sql");
+        PipelineTask gateTask = pipelineTask("quality_gate");
+        TaskRun upstream = taskRun("sync_ref", TaskRunStatus.SUCCEEDED);
+        TaskRun spark = taskRun("spark_sql", TaskRunStatus.SUCCEEDED);
+        spark.setAttempt(2);
+        TaskRun gate = taskRun("quality_gate", TaskRunStatus.UPSTREAM_FAILED);
+        gate.setAttempt(1);
+        gate.setErrorMsg("Upstream task failed: spark_sql");
+        List<PipelineTaskEdge> edges = List.of(
+                pipelineEdge("sync_ref", "spark_sql"),
+                pipelineEdge("spark_sql", "quality_gate"));
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(upstream, spark, gate));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
+        when(pipelineCompileService.compile(DAG_ID))
+                .thenReturn(pipelinePlan(upstreamTask, sparkTask, gateTask));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(upstreamTask, sparkTask, gateTask));
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList())).thenReturn("dagster-rerun-resume");
+
+        var result = service.rerunTask(DAG_ID, RUN_ID, "spark_sql", "DOWNSTREAM");
+
+        assertThat(result.rerunTasks()).containsExactly("spark_sql", "quality_gate");
+        assertThat(upstream.getAttempt()).isEqualTo(1);
+        assertThat(upstream.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+        assertThat(spark.getAttempt()).isEqualTo(3);
+        assertThat(spark.getStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(gate.getAttempt()).isEqualTo(2);
+        assertThat(gate.getStatus()).isEqualTo(TaskRunStatus.QUEUED);
+        verify(sparkBuilder).buildGraphRunConfig(
+                any(),
+                argThat(tasks -> tasks.stream().map(PipelineTask::getTaskKey).toList()
+                        .equals(List.of("spark_sql", "quality_gate"))),
+                eq(edges),
+                eq(""),
+                eq(4),
+                argThat(baseAttempts -> baseAttempts.equals(Map.of("spark_sql", 3, "quality_gate", 2))));
+    }
+
+    @Test
+    void rerunTaskDownstreamRejectsFailedBranchWithFailedExternalInput() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        TaskRun root = taskRun("root", TaskRunStatus.SUCCEEDED);
+        TaskRun left = taskRun("left", TaskRunStatus.FAILED);
+        TaskRun right = taskRun("right", TaskRunStatus.FAILED);
+        TaskRun join = taskRun("join", TaskRunStatus.UPSTREAM_FAILED);
+        List<PipelineTaskEdge> edges = List.of(
+                pipelineEdge("root", "left"),
+                pipelineEdge("root", "right"),
+                pipelineEdge("left", "join"),
+                pipelineEdge("right", "join"));
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(root, left, right, join));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
+
+        assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "left", "DOWNSTREAM"))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(40063))
+                .hasMessageContaining("从失败续跑存在未成功的外部上游: right -> join");
+
+        assertThat(left.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(right.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(join.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
+        verify(pipelineCompileService, never()).compile(any());
+        verifyNoInteractions(dagster);
+    }
+
+    @Test
+    void rerunTaskDownstreamRejectsSucceededBranchWithFailedExternalInput() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        TaskRun root = taskRun("root", TaskRunStatus.SUCCEEDED);
+        TaskRun left = taskRun("left", TaskRunStatus.FAILED);
+        TaskRun right = taskRun("right", TaskRunStatus.SUCCEEDED);
+        TaskRun join = taskRun("join", TaskRunStatus.UPSTREAM_FAILED);
+        List<PipelineTaskEdge> edges = List.of(
+                pipelineEdge("root", "left"),
+                pipelineEdge("root", "right"),
+                pipelineEdge("left", "join"),
+                pipelineEdge("right", "join"));
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(root, left, right, join));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
+
+        assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "right", "DOWNSTREAM"))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(40063))
+                .hasMessageContaining("从失败续跑存在未成功的外部上游: left -> join");
+
+        verify(pipelineCompileService, never()).compile(any());
+        verifyNoInteractions(dagster);
+    }
+
+    @Test
+    void rerunTaskMarksSubgraphFailedWhenDagsterLaunchFails() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        PipelineTask failedTask = pipelineTask("failed");
+        PipelineTask downstreamTask = pipelineTask("downstream");
+        TaskRun failed = taskRun("failed", TaskRunStatus.FAILED);
+        TaskRun downstream = taskRun("downstream", TaskRunStatus.UPSTREAM_FAILED);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(eq(RUN_ID), eq(Set.of(DAG_ID)))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(failed, downstream));
+        when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(failedTask, downstreamTask));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(failedTask, downstreamTask));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
+                .thenReturn(List.of(pipelineEdge("failed", "downstream")));
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList())).thenThrow(new RuntimeException("connection refused"));
+
+        assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "failed", "DOWNSTREAM"))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(50200))
+                .hasMessageContaining("Dagster 重跑触发失败");
+
+        assertThat(run.getStatus()).isEqualTo(DagStatus.FAILED);
+        assertThat(run.getDagsterRunId()).isNull();
+        assertThat(run.getFinishedAt()).isNotNull();
+        assertThat(failed.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(failed.getErrorMsg()).contains("Dagster rerun launch failed");
+        assertThat(failed.getFinishedAt()).isNotNull();
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(downstream.getErrorMsg()).contains("connection refused");
+        assertThat(downstream.getFinishedAt()).isNotNull();
     }
 
     @Test
@@ -524,6 +876,37 @@ class OrchestrationServiceTest {
         assertThat(result.applied()).isFalse();
         assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.RUNNING);
         assertThat(taskRun.getLogRef()).isNull();
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
+    void applyTaskRunCallbackRejectsStaleAttempt() {
+        JobRun run = jobRun(DAG_ID);
+        Dag dag = dag();
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        taskRun.setAttempt(3);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(taskRun));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.FAILED,
+                        null,
+                        Instant.parse("2026-07-09T01:02:00Z"),
+                        "late failure",
+                        null,
+                        null,
+                        null,
+                        "stale-log",
+                        2,
+                        null));
+
+        assertThat(result.applied()).isFalse();
+        assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(taskRun.getAttempt()).isEqualTo(3);
+        assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.RUNNING);
+        assertThat(taskRun.getErrorMsg()).isNull();
         verify(taskRunRepo, never()).save(any(TaskRun.class));
     }
 
@@ -751,14 +1134,16 @@ class OrchestrationServiceTest {
         return task;
     }
 
-    private PipelineCompileResult pipelinePlan(PipelineTask task) {
+    private PipelineCompileResult pipelinePlan(PipelineTask... tasks) {
         return new PipelineCompileResult(
                 DAG_ID,
                 "pipeline_" + DAG_ID,
                 TENANT_ID,
-                List.of(new PipelineCompileResult.TaskCompileResult(
-                        task.getId(), task.getTaskKey(), task.getTaskType().name(),
-                        true, task.getTargetFqn(), null)),
+                List.of(tasks).stream()
+                        .map(task -> new PipelineCompileResult.TaskCompileResult(
+                                task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                                true, task.getTargetFqn(), null))
+                        .toList(),
                 true,
                 List.of());
     }

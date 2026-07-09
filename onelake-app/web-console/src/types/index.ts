@@ -158,6 +158,7 @@ export type TaskCompileStatus = 'DRAFT' | 'VALIDATED' | 'FAILED';
 export type EdgeLayer = 'PIPELINE' | 'CROSS_ENGINE';
 export type PipelineKind = 'BLANK' | 'ODS_DWD' | 'MULTI_LAYER';
 export type PipelineStatus = 'DRAFT' | 'VALIDATED' | 'PUBLISHED';
+export type TaskRerunMode = 'SINGLE' | 'DOWNSTREAM';
 export type TaskRunStatus =
   | 'QUEUED'
   | 'RUNNING'
@@ -266,6 +267,12 @@ export interface TaskRun {
   artifactPath?: string;
   startedAt?: string;
   finishedAt?: string;
+}
+
+export interface TaskRerunResult {
+  runId: UUID;
+  rerunTasks: string[];
+  dagsterRunId?: string;
 }
 
 export interface Pipeline {

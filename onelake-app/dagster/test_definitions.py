@@ -8,8 +8,8 @@ from dagster import build_op_context
 import definitions
 
 
-def _node(task_key, task_type="SPARK_SQL", max_retries=0):
-    return {
+def _node(task_key, task_type="SPARK_SQL", max_retries=0, base_attempt=None):
+    node = {
         "task_key": task_key,
         "task_type": task_type,
         "sql_or_script": "SELECT 1",
@@ -23,6 +23,9 @@ def _node(task_key, task_type="SPARK_SQL", max_retries=0):
         },
         "max_retries": max_retries,
     }
+    if base_attempt is not None:
+        node["base_attempt"] = base_attempt
+    return node
 
 
 def _edge(source, target):
@@ -288,3 +291,37 @@ def test_graph_retries_node_until_success(monkeypatch):
         if key == "retry_me" and payload["status"] == "SUCCEEDED"
     ]
     assert success_payloads[-1]["attempt"] == 2
+
+
+def test_graph_base_attempt_offsets_retry_callbacks(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    attempts = Counter()
+
+    def build(node, iceberg_catalog, spark_master):
+        attempts[node["task_key"]] += 1
+        return _command(1 if attempts[node["task_key"]] == 1 else 0)
+
+    monkeypatch.setattr(definitions, "_build_spark_submit", build)
+
+    result = _run_graph(_config([_node("retry_me", max_retries=1, base_attempt=3)], [], max_parallel=1))
+
+    assert result["status"]["retry_me"] == "SUCCEEDED"
+    assert [
+        payload["attempt"] for key, payload in callbacks
+        if key == "retry_me" and "attempt" in payload
+    ] == [3, 4]
+
+
+def test_graph_base_attempt_offsets_terminal_failure(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+
+    monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: _command(1))
+
+    with pytest.raises(RuntimeError, match="fail_me"):
+        _run_graph(_config([_node("fail_me", max_retries=1, base_attempt=5)], [], max_parallel=1))
+
+    failed_payloads = [
+        payload for key, payload in callbacks
+        if key == "fail_me" and payload["status"] == "FAILED"
+    ]
+    assert failed_payloads[-1]["attempt"] == 6

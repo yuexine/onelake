@@ -50,7 +50,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -90,6 +90,7 @@ public class OrchestrationService {
     private final SparkRunConfigBuilder sparkBuilder;
     private final ObjectProvider<OutboxPublisher> outboxPublisher;
     private final PipelineLogStorage pipelineLogStorage;
+    private final DataIntervalCalculator dataIntervalCalculator;
 
     @Value("${onelake.orchestration.pipeline-execution-mode:LEGACY}")
     private String pipelineExecutionMode = "LEGACY";
@@ -165,6 +166,7 @@ public class OrchestrationService {
         run.setTriggerType(trigger);
         run.setStatus(DagStatus.QUEUED);
         run.setStartedAt(Instant.now());
+        run.setTimezone(StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai");
         run.setTriggeredBy(TenantContext.getUserId());
         run.setTriggeredByName(currentTriggerActorName());
         runRepo.save(run);
@@ -203,17 +205,37 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger) {
-        return triggerPipelineRun(dagId, trigger, PipelineRunOptions.empty());
+        return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger));
+    }
+
+    /**
+     * CRON-only overload: the scheduler supplies the matched planned instant,
+     * while the run service derives the data interval from the persisted DAG
+     * timezone and partition grain.
+     */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, Instant scheduledAt) {
+        if (trigger != TriggerType.CRON) {
+            throw new BizException(40020, "计划时刻仅适用于 CRON 触发");
+        }
+        if (scheduledAt == null) {
+            return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger));
+        }
+        Dag dag = findTenantDag(dagId);
+        RunContext runContext = dataIntervalCalculator
+                .calculate(dag.getPartitionGrain(), scheduledAt, dag.getTimezone())
+                .toRunContext(dag.getTimezone(), "NORMAL", null, trigger);
+        return triggerPipelineRun(dagId, trigger, runContext);
     }
 
     @Transactional(noRollbackFor = BizException.class)
-    public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, PipelineRunOptions options) {
-        PipelineRunOptions runOptions = options == null ? PipelineRunOptions.empty() : options;
+    public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, RunContext context) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag dag = findTenantDag(dagId);
+        RunContext runContext = normalizeRunContext(context, dag, trigger);
         String activeJobName = activePipelineDagsterJob(dagId);
         if (isGraphPipelineExecutionMode()) {
             dagster.reloadRepositoryLocation("onelake-loc");
@@ -246,14 +268,16 @@ public class OrchestrationService {
         run.setStartedAt(Instant.now());
         run.setTriggeredBy(TenantContext.getUserId());
         run.setTriggeredByName(currentTriggerActorName());
-        run.setLogicalDate(runOptions.logicalDate());
-        run.setDataIntervalStart(runOptions.dataIntervalStart());
-        run.setDataIntervalEnd(runOptions.dataIntervalEnd());
-        run.setBackfillId(runOptions.backfillId());
+        run.setLogicalDate(runContext.logicalDate());
+        run.setDataIntervalStart(runContext.dataIntervalStart());
+        run.setDataIntervalEnd(runContext.dataIntervalEnd());
+        run.setBackfillId(runContext.backfillId());
+        run.setTimezone(runContext.timezone());
+        run.setRunMode(runContext.runMode());
         run.setDagsterJob(activeJobName);
         // V14 为 CRON logical_date 建立了唯一索引。此处立即 flush，确保重复调度在
         // 启动 Dagster 前被识别，由 PipelineSchedulerService 安全地当作已触发处理。
-        if (trigger == TriggerType.CRON && runOptions.logicalDate() != null) {
+        if (trigger == TriggerType.CRON && runContext.logicalDate() != null) {
             runRepo.saveAndFlush(run);
         } else {
             runRepo.save(run);
@@ -268,8 +292,8 @@ public class OrchestrationService {
             tr.setTenantId(tenantId);
             tr.setJobRunId(run.getId());
             tr.setTaskKey(t.getTaskKey());
-            tr.setDataIntervalStart(runOptions.dataIntervalStart());
-            tr.setDataIntervalEnd(runOptions.dataIntervalEnd());
+            tr.setDataIntervalStart(runContext.dataIntervalStart());
+            tr.setDataIntervalEnd(runContext.dataIntervalEnd());
             TaskRunStatus initialStatus = initialStatuses.getOrDefault(t.getTaskKey(), TaskRunStatus.QUEUED);
             tr.setStatus(initialStatus);
             if (initialStatus == TaskRunStatus.RUNNING || initialStatus == TaskRunStatus.SUCCEEDED) {
@@ -291,7 +315,7 @@ public class OrchestrationService {
                 dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
                 dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
         );
-        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runOptions);
+        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runContext);
 
         // 6. 启动 Dagster。
         try {
@@ -639,9 +663,9 @@ public class OrchestrationService {
     private DagsterRunConfig buildPipelineRunConfig(TaskBundleContext ctx,
                                                     List<PipelineTask> tasks,
                                                     List<PipelineTaskEdge> pipelineEdges,
-                                                    PipelineRunOptions runOptions) {
+                                                    RunContext runContext) {
         // GRAPH/LEGACY 只影响 Dagster 作业与 runConfig 形状，C3 仍保持 Java 生成、Dagster 执行。
-        Map<String, String> runtimeParams = pipelineRunRuntimeParams(runOptions);
+        Map<String, String> runtimeParams = pipelineRunRuntimeParams(runContext);
         if (isGraphPipelineExecutionMode()) {
             return sparkBuilder.buildGraphRunConfig(
                     ctx,
@@ -679,16 +703,50 @@ public class OrchestrationService {
         return tags;
     }
 
-    private Map<String, String> pipelineRunRuntimeParams(PipelineRunOptions runOptions) {
-        if (runOptions == null || runOptions.logicalDate() == null) {
+    private Map<String, String> pipelineRunRuntimeParams(RunContext runContext) {
+        if (runContext == null || runContext.logicalDate() == null) {
             return Map.of();
         }
-        Instant logicalDate = runOptions.logicalDate();
+        Instant logicalDate = runContext.logicalDate();
         Map<String, String> params = new LinkedHashMap<>();
         params.put("bizdate", DateTimeFormatter.ISO_LOCAL_DATE
-                .format(logicalDate.atZone(ZoneOffset.UTC).toLocalDate()));
+                .format(logicalDate.atZone(resolveRunTimezone(runContext.timezone())).toLocalDate()));
         params.put("logical_date", logicalDate.toString());
         return params;
+    }
+
+    private RunContext normalizeRunContext(RunContext context, Dag dag, TriggerType trigger) {
+        String defaultTimezone = StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai";
+        RunContext normalized = (context == null ? RunContext.empty(trigger) : context)
+                .withDefaults(defaultTimezone, trigger)
+                .withTriggerType(trigger);
+        try {
+            ZoneId.of(normalized.timezone());
+            normalized.validateBusinessTime();
+            if (normalized.logicalDate() != null
+                    && normalized.dataIntervalStart() == null
+                    && normalized.dataIntervalEnd() == null) {
+                DataIntervalCalculator.DataInterval interval = dataIntervalCalculator.calculateFromLogicalDate(
+                        dag.getPartitionGrain(),
+                        normalized.logicalDate(),
+                        normalized.timezone());
+                normalized = normalized.withDataInterval(
+                        interval.dataIntervalStart(),
+                        interval.dataIntervalEnd());
+            }
+            return normalized.validateBusinessTime();
+        } catch (IllegalArgumentException ex) {
+            throw new BizException(40020, "运行数据日期参数非法: " + ex.getMessage(), ex);
+        }
+    }
+
+    private ZoneId resolveRunTimezone(String timezone) {
+        try {
+            return ZoneId.of(StringUtils.hasText(timezone) ? timezone : "Asia/Shanghai");
+        } catch (RuntimeException ex) {
+            log.warn("流水线运行上下文 timezone '{}' 非法，回退 Asia/Shanghai", timezone);
+            return ZoneId.of("Asia/Shanghai");
+        }
     }
 
     private List<Map<String, String>> pipelineRerunTags(Dag dag,
@@ -1648,6 +1706,9 @@ public class OrchestrationService {
             StringUtils.hasText(r.getDagsterJob()) ? r.getDagsterJob() : (dag == null ? null : dag.getDagsterJob()),
             r.getDagsterRunId(),
             r.getTriggerType().name(), r.getStatus().name(),
+            StringUtils.hasText(r.getTimezone())
+                    ? r.getTimezone()
+                    : (dag == null || !StringUtils.hasText(dag.getTimezone()) ? "Asia/Shanghai" : dag.getTimezone()),
             r.getLogicalDate(), r.getDataIntervalStart(), r.getDataIntervalEnd(), r.getBackfillId(),
             r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r));
     }
@@ -1657,17 +1718,6 @@ public class OrchestrationService {
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 
     public record TaskRunLogResource(String objectKey, String filename, long contentLength, InputStream content) {}
-
-    public record PipelineRunOptions(
-            Instant logicalDate,
-            Instant dataIntervalStart,
-            Instant dataIntervalEnd,
-            UUID backfillId
-    ) {
-        public static PipelineRunOptions empty() {
-            return new PipelineRunOptions(null, null, null, null);
-        }
-    }
 
     private enum RerunMode {
         SINGLE,

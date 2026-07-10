@@ -21,6 +21,7 @@ public record BackfillDTO(
         int maxParallel,
         Range range,
         String grain,
+        String timezone,
         @JsonProperty("created_at")
         Instant createdAt,
         @JsonProperty("updated_at")

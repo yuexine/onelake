@@ -50,6 +50,10 @@ public class JobRun {
     private Instant dataIntervalEnd;
     private UUID backfillId;
 
+    /** 创建运行时冻结的业务时区，避免 DAG 配置变更重解释历史业务日期。 */
+    @Column(nullable = false, length = 64)
+    private String timezone = "Asia/Shanghai";
+
     /** M2 运行策略；默认值与 V16 迁移保持一致。 */
     @Column(nullable = false, length = 16)
     private String runMode = "NORMAL";

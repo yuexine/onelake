@@ -95,6 +95,7 @@ class BackfillServiceTest {
 
         assertThat(dto.totalRuns()).isEqualTo(3);
         assertThat(dto.maxParallel()).isEqualTo(2);
+        assertThat(dto.timezone()).isEqualTo("Asia/Shanghai");
         assertThat(plannedRuns).hasSize(3);
         assertThat(plannedRuns).extracting(BackfillRun::getLogicalDate).containsExactly(
                 Instant.parse("2026-01-01T00:00:00Z"),
@@ -104,6 +105,34 @@ class BackfillServiceTest {
                 Instant.parse("2026-01-02T00:00:00Z"),
                 Instant.parse("2026-01-03T00:00:00Z"),
                 Instant.parse("2026-01-04T00:00:00Z"));
+    }
+
+    @Test
+    void createBackfillExpandsDailyWindowInFrozenDagTimezone() {
+        Dag dag = dag();
+        dag.setTimezone("America/New_York");
+        List<BackfillRun> plannedRuns = new ArrayList<>();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(backfillRunRepo.saveAll(any())).thenAnswer(invocation -> {
+            Iterable<BackfillRun> runs = invocation.getArgument(0);
+            runs.forEach(plannedRuns::add);
+            return plannedRuns;
+        });
+
+        BackfillDTO dto = service.createBackfill(
+                DAG_ID,
+                Instant.parse("2026-03-08T05:00:00Z"),
+                Instant.parse("2026-03-08T05:00:00Z"),
+                "DAY",
+                1);
+
+        ArgumentCaptor<Backfill> backfillCaptor = ArgumentCaptor.forClass(Backfill.class);
+        verify(backfillRepo).save(backfillCaptor.capture());
+        assertThat(backfillCaptor.getValue().getTimezone()).isEqualTo("America/New_York");
+        assertThat(dto.timezone()).isEqualTo("America/New_York");
+        assertThat(plannedRuns).singleElement()
+                .extracting(BackfillRun::getDataIntervalEnd)
+                .isEqualTo(Instant.parse("2026-03-09T04:00:00Z"));
     }
 
     @Test
@@ -125,7 +154,7 @@ class BackfillServiceTest {
         Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
         JobRunDTO expected = new JobRunDTO(
                 RUN_ID, DAG_ID, "orders_pipeline", "onelake_pipeline_run", "dagster-run-1",
-                "BACKFILL", "RUNNING", Instant.parse("2026-01-01T00:00:00Z"),
+                "BACKFILL", "RUNNING", "Asia/Shanghai", Instant.parse("2026-01-01T00:00:00Z"),
                 Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-02T00:00:00Z"),
                 BACKFILL_ID, Instant.parse("2026-01-01T00:00:00Z"), null, CREATOR_ID, "operator");
         when(backfillRepo.findByIdAndTenantId(BACKFILL_ID, TENANT_ID)).thenReturn(Optional.of(backfill));
@@ -158,7 +187,7 @@ class BackfillServiceTest {
                 eq(BACKFILL_ID), eq(BackfillRunStatus.QUEUED), any(Pageable.class)))
                 .thenReturn(List.of(queuedA));
         when(orchestrationService.refreshRunStatusForBackfill(alreadyRunning.getJobRunId())).thenReturn(runningRun);
-        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any()))
+        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class)))
                 .thenAnswer(invocation -> {
                     assertThat(TenantContext.getTenantId()).isEqualTo(TENANT_ID);
                     assertThat(TenantContext.getUserId()).isEqualTo(CREATOR_ID);
@@ -177,7 +206,8 @@ class BackfillServiceTest {
         assertThat(TenantContext.getTenantId()).isNull();
         assertThat(TenantContext.getUserId()).isNull();
         assertThat(TenantContext.getUsername()).isNull();
-        verify(orchestrationService).triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any());
+        verify(orchestrationService).triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class));
     }
 
     @Test
@@ -202,7 +232,8 @@ class BackfillServiceTest {
 
         when(backfillRepo.findByIdForUpdate(BACKFILL_ID)).thenReturn(Optional.of(backfill));
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
-        verify(orchestrationService, never()).triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any());
+        verify(orchestrationService, never()).triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class));
     }
 
     @Test
@@ -242,7 +273,7 @@ class BackfillServiceTest {
         UUID run3 = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3");
 
         stubMutableBackfillRuns(serialBackfill, serialRuns);
-        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any()))
+        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class)))
                 .thenReturn(run1, run2, run3);
 
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isEqualTo(1);
@@ -251,22 +282,24 @@ class BackfillServiceTest {
         serialRuns.get(1).setStatus(BackfillRunStatus.SUCCEEDED);
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isEqualTo(1);
 
-        ArgumentCaptor<OrchestrationService.PipelineRunOptions> optionsCaptor =
-                ArgumentCaptor.forClass(OrchestrationService.PipelineRunOptions.class);
+        ArgumentCaptor<RunContext> contextCaptor = ArgumentCaptor.forClass(RunContext.class);
         verify(orchestrationService, times(3)).triggerPipelineRun(
-                eq(DAG_ID), eq(TriggerType.BACKFILL), optionsCaptor.capture());
-        assertThat(optionsCaptor.getAllValues())
-                .extracting(OrchestrationService.PipelineRunOptions::logicalDate)
+                eq(DAG_ID), eq(TriggerType.BACKFILL), contextCaptor.capture());
+        assertThat(contextCaptor.getAllValues())
+                .extracting(RunContext::logicalDate)
                 .containsExactly(
                         Instant.parse("2026-01-01T00:00:00Z"),
                         Instant.parse("2026-01-02T00:00:00Z"),
                         Instant.parse("2026-01-03T00:00:00Z"));
-        assertThat(optionsCaptor.getAllValues())
-                .extracting(OrchestrationService.PipelineRunOptions::dataIntervalEnd)
+        assertThat(contextCaptor.getAllValues())
+                .extracting(RunContext::dataIntervalEnd)
                 .containsExactly(
                         Instant.parse("2026-01-02T00:00:00Z"),
                         Instant.parse("2026-01-03T00:00:00Z"),
                         Instant.parse("2026-01-04T00:00:00Z"));
+        assertThat(contextCaptor.getAllValues())
+                .extracting(RunContext::timezone)
+                .containsOnly("Asia/Shanghai");
         assertThat(serialRuns)
                 .extracting(BackfillRun::getJobRunId)
                 .containsExactly(run1, run2, run3);
@@ -279,7 +312,7 @@ class BackfillServiceTest {
         UUID parallelRun1 = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1");
         UUID parallelRun2 = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2");
         stubMutableBackfillRuns(parallelBackfill, parallelRuns);
-        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any()))
+        when(orchestrationService.triggerPipelineRun(eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class)))
                 .thenReturn(parallelRun1, parallelRun2);
 
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isEqualTo(2);

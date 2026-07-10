@@ -26,8 +26,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.temporal.ChronoUnit;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -59,7 +59,8 @@ public class BackfillService {
                 .orElseThrow(() -> new BizException(40400, "DAG 不存在"));
         BackfillGrain normalizedGrain = BackfillGrain.parse(
                 StringUtils.hasText(grain) ? grain : dag.getPartitionGrain());
-        List<BackfillWindow> windows = expandWindows(rangeStart, rangeEnd, normalizedGrain);
+        String timezone = StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai";
+        List<BackfillWindow> windows = expandWindows(rangeStart, rangeEnd, normalizedGrain, timezone);
 
         Backfill backfill = new Backfill();
         backfill.setTenantId(tenantId);
@@ -67,6 +68,7 @@ public class BackfillService {
         backfill.setRangeStart(rangeStart);
         backfill.setRangeEnd(rangeEnd);
         backfill.setGrain(normalizedGrain.name());
+        backfill.setTimezone(timezone);
         backfill.setStatus(BackfillStatus.QUEUED);
         backfill.setTotalRuns(windows.size());
         backfill.setSucceededRuns(0);
@@ -173,12 +175,13 @@ public class BackfillService {
 
             List<BackfillRun> queuedRuns = backfillRunRepo.findByBackfillIdAndStatusForUpdate(
                     backfill.getId(), BackfillRunStatus.QUEUED, PageRequest.of(0, slots));
+            String timezone = resolveBackfillTimezone(backfill);
             int dispatched = 0;
             for (BackfillRun backfillRun : queuedRuns) {
                 if (backfill.getStatus() == BackfillStatus.CANCELLED) {
                     break;
                 }
-                dispatchChildRun(backfill, backfillRun);
+                dispatchChildRun(backfill, backfillRun, timezone);
                 dispatched++;
             }
             aggregateBackfill(backfill);
@@ -221,7 +224,7 @@ public class BackfillService {
         return toDTO(backfill, runs);
     }
 
-    private void dispatchChildRun(Backfill backfill, BackfillRun backfillRun) {
+    private void dispatchChildRun(Backfill backfill, BackfillRun backfillRun, String timezone) {
         Instant now = Instant.now();
         backfillRun.setStatus(BackfillRunStatus.RUNNING);
         backfillRun.setUpdatedAt(now);
@@ -230,11 +233,14 @@ public class BackfillService {
             UUID runId = orchestrationService.triggerPipelineRun(
                     backfillRun.getDagId(),
                     TriggerType.BACKFILL,
-                    new OrchestrationService.PipelineRunOptions(
+                    new RunContext(
                             backfillRun.getLogicalDate(),
                             backfillRun.getDataIntervalStart(),
                             backfillRun.getDataIntervalEnd(),
-                            backfill.getId()));
+                            timezone,
+                            "NORMAL",
+                            backfill.getId(),
+                            TriggerType.BACKFILL));
             backfillRun.setJobRunId(runId);
             backfillRun.setStatus(BackfillRunStatus.RUNNING);
             backfillRun.setErrorMsg(null);
@@ -327,21 +333,30 @@ public class BackfillService {
         return null;
     }
 
-    private List<BackfillWindow> expandWindows(Instant rangeStart, Instant rangeEnd, BackfillGrain grain) {
+    private List<BackfillWindow> expandWindows(Instant rangeStart,
+                                               Instant rangeEnd,
+                                               BackfillGrain grain,
+                                               String timezone) {
         if (rangeStart == null || rangeEnd == null) {
             throw new BizException(40020, "rangeStart/rangeEnd 不能为空");
         }
         if (rangeStart.isAfter(rangeEnd)) {
             throw new BizException(40021, "rangeStart 不能晚于 rangeEnd");
         }
+        ZoneId zoneId;
+        try {
+            zoneId = ZoneId.of(StringUtils.hasText(timezone) ? timezone : "Asia/Shanghai");
+        } catch (RuntimeException ex) {
+            throw new BizException(40023, "timezone 非法: " + timezone, ex);
+        }
         List<BackfillWindow> windows = new ArrayList<>();
-        Instant cursor = rangeStart;
-        while (!cursor.isAfter(rangeEnd)) {
+        ZonedDateTime cursor = rangeStart.atZone(zoneId);
+        while (!cursor.toInstant().isAfter(rangeEnd)) {
             if (windows.size() >= MAX_BACKFILL_RUNS) {
                 throw new BizException(40022, "回填区间过大，最多支持 " + MAX_BACKFILL_RUNS + " 个业务日期");
             }
-            Instant next = grain.next(cursor);
-            windows.add(new BackfillWindow(cursor, cursor, next));
+            ZonedDateTime next = grain.next(cursor);
+            windows.add(new BackfillWindow(cursor.toInstant(), cursor.toInstant(), next.toInstant()));
             cursor = next;
         }
         return windows;
@@ -353,6 +368,16 @@ public class BackfillService {
             throw new BizException(40100, "Tenant context required");
         }
         return tenantId;
+    }
+
+    private String resolveBackfillTimezone(Backfill backfill) {
+        if (StringUtils.hasText(backfill.getTimezone())) {
+            return backfill.getTimezone();
+        }
+        return dagRepo.findByIdAndTenantId(backfill.getDagId(), backfill.getTenantId())
+                .map(Dag::getTimezone)
+                .filter(StringUtils::hasText)
+                .orElse("Asia/Shanghai");
     }
 
     private String currentActorName() {
@@ -378,6 +403,7 @@ public class BackfillService {
                 backfill.getMaxParallel() == null ? 1 : backfill.getMaxParallel(),
                 new BackfillDTO.Range(backfill.getRangeStart(), backfill.getRangeEnd()),
                 backfill.getGrain(),
+                resolveBackfillTimezone(backfill),
                 backfill.getCreatedAt(),
                 backfill.getUpdatedAt(),
                 runs.stream().map(this::toRunDTO).toList());
@@ -404,24 +430,24 @@ public class BackfillService {
     private enum BackfillGrain {
         HOUR {
             @Override
-            Instant next(Instant instant) {
-                return instant.plus(1, ChronoUnit.HOURS);
+            ZonedDateTime next(ZonedDateTime dateTime) {
+                return dateTime.plusHours(1);
             }
         },
         DAY {
             @Override
-            Instant next(Instant instant) {
-                return instant.plus(1, ChronoUnit.DAYS);
+            ZonedDateTime next(ZonedDateTime dateTime) {
+                return dateTime.plusDays(1);
             }
         },
         MONTH {
             @Override
-            Instant next(Instant instant) {
-                return instant.atZone(ZoneOffset.UTC).plusMonths(1).toInstant();
+            ZonedDateTime next(ZonedDateTime dateTime) {
+                return dateTime.plusMonths(1);
             }
         };
 
-        abstract Instant next(Instant instant);
+        abstract ZonedDateTime next(ZonedDateTime dateTime);
 
         static BackfillGrain parse(String raw) {
             String value = StringUtils.hasText(raw) ? raw.trim().toUpperCase(Locale.ROOT) : "DAY";

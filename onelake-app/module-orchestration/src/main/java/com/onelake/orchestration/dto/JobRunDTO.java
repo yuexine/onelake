@@ -14,6 +14,7 @@ public record JobRunDTO(
     String dagsterRunId,
     String triggerType,
     String status,
+    String timezone,
     Instant logicalDate,
     Instant dataIntervalStart,
     Instant dataIntervalEnd,

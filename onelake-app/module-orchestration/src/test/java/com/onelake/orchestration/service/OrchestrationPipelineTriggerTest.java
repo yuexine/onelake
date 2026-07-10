@@ -91,7 +91,7 @@ class OrchestrationPipelineTriggerTest {
     void setup() {
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
-                sparkBuilder, outboxProvider, pipelineLogStorage);
+                sparkBuilder, outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
 
@@ -102,6 +102,11 @@ class OrchestrationPipelineTriggerTest {
             if (r.getId() == null) r.setId(UUID.randomUUID());
             return r;
         }).when(runRepo).save(any(JobRun.class));
+        org.mockito.Mockito.lenient().doAnswer(inv -> {
+            JobRun r = inv.getArgument(0);
+            if (r.getId() == null) r.setId(UUID.randomUUID());
+            return r;
+        }).when(runRepo).saveAndFlush(any(JobRun.class));
         org.mockito.Mockito.lenient().doAnswer(inv -> {
             TaskRun t = inv.getArgument(0);
             if (t.getId() == null) t.setId(UUID.randomUUID());
@@ -141,6 +146,9 @@ class OrchestrationPipelineTriggerTest {
         JobRun saved = runCaptor.getValue();
         assertThat(saved.getDagId()).isEqualTo(DAG_ID);
         assertThat(saved.getDagsterRunId()).isEqualTo("dagster-run-abc");
+        assertThat(saved.getLogicalDate()).isNull();
+        assertThat(saved.getDataIntervalStart()).isNull();
+        assertThat(saved.getDataIntervalEnd()).isNull();
 
         // 每个有效节点都会创建 TaskRun，保证 UI 能观察整张图。
         // Dagster runConfig 仍然只包含真正可执行的引擎节点。
@@ -205,6 +213,76 @@ class OrchestrationPipelineTriggerTest {
     }
 
     @Test
+    void cronTriggerCalculatesAndPersistsTheBusinessInterval() {
+        Dag dag = pipelineDag();
+        dag.setTimezone("UTC");
+        dag.setPartitionGrain("DAY");
+        Instant scheduledAt = Instant.parse("2026-05-03T02:00:00Z");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("spark_daily"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task("spark_daily", true)));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-run-cron");
+
+        service.triggerPipelineRun(DAG_ID, TriggerType.CRON, scheduledAt);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo).saveAndFlush(runCaptor.capture());
+        JobRun savedRun = runCaptor.getValue();
+        assertThat(savedRun.getLogicalDate()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
+        assertThat(savedRun.getDataIntervalStart()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
+        assertThat(savedRun.getDataIntervalEnd()).isEqualTo(scheduledAt);
+    }
+
+    @Test
+    void manualLogicalDateCompletesIntervalUsingDagTimezone() {
+        Dag dag = pipelineDag();
+        dag.setTimezone("America/New_York");
+        dag.setPartitionGrain("DAY");
+        Instant logicalDate = Instant.parse("2026-03-08T05:00:00Z");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("spark_manual_date"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(task("spark_manual_date", true)));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-run-manual-date");
+
+        service.triggerPipelineRun(
+                DAG_ID,
+                TriggerType.MANUAL,
+                new RunContext(logicalDate, null, null, null, null, null, TriggerType.MANUAL));
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun savedRun = runCaptor.getAllValues().get(0);
+        assertThat(savedRun.getLogicalDate()).isEqualTo(logicalDate);
+        assertThat(savedRun.getDataIntervalStart()).isEqualTo(logicalDate);
+        assertThat(savedRun.getDataIntervalEnd()).isEqualTo(Instant.parse("2026-03-09T04:00:00Z"));
+        assertThat(savedRun.getTimezone()).isEqualTo("America/New_York");
+    }
+
+    @Test
+    void rejectsContradictoryManualBusinessTimeBeforePersistence() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID,
+                TriggerType.MANUAL,
+                new RunContext(
+                        Instant.parse("2026-01-01T00:00:00Z"),
+                        Instant.parse("2026-01-02T00:00:00Z"),
+                        Instant.parse("2026-01-03T00:00:00Z"),
+                        "UTC",
+                        "NORMAL",
+                        null,
+                        TriggerType.MANUAL)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("logicalDate 必须等于 dataIntervalStart");
+        verify(runRepo, never()).save(any(JobRun.class));
+    }
+
+    @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
     void triggerPipelineRunPersistsLogicalDateAndInjectsBizdateRuntimeParam() {
         Dag dag = pipelineDag();
@@ -222,11 +300,14 @@ class OrchestrationPipelineTriggerTest {
         service.triggerPipelineRun(
                 DAG_ID,
                 TriggerType.BACKFILL,
-                new OrchestrationService.PipelineRunOptions(
+                new RunContext(
                         logicalDate,
                         logicalDate,
                         intervalEnd,
-                        backfillId));
+                        "Asia/Shanghai",
+                        "NORMAL",
+                        backfillId,
+                        TriggerType.BACKFILL));
 
         ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
         verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());

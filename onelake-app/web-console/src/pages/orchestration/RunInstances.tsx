@@ -21,6 +21,7 @@ const LOG_TAIL_OPTIONS = [100, 300, 500, 1000];
 const RUN_LIST_POLL_INTERVAL_MS = 4000;
 const RUN_DETAIL_POLL_INTERVAL_MS = 2500;
 const TASK_RUN_POLL_INTERVAL_MS = 2500;
+const DEFAULT_BUSINESS_TIMEZONE = 'Asia/Shanghai';
 
 interface UiError {
   message: string;
@@ -32,9 +33,37 @@ function formatDate(value?: string) {
   return new Date(value).toLocaleString('zh-CN');
 }
 
-function formatBusinessDate(value?: string) {
+function formatBusinessDate(value?: string, timezone?: string) {
   if (!value) return '-';
-  return `${new Date(value).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '-';
+  const requestedTimezone = timezone || DEFAULT_BUSINESS_TIMEZONE;
+  let displayTimezone = requestedTimezone;
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat('zh-CN-u-hc-h23', {
+      timeZone: requestedTimezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+  } catch {
+    displayTimezone = DEFAULT_BUSINESS_TIMEZONE;
+    formatter = new Intl.DateTimeFormat('zh-CN-u-hc-h23', {
+      timeZone: DEFAULT_BUSINESS_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${displayTimezone}`;
 }
 
 function formatDuration(run: JobRun) {
@@ -1062,7 +1091,16 @@ export default function RunInstances() {
                   </Descriptions.Item>
                 )}
                 {detailRun.logicalDate && (
-                  <Descriptions.Item label="业务日期">{formatBusinessDate(detailRun.logicalDate)}</Descriptions.Item>
+                  <Descriptions.Item label="业务日期">
+                    {formatBusinessDate(detailRun.logicalDate, detailRun.timezone)}
+                  </Descriptions.Item>
+                )}
+                {(detailRun.dataIntervalStart || detailRun.dataIntervalEnd) && (
+                  <Descriptions.Item label="数据区间" span={2}>
+                    {formatBusinessDate(detailRun.dataIntervalStart, detailRun.timezone)}
+                    {' → '}
+                    {formatBusinessDate(detailRun.dataIntervalEnd, detailRun.timezone)}
+                  </Descriptions.Item>
                 )}
                 <Descriptions.Item label="触发人">
                   <span title={triggerActorTitle(detailRun)}>{triggerActorName(detailRun)}</span>
@@ -1205,8 +1243,12 @@ export default function RunInstances() {
             {
               title: '业务日期',
               dataIndex: 'logicalDate',
-              width: 170,
-              render: (value?: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatBusinessDate(value)}</span>,
+              width: 230,
+              render: (value: string | undefined, run: JobRun) => (
+                <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>
+                  {formatBusinessDate(value, run.timezone)}
+                </span>
+              ),
             },
             { title: '触发方式', dataIndex: 'triggerType', width: 110, render: (t: string) => (
               <span style={{

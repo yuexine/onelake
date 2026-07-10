@@ -15,6 +15,7 @@ import com.onelake.orchestration.dto.TaskRerunRequest;
 import com.onelake.orchestration.dto.TaskRerunResult;
 import com.onelake.orchestration.service.OrchestrationService;
 import com.onelake.orchestration.service.PipelineService;
+import com.onelake.orchestration.service.RunContext;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -149,11 +150,14 @@ public class PipelineController {
         UUID runId = orchestrationService.triggerPipelineRun(
                 dagId,
                 tt,
-                new OrchestrationService.PipelineRunOptions(
+                new RunContext(
                         logicalDate,
                         dataIntervalStart,
                         dataIntervalEnd,
-                        null));
+                        null,
+                        null,
+                        null,
+                        tt));
         return ApiResponse.ok(Map.of("runId", runId));
     }
 

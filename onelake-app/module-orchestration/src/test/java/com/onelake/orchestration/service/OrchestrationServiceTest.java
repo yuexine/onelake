@@ -114,7 +114,7 @@ class OrchestrationServiceTest {
         lenient().when(runRepo.findByIdForUpdate(any())).thenReturn(Optional.empty());
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
             runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
-            sparkBuilder, outboxPublisher, pipelineLogStorage);
+            sparkBuilder, outboxPublisher, pipelineLogStorage, new DataIntervalCalculator());
     }
 
     @AfterEach
@@ -157,6 +157,7 @@ class OrchestrationServiceTest {
     void listRunsScopesToTenantDagsAndIncludesDagMetadata() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());
+        run.setTimezone("UTC");
         PageRequest pageable = PageRequest.of(0, 20);
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
         when(runRepo.findByDagIdInOrderByStartedAtDesc(
@@ -174,6 +175,7 @@ class OrchestrationServiceTest {
         assertThat(dto.dagsterRunId()).isEqualTo("dagster-run-1");
         assertThat(dto.status()).isEqualTo("SUCCEEDED");
         assertThat(dto.triggerType()).isEqualTo("MANUAL");
+        assertThat(dto.timezone()).isEqualTo("UTC");
     }
 
     @Test

@@ -47,9 +47,36 @@ function formatDate(value?: string) {
   return new Date(value).toLocaleString('zh-CN');
 }
 
-function formatBusinessDate(value?: string) {
+function formatBusinessDate(value?: string, timezone = 'Asia/Shanghai') {
   if (!value) return '-';
-  return `${new Date(value).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '-';
+  let displayTimezone = timezone;
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat('zh-CN-u-hc-h23', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+  } catch {
+    displayTimezone = 'Asia/Shanghai';
+    formatter = new Intl.DateTimeFormat('zh-CN-u-hc-h23', {
+      timeZone: displayTimezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${displayTimezone}`;
 }
 
 function shortId(value: string) {
@@ -219,8 +246,9 @@ export default function BackfillProgress() {
               <Descriptions.Item label="待派发">{counts.queued}</Descriptions.Item>
               <Descriptions.Item label="已取消">{counts.cancelled}</Descriptions.Item>
               <Descriptions.Item label="最大并发">{backfill.max_parallel}</Descriptions.Item>
+              <Descriptions.Item label="业务时区">{backfill.timezone}</Descriptions.Item>
               <Descriptions.Item label="业务区间" span={2}>
-                {formatBusinessDate(backfill.range.start)} 至 {formatBusinessDate(backfill.range.end)}
+                {formatBusinessDate(backfill.range.start, backfill.timezone)} 至 {formatBusinessDate(backfill.range.end, backfill.timezone)}
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatDate(backfill.created_at)}</Descriptions.Item>
             </Descriptions>
@@ -252,14 +280,14 @@ export default function BackfillProgress() {
                   title: '业务日期',
                   dataIndex: 'logical_date',
                   width: 180,
-                  render: (value: string) => formatBusinessDate(value),
+                  render: (value: string) => formatBusinessDate(value, backfill.timezone),
                 },
                 {
                   title: '数据区间',
                   width: 320,
                   render: (_: unknown, run) => (
                     <Text style={{ fontSize: 12 }}>
-                      {formatBusinessDate(run.data_interval_start)} - {formatBusinessDate(run.data_interval_end)}
+                      {formatBusinessDate(run.data_interval_start, backfill.timezone)} - {formatBusinessDate(run.data_interval_end, backfill.timezone)}
                     </Text>
                   ),
                 },

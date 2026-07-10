@@ -42,7 +42,6 @@ class PipelineSchedulerServiceTest {
     @Mock private OrchestrationService orchestrationService;
 
     private PipelineSchedulerService service;
-
     @BeforeEach
     void setup() {
         service = new PipelineSchedulerService(dagRepo, schedulerLockRepo, orchestrationService);
@@ -107,12 +106,11 @@ class PipelineSchedulerServiceTest {
     void sameLogicalDateSecondTriggerIsDeduplicated() {
         Dag dag = scheduledPipeline();
         Instant tickAt = Instant.parse("2026-06-24T10:01:45Z");
-        Instant expectedLogicalDate = tickAt.atZone(ZoneId.systemDefault())
-                .withSecond(0).withNano(0).toInstant();
+        Instant scheduledAt = Instant.parse("2026-06-24T10:01:00Z");
         when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
         when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
         when(dagRepo.findByEnabledTrue()).thenReturn(List.of(dag));
-        when(orchestrationService.triggerPipelineRun(eq(dag.getId()), eq(TriggerType.CRON), any()))
+        when(orchestrationService.triggerPipelineRun(eq(dag.getId()), eq(TriggerType.CRON), any(Instant.class)))
                 .thenReturn(UUID.randomUUID())
                 .thenThrow(new DataIntegrityViolationException("uq_job_run_cron_logical"));
 
@@ -121,13 +119,10 @@ class PipelineSchedulerServiceTest {
             service.tickScheduledPipelines(tickAt);
         }).doesNotThrowAnyException();
 
-        ArgumentCaptor<OrchestrationService.PipelineRunOptions> optionsCaptor =
-                ArgumentCaptor.forClass(OrchestrationService.PipelineRunOptions.class);
+        ArgumentCaptor<Instant> scheduledAtCaptor = ArgumentCaptor.forClass(Instant.class);
         verify(orchestrationService, times(2)).triggerPipelineRun(
-                eq(dag.getId()), eq(TriggerType.CRON), optionsCaptor.capture());
-        assertThat(optionsCaptor.getAllValues())
-                .extracting(OrchestrationService.PipelineRunOptions::logicalDate)
-                .containsExactly(expectedLogicalDate, expectedLogicalDate);
+                eq(dag.getId()), eq(TriggerType.CRON), scheduledAtCaptor.capture());
+        assertThat(scheduledAtCaptor.getAllValues()).containsExactly(scheduledAt, scheduledAt);
         verify(schedulerLockRepo, times(2)).release(anyString(), anyString());
         assertThat(TenantContext.getTenantId()).isNull();
     }
@@ -147,6 +142,7 @@ class PipelineSchedulerServiceTest {
         dag.setId(UUID.randomUUID());
         dag.setTenantId(UUID.randomUUID());
         dag.setScheduleCron("0 * * * * *");
+        dag.setTimezone("UTC");
         dag.setStatus("PUBLISHED");
         dag.setDagsterJob("onelake_pipeline_run");
         dag.setEnabled(true);

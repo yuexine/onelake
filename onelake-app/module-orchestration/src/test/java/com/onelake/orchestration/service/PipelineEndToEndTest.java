@@ -111,7 +111,7 @@ class PipelineEndToEndTest {
                 runRepo, compileService, outboxProvider);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
-                new SparkRunConfigBuilder(), outboxProvider, pipelineLogStorage);
+                new SparkRunConfigBuilder(), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
 
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();

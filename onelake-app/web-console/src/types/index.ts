@@ -119,6 +119,7 @@ export interface JobRun {
   dagsterRunId?: string;
   triggerType: 'CRON' | 'MANUAL' | 'EVENT' | string;
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
+  timezone?: string;
   logicalDate?: string;
   dataIntervalStart?: string;
   dataIntervalEnd?: string;
@@ -156,6 +157,7 @@ export interface Backfill {
     end: string;
   };
   grain: BackfillGrain;
+  timezone: string;
   created_at: string;
   updated_at: string;
   runs: BackfillRun[];

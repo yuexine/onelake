@@ -141,6 +141,7 @@ class BackfillControllerTest {
                 "dagster-run-1",
                 "BACKFILL",
                 "RUNNING",
+                "Asia/Shanghai",
                 RANGE_START,
                 RANGE_START,
                 RANGE_START.plus(java.time.Duration.ofDays(1)),
@@ -186,6 +187,7 @@ class BackfillControllerTest {
                 2,
                 new BackfillDTO.Range(RANGE_START, RANGE_END),
                 "DAY",
+                "Asia/Shanghai",
                 RANGE_START,
                 RANGE_START,
                 List.of(run));

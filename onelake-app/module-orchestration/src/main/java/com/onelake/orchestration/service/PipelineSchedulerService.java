@@ -95,13 +95,14 @@ public class PipelineSchedulerService {
             return;
         }
 
-        ZonedDateTime nowZdt = tickAt.atZone(ZoneId.systemDefault());
-        ZonedDateTime prevMinuteStart = nowZdt.minusMinutes(1).withSecond(0).withNano(0);
-        ZonedDateTime nowMinuteStart = nowZdt.withSecond(0).withNano(0);
-
         int triggered = 0;
         for (Dag dag : candidates) {
             try {
+                ZoneId dagZone = ZoneId.of(dag.getTimezone() == null || dag.getTimezone().isBlank()
+                        ? "Asia/Shanghai" : dag.getTimezone());
+                ZonedDateTime nowZdt = tickAt.atZone(dagZone);
+                ZonedDateTime prevMinuteStart = nowZdt.minusMinutes(1).withSecond(0).withNano(0);
+                ZonedDateTime nowMinuteStart = nowZdt.withSecond(0).withNano(0);
                 Optional<ZonedDateTime> scheduledAt = cronDueAt(dag, prevMinuteStart, nowMinuteStart);
                 if (scheduledAt.isEmpty()) continue;
                 // 仓储查询已过滤 enabled；此处再次防御，避免调用方/测试提供非启用记录时误触发。
@@ -119,14 +120,14 @@ public class PipelineSchedulerService {
                 // 以流水线所属租户上下文运行。
                 TenantContext.setTenantId(dag.getTenantId());
                 try {
-                    Instant logicalDate = scheduledAt.get().withSecond(0).withNano(0).toInstant();
+                    Instant scheduledInstant = scheduledAt.get().toInstant();
                     orchestrationService.triggerPipelineRun(
                             dag.getId(),
                             TriggerType.CRON,
-                            new OrchestrationService.PipelineRunOptions(logicalDate, null, null, null));
+                            scheduledInstant);
                     triggered++;
-                    log.info("PipelineSchedulerService：已按 cron 触发流水线 {} (cron={}, logicalDate={})",
-                            dag.getId(), dag.getScheduleCron(), logicalDate);
+                    log.info("PipelineSchedulerService：已按 cron 触发流水线 {} (cron={}, scheduledAt={})",
+                            dag.getId(), dag.getScheduleCron(), scheduledInstant);
                 } finally {
                     TenantContext.clear();
                 }

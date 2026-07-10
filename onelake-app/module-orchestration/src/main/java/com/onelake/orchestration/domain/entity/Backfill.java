@@ -43,6 +43,10 @@ public class Backfill {
     @Column(nullable = false, length = 16)
     private String grain = "DAY";
 
+    /** 创建回填时冻结的业务时区，供窗口展开和后续分批派发复用。 */
+    @Column(nullable = false, length = 64)
+    private String timezone = "Asia/Shanghai";
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private BackfillStatus status = BackfillStatus.QUEUED;

@@ -212,6 +212,8 @@ class PipelineSchedulerServiceTest {
                 dag.getId(),
                 Instant.parse("2026-06-23T10:01:00Z"),
                 Instant.parse("2026-06-24T10:01:00Z"));
+        verify(dependencyReadinessService).evaluate(
+                dag, Instant.parse("2026-06-23T10:01:00Z"));
         assertThat(TenantContext.getTenantId()).isNull();
     }
 

@@ -31,6 +31,12 @@ public class DependencyReadinessService {
     private final DagRepository dagRepo;
     private final JobRunRepository jobRunRepo;
 
+    /** 调度器使用的布尔就绪门面。 */
+    @Transactional(readOnly = true)
+    public boolean isReady(Dag downstreamDag, Instant logicalDate) {
+        return evaluate(downstreamDag, logicalDate).ready();
+    }
+
     /** 无依赖或全部依赖满足时返回 ready；否则附带可观测的阻塞原因。 */
     @Transactional(readOnly = true)
     public ReadinessResult evaluate(Dag downstreamDag, Instant logicalDate) {

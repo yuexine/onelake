@@ -36,11 +36,10 @@ class DependencyReadinessServiceTest {
         when(dependencyRepo.findByDownstreamDagIdAndEnabledTrueOrderByCreatedAtAsc(downstream.getId()))
                 .thenReturn(List.of());
 
-        DependencyReadinessService.ReadinessResult result = service()
-                .evaluate(downstream, Instant.parse("2026-07-10T00:00:00Z"));
+        boolean ready = service().isReady(
+                downstream, Instant.parse("2026-07-10T00:00:00Z"));
 
-        assertThat(result.ready()).isTrue();
-        assertThat(result.blockers()).isEmpty();
+        assertThat(ready).isTrue();
         verifyNoInteractions(dagRepo, jobRunRepo);
     }
 

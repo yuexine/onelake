@@ -14,8 +14,9 @@ import java.util.UUID;
  * @param dagName DAG 展示名称
  * @param dagsterJob 实际启动的 Dagster 作业名
  * @param dagsterRunId Dagster run ID；远端启动前可为空
- * @param triggerType MANUAL、CRON 或 BACKFILL
+ * @param triggerType MANUAL、CRON、BACKFILL 或 AUTO_RETRY
  * @param status 本地聚合运行状态
+ * @param runMode NORMAL 或 DRY_RUN
  * @param timezone 计算 logical date 和数据区间使用的时区
  * @param logicalDate 调度周期的业务标识时刻
  * @param dataIntervalStart 数据区间左边界
@@ -25,6 +26,9 @@ import java.util.UUID;
  * @param finishedAt 终态时间
  * @param triggeredBy 触发用户 ID；系统触发可为空
  * @param triggeredByName 面向界面的触发者名称
+ * @param slaMissed 是否已超过 SLA 阈值
+ * @param retrySourceRunId DAG 自动重跑来源；普通运行为空
+ * @param runRetryAttempt DAG 自动重跑次数，首次运行为 0
  */
 public record JobRunDTO(
     UUID id,
@@ -34,6 +38,7 @@ public record JobRunDTO(
     String dagsterRunId,
     String triggerType,
     String status,
+    String runMode,
     String timezone,
     Instant logicalDate,
     Instant dataIntervalStart,
@@ -42,5 +47,8 @@ public record JobRunDTO(
     Instant startedAt,
     Instant finishedAt,
     UUID triggeredBy,
-    String triggeredByName
+    String triggeredByName,
+    Boolean slaMissed,
+    UUID retrySourceRunId,
+    Integer runRetryAttempt
 ) {}

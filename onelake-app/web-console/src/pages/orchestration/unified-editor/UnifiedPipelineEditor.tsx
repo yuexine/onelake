@@ -47,6 +47,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { PageHeader } from '../../../components';
 import { usePipelineEditor } from './usePipelineEditor';
@@ -57,6 +58,7 @@ import type { TaskTypeMeta } from './taskTypes';
 import { PipelineAPI } from '../../../api';
 import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
 import { BackfillWizard } from './BackfillWizard';
+import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
 
 const { Text } = Typography;
 
@@ -425,6 +427,7 @@ export default function UnifiedPipelineEditor() {
   const [validationResult, setValidationResult] = useState<PipelineValidationResult | undefined>(undefined);
   const [validationRequestError, setValidationRequestError] = useState<string | undefined>(undefined);
   const [backfillOpen, setBackfillOpen] = useState(false);
+  const [schedulingOpen, setSchedulingOpen] = useState(false);
 
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
     setCreateMeta(meta);
@@ -841,6 +844,9 @@ export default function UnifiedPipelineEditor() {
                 回填
               </Button>
             )}
+            <Button icon={<SettingOutlined />} onClick={() => setSchedulingOpen(true)}>
+              调度配置
+            </Button>
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -876,6 +882,12 @@ export default function UnifiedPipelineEditor() {
           message.success('回填已创建');
           navigate(`/orchestration/pipelines/${dagId}/backfills/${backfill.id}`);
         }}
+      />
+
+      <PipelineSchedulingDrawer
+        dagId={dagId}
+        open={schedulingOpen}
+        onClose={() => setSchedulingOpen(false)}
       />
 
       {/* P6-A: live run banner */}

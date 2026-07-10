@@ -47,6 +47,14 @@ public class PipelineDependencyService {
                 .toList();
     }
 
+    /** 一次返回当前租户全部启用依赖边，供编辑器执行本地成环预检。 */
+    @Transactional(readOnly = true)
+    public List<PipelineDependencyDTO> listEnabledDependencies() {
+        return dependencyRepo.findByTenantIdAndEnabledTrue(requireTenant()).stream()
+                .map(PipelineDependencyDTO::of)
+                .toList();
+    }
+
     /** 新增一条依赖；API 预检与数据库触发器共同保证不会形成有向环。 */
     @Transactional
     public PipelineDependencyDTO createDependency(UUID downstreamDagId,
@@ -93,6 +101,18 @@ public class PipelineDependencyService {
             }
             throw new BizException(40902, "流水线依赖冲突或已存在", ex);
         }
+    }
+
+    /** 删除当前租户内指定下游的一条依赖。 */
+    @Transactional
+    public void deleteDependency(UUID downstreamDagId, UUID dependencyId) {
+        UUID tenantId = requireTenant();
+        requireDag(downstreamDagId, tenantId);
+        PipelineDependency dependency = dependencyRepo
+                .findByIdAndDownstreamDagIdAndTenantId(
+                        dependencyId, downstreamDagId, tenantId)
+                .orElseThrow(() -> new BizException(40400, "流水线依赖不存在"));
+        dependencyRepo.delete(dependency);
     }
 
     private static NormalizedDependency normalize(PipelineDependencyRequest request) {

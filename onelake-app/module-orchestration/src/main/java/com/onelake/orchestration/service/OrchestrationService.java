@@ -1914,11 +1914,13 @@ public class OrchestrationService {
             StringUtils.hasText(r.getDagsterJob()) ? r.getDagsterJob() : (dag == null ? null : dag.getDagsterJob()),
             r.getDagsterRunId(),
             r.getTriggerType().name(), r.getStatus().name(),
+            r.getRunMode(),
             StringUtils.hasText(r.getTimezone())
                     ? r.getTimezone()
                     : (dag == null || !StringUtils.hasText(dag.getTimezone()) ? "Asia/Shanghai" : dag.getTimezone()),
             r.getLogicalDate(), r.getDataIntervalStart(), r.getDataIntervalEnd(), r.getBackfillId(),
-            r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r));
+            r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r),
+            r.getSlaMissed(), r.getRetrySourceRunId(), r.getRunRetryAttempt());
     }
 
     private record TriggerReadiness(boolean triggerable, String reason) {}

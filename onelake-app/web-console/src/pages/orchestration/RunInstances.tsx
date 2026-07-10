@@ -1010,6 +1010,10 @@ export default function RunInstances() {
         meta={detailRun ? [
             { label: '状态', value: detailRun.status },
             { label: '触发方式', value: detailRun.triggerType },
+            ...(detailRun.runMode === 'DRY_RUN' ? [{ label: '运行模式', value: '空跑' }] : []),
+            ...((detailRun.runRetryAttempt ?? 0) > 0
+              ? [{ label: '自动重跑', value: `第 ${detailRun.runRetryAttempt} 次` }]
+              : []),
             ...(detailRun.backfillId ? [{ label: '回填批次', value: shortId(detailRun.backfillId) }] : []),
             { label: '触发人', value: triggerActorName(detailRun) },
             { label: '耗时', value: formatDuration(detailRun) },
@@ -1080,6 +1084,22 @@ export default function RunInstances() {
                 <Descriptions.Item label="Dagster Job">{detailRun.dagsterJob || '-'}</Descriptions.Item>
                 <Descriptions.Item label="触发方式">{detailRun.triggerType}</Descriptions.Item>
                 <Descriptions.Item label="状态"><StatusBadge status={detailRun.status} /></Descriptions.Item>
+                <Descriptions.Item label="运行模式">
+                  {detailRun.runMode === 'DRY_RUN' ? <Tag color="blue">空跑</Tag> : '正常'}
+                </Descriptions.Item>
+                {detailRun.slaMissed && (
+                  <Descriptions.Item label="SLA"><Tag color="red">已违约</Tag></Descriptions.Item>
+                )}
+                {(detailRun.runRetryAttempt ?? 0) > 0 && (
+                  <Descriptions.Item label="自动重跑">第 {detailRun.runRetryAttempt} 次</Descriptions.Item>
+                )}
+                {detailRun.retrySourceRunId && (
+                  <Descriptions.Item label="重跑来源">
+                    <a className="ol-link" onClick={() => navigate(`/orchestration/runs/${detailRun.retrySourceRunId}`)}>
+                      {detailRun.retrySourceRunId}
+                    </a>
+                  </Descriptions.Item>
+                )}
                 {detailRun.backfillId && (
                   <Descriptions.Item label="回填批次">
                     <a
@@ -1257,7 +1277,13 @@ export default function RunInstances() {
                 color: t === 'CRON' ? 'var(--ol-brand)' : 'var(--ol-ink-2)',
               }}>{t}</span>
             ) },
-            { title: '状态', dataIndex: 'status', width: 110, render: (s: string) => <StatusBadge status={s} /> },
+            { title: '状态', dataIndex: 'status', width: 150, render: (s: string, run: JobRun) => (
+              <Space size={4} wrap>
+                <StatusBadge status={s} />
+                {run.runMode === 'DRY_RUN' && <Tag color="blue" style={{ margin: 0 }}>空跑</Tag>}
+                {run.slaMissed && <Tag color="red" style={{ margin: 0 }}>SLA</Tag>}
+              </Space>
+            ) },
             { title: '开始', dataIndex: 'startedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatDate(t)}</span> },
             { title: '结束', dataIndex: 'finishedAt', render: (t: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatDate(t)}</span> },
             { title: '耗时', width: 90, render: (_: unknown, r: JobRun) => <Tag style={{ margin: 0 }}>{formatDuration(r)}</Tag> },

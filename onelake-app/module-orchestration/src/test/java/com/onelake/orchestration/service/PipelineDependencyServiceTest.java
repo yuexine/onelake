@@ -143,6 +143,35 @@ class PipelineDependencyServiceTest {
                         downstream.getId(), TENANT_ID);
     }
 
+    @Test
+    void listsEnabledTenantGraphInOneQuery() {
+        PipelineDependency dependency = dependency(UUID.randomUUID(), UUID.randomUUID());
+        when(dependencyRepo.findByTenantIdAndEnabledTrue(TENANT_ID))
+                .thenReturn(List.of(dependency));
+
+        List<PipelineDependencyDTO> result = service.listEnabledDependencies();
+
+        assertThat(result).singleElement()
+                .extracting(PipelineDependencyDTO::id)
+                .isEqualTo(dependency.getId());
+        verify(dependencyRepo).findByTenantIdAndEnabledTrue(TENANT_ID);
+    }
+
+    @Test
+    void deletesOnlyRequestedTenantAndDownstream() {
+        Dag downstream = dag();
+        PipelineDependency dependency = dependency(downstream.getId(), UUID.randomUUID());
+        when(dagRepo.findByIdAndTenantId(downstream.getId(), TENANT_ID))
+                .thenReturn(Optional.of(downstream));
+        when(dependencyRepo.findByIdAndDownstreamDagIdAndTenantId(
+                dependency.getId(), downstream.getId(), TENANT_ID))
+                .thenReturn(Optional.of(dependency));
+
+        service.deleteDependency(downstream.getId(), dependency.getId());
+
+        verify(dependencyRepo).delete(dependency);
+    }
+
     private void stubDags(Dag downstream, Dag upstream) {
         when(dagRepo.findByIdAndTenantId(downstream.getId(), TENANT_ID))
                 .thenReturn(Optional.of(downstream));

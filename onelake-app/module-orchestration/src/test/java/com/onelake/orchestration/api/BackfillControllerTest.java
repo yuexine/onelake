@@ -141,6 +141,7 @@ class BackfillControllerTest {
                 "dagster-run-1",
                 "BACKFILL",
                 "RUNNING",
+                "NORMAL",
                 "Asia/Shanghai",
                 RANGE_START,
                 RANGE_START,
@@ -149,7 +150,10 @@ class BackfillControllerTest {
                 RANGE_START,
                 null,
                 null,
-                "operator");
+                "operator",
+                false,
+                null,
+                0);
         when(backfillService.getJobRun(BACKFILL_ID, RUN_ID)).thenReturn(run);
 
         mockMvc.perform(get("/api/v1/orchestration/backfills/" + BACKFILL_ID + "/runs/" + RUN_ID))

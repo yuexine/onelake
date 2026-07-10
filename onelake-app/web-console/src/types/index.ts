@@ -111,6 +111,67 @@ export interface Dag {
   lastRun?: JobRun;
 }
 
+export type ScheduleMode = 'NORMAL' | 'DRY_RUN' | 'FROZEN';
+
+export interface DagScheduling {
+  dagId: UUID;
+  timezone: string;
+  catchup: boolean;
+  maxActiveRuns: number;
+  priority: number;
+  scheduleMode: ScheduleMode;
+  slaMinutes?: number;
+  timeoutMinutes?: number;
+  runRetryCount: number;
+  runRetryIntervalSeconds: number;
+  calendarId?: UUID;
+  scheduleStart?: string;
+  scheduleEnd?: string;
+}
+
+export interface UpdateDagSchedulingRequest {
+  timezone: string;
+  catchup: boolean;
+  maxActiveRuns: number;
+  priority: number;
+  scheduleMode: ScheduleMode;
+  slaMinutes?: number | null;
+  timeoutMinutes?: number | null;
+  runRetryCount: number;
+  runRetryIntervalSeconds: number;
+  calendarId?: UUID | null;
+  scheduleStart?: string | null;
+  scheduleEnd?: string | null;
+}
+
+export interface ScheduleCalendar {
+  id: UUID;
+  name: string;
+  timezone: string;
+  createdAt: string;
+}
+
+export type PipelineDependencyType = 'SAME_CYCLE' | 'CROSS_CYCLE';
+export type PipelineDependencyOffsetGrain = 'HOUR' | 'DAY' | 'MONTH';
+
+export interface PipelineDependency {
+  id: UUID;
+  downstreamDagId: UUID;
+  upstreamDagId: UUID;
+  dependencyType: PipelineDependencyType;
+  offsetGrain?: PipelineDependencyOffsetGrain;
+  offsetN: number;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface CreatePipelineDependencyRequest {
+  upstreamDagId: UUID;
+  dependencyType: PipelineDependencyType;
+  offsetGrain?: PipelineDependencyOffsetGrain;
+  offsetN?: number;
+}
+
 export interface JobRun {
   id: UUID;
   dagId: UUID;
@@ -119,6 +180,7 @@ export interface JobRun {
   dagsterRunId?: string;
   triggerType: 'CRON' | 'MANUAL' | 'EVENT' | string;
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
+  runMode?: ScheduleMode | string;
   timezone?: string;
   logicalDate?: string;
   dataIntervalStart?: string;
@@ -128,6 +190,9 @@ export interface JobRun {
   finishedAt?: string;
   triggeredBy?: UUID;
   triggeredByName?: string;
+  slaMissed?: boolean;
+  retrySourceRunId?: UUID;
+  runRetryAttempt?: number;
 }
 
 export type BackfillGrain = 'DAY' | 'HOUR' | 'MONTH';
@@ -338,6 +403,18 @@ export interface Pipeline {
   engine?: string;
   resourceGroup?: string;
   computeProfile?: string;
+  timezone?: string;
+  catchup?: boolean;
+  maxActiveRuns?: number;
+  priority?: number;
+  scheduleMode?: ScheduleMode;
+  slaMinutes?: number;
+  timeoutMinutes?: number;
+  runRetryCount?: number;
+  runRetryIntervalSeconds?: number;
+  calendarId?: UUID;
+  scheduleStart?: string;
+  scheduleEnd?: string;
   lastRun?: JobRun;
 }
 

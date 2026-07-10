@@ -186,9 +186,10 @@ class BackfillServiceTest {
         Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
         JobRunDTO expected = new JobRunDTO(
                 RUN_ID, DAG_ID, "orders_pipeline", "onelake_pipeline_run", "dagster-run-1",
-                "BACKFILL", "RUNNING", "Asia/Shanghai", Instant.parse("2026-01-01T00:00:00Z"),
+                "BACKFILL", "RUNNING", "NORMAL", "Asia/Shanghai", Instant.parse("2026-01-01T00:00:00Z"),
                 Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-02T00:00:00Z"),
-                BACKFILL_ID, Instant.parse("2026-01-01T00:00:00Z"), null, CREATOR_ID, "operator");
+                BACKFILL_ID, Instant.parse("2026-01-01T00:00:00Z"), null, CREATOR_ID, "operator",
+                false, null, 0);
         when(backfillRepo.findByIdAndTenantId(BACKFILL_ID, TENANT_ID)).thenReturn(Optional.of(backfill));
         when(orchestrationService.getBackfillRun(DAG_ID, BACKFILL_ID, RUN_ID)).thenReturn(expected);
 

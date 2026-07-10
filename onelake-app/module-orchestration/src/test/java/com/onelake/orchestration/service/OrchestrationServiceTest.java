@@ -158,6 +158,10 @@ class OrchestrationServiceTest {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());
         run.setTimezone("UTC");
+        run.setRunMode("DRY_RUN");
+        run.setSlaMissed(true);
+        run.setRetrySourceRunId(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        run.setRunRetryAttempt(2);
         PageRequest pageable = PageRequest.of(0, 20);
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
         when(runRepo.findByDagIdInOrderByStartedAtDesc(
@@ -176,6 +180,10 @@ class OrchestrationServiceTest {
         assertThat(dto.status()).isEqualTo("SUCCEEDED");
         assertThat(dto.triggerType()).isEqualTo("MANUAL");
         assertThat(dto.timezone()).isEqualTo("UTC");
+        assertThat(dto.runMode()).isEqualTo("DRY_RUN");
+        assertThat(dto.slaMissed()).isTrue();
+        assertThat(dto.retrySourceRunId()).isEqualTo(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        assertThat(dto.runRetryAttempt()).isEqualTo(2);
     }
 
     @Test

@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -42,15 +43,17 @@ class PipelineDependencyControllerTest {
     }
 
     @Test
-    void exposesGetAndPostDependencies() throws Exception {
+    void exposesGetPostAndDeleteDependencies() throws Exception {
         UUID downstreamDagId = UUID.randomUUID();
         UUID upstreamDagId = UUID.randomUUID();
+        UUID dependencyId = UUID.randomUUID();
         PipelineDependencyDTO dto = new PipelineDependencyDTO(
-                UUID.randomUUID(), downstreamDagId, upstreamDagId,
+                dependencyId, downstreamDagId, upstreamDagId,
                 "CROSS_CYCLE", "DAY", -1, true,
                 Instant.parse("2026-07-10T12:00:00Z"));
         when(dependencyService.listDependencies(downstreamDagId))
                 .thenReturn(List.of(dto));
+        when(dependencyService.listEnabledDependencies()).thenReturn(List.of(dto));
         when(dependencyService.createDependency(
                 org.mockito.ArgumentMatchers.eq(downstreamDagId), any()))
                 .thenReturn(dto);
@@ -68,11 +71,17 @@ class PipelineDependencyControllerTest {
                                 """.formatted(upstreamDagId)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.offsetN").value(-1));
+        mockMvc.perform(delete(path + "/" + dependencyId))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/orchestration/pipeline-dependencies"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(dependencyId.toString()));
 
         verify(dependencyService).createDependency(
                 org.mockito.ArgumentMatchers.eq(downstreamDagId),
                 org.mockito.ArgumentMatchers.eq(new PipelineDependencyRequest(
                         upstreamDagId, "CROSS_CYCLE", "DAY", -1)));
+        verify(dependencyService).deleteDependency(downstreamDagId, dependencyId);
     }
 
     @Test
@@ -81,10 +90,18 @@ class PipelineDependencyControllerTest {
                 .getMethod("list", UUID.class);
         Method create = PipelineDependencyController.class
                 .getMethod("create", UUID.class, PipelineDependencyRequest.class);
+        Method delete = PipelineDependencyController.class
+                .getMethod("delete", UUID.class, UUID.class);
+        Method listEnabled = PipelineDependencyController.class
+                .getMethod("listEnabled");
 
         assertThat(list.getAnnotation(PreAuthorize.class).value())
                 .isEqualTo("hasRole('DE')");
         assertThat(create.getAnnotation(PreAuthorize.class).value())
+                .isEqualTo("hasRole('DE')");
+        assertThat(delete.getAnnotation(PreAuthorize.class).value())
+                .isEqualTo("hasRole('DE')");
+        assertThat(listEnabled.getAnnotation(PreAuthorize.class).value())
                 .isEqualTo("hasRole('DE')");
     }
 }

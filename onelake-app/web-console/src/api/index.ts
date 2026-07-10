@@ -63,6 +63,11 @@ import type {
   TaskRunLogOptions,
   TaskRerunMode,
   TaskRerunResult,
+  DagScheduling,
+  UpdateDagSchedulingRequest,
+  ScheduleCalendar,
+  PipelineDependency,
+  CreatePipelineDependencyRequest,
 } from '../types';
 
 export interface PageResult<T> {
@@ -357,6 +362,26 @@ export const BackfillAPI = {
     unwrap<JobRun>(http.get(`/orchestration/backfills/${id}/runs/${runId}`)),
   cancel: (id: string) =>
     unwrap<Backfill>(http.post(`/orchestration/backfills/${id}/cancel`)),
+};
+
+export const SchedulingAPI = {
+  get: (dagId: string) =>
+    unwrap<DagScheduling>(http.get(`/orchestration/pipelines/${dagId}/scheduling`)),
+  update: (dagId: string, payload: UpdateDagSchedulingRequest) =>
+    unwrap<DagScheduling>(http.put(`/orchestration/pipelines/${dagId}/scheduling`, payload)),
+  listCalendars: () =>
+    unwrap<ScheduleCalendar[]>(http.get('/orchestration/schedule-calendars')),
+};
+
+export const DependencyAPI = {
+  listEnabled: () =>
+    unwrap<PipelineDependency[]>(http.get('/orchestration/pipeline-dependencies')),
+  list: (dagId: string) =>
+    unwrap<PipelineDependency[]>(http.get(`/orchestration/pipelines/${dagId}/dependencies`)),
+  create: (dagId: string, payload: CreatePipelineDependencyRequest) =>
+    unwrap<PipelineDependency>(http.post(`/orchestration/pipelines/${dagId}/dependencies`, payload)),
+  delete: (dagId: string, dependencyId: string) =>
+    unwrap<void>(http.delete(`/orchestration/pipelines/${dagId}/dependencies/${dependencyId}`)),
 };
 
 /**

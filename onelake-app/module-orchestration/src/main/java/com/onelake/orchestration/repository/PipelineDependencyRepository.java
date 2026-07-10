@@ -4,6 +4,7 @@ import com.onelake.orchestration.domain.entity.PipelineDependency;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /** 流水线周期依赖持久化接口。 */
@@ -19,4 +20,8 @@ public interface PipelineDependencyRepository extends JpaRepository<PipelineDepe
 
     /** 读取租户内全部启用边，供新增依赖前执行传递性成环校验。 */
     List<PipelineDependency> findByTenantIdAndEnabledTrue(UUID tenantId);
+
+    /** 在租户和下游边界内定位待删除依赖。 */
+    Optional<PipelineDependency> findByIdAndDownstreamDagIdAndTenantId(
+            UUID id, UUID downstreamDagId, UUID tenantId);
 }

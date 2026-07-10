@@ -2,6 +2,7 @@ package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
+import com.onelake.orchestration.domain.entity.PipelineDependencyWait;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
 import com.onelake.orchestration.domain.enums.DagStatus;
@@ -9,6 +10,7 @@ import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
+import com.onelake.orchestration.repository.PipelineDependencyWaitRepository;
 import com.onelake.orchestration.repository.ScheduleCalendarDayRepository;
 import com.onelake.orchestration.repository.SchedulerLockRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -35,6 +37,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -53,6 +56,8 @@ class PipelineSchedulerServiceTest {
     @Mock private ScheduleCalendarDayRepository calendarDayRepo;
     @Mock private CatchupPlanner catchupPlanner;
     @Mock private BackfillDispatcher backfillDispatcher;
+    @Mock private DependencyReadinessService dependencyReadinessService;
+    @Mock private PipelineDependencyWaitRepository dependencyWaitRepo;
 
     private PipelineSchedulerService service;
     @BeforeEach
@@ -64,7 +69,14 @@ class PipelineSchedulerServiceTest {
                 jobRunRepo,
                 calendarDayRepo,
                 catchupPlanner,
-                backfillDispatcher);
+                backfillDispatcher,
+                dependencyReadinessService,
+                new DataIntervalCalculator(),
+                dependencyWaitRepo);
+        lenient().when(dependencyReadinessService.evaluate(any(), any()))
+                .thenReturn(DependencyReadinessService.ReadinessResult.readyResult());
+        lenient().when(dependencyWaitRepo.findAllByOrderByCreatedAtAscIdAsc())
+                .thenReturn(List.of());
     }
 
     @AfterEach
@@ -173,6 +185,93 @@ class PipelineSchedulerServiceTest {
         verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
         assertThat(ScheduleMode.from(dag.getScheduleMode()).satisfiesDependency(DagStatus.SUCCEEDED))
                 .isFalse();
+        assertThat(TenantContext.getTenantId()).isNull();
+    }
+
+    @Test
+    void unsatisfiedUpstreamDependencyBlocksDuePipelineBeforeConcurrencyCheck() {
+        Dag dag = scheduledPipeline();
+        stubLockedTick(List.of(dag));
+        DependencyReadinessService.DependencyBlocker blocker =
+                new DependencyReadinessService.DependencyBlocker(
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        Instant.parse("2026-06-22T10:01:00Z"),
+                        "UPSTREAM_FROZEN");
+        when(dependencyReadinessService.evaluate(
+                eq(dag), eq(Instant.parse("2026-06-23T10:01:00Z"))))
+                .thenReturn(new DependencyReadinessService.ReadinessResult(false, List.of(blocker)));
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
+
+        verifyNoInteractions(orchestrationService);
+        verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        verifyNoInteractions(catchupPlanner, backfillDispatcher);
+        verify(dependencyWaitRepo).enqueue(
+                dag.getTenantId(),
+                dag.getId(),
+                Instant.parse("2026-06-23T10:01:00Z"),
+                Instant.parse("2026-06-24T10:01:00Z"));
+        assertThat(TenantContext.getTenantId()).isNull();
+    }
+
+    @Test
+    void dependencyWaitIsRetriedOnLaterTickOutsideOriginalCronWindow() {
+        Dag dag = scheduledPipeline();
+        dag.setScheduleCron("0 0 0 * * *");
+        Instant scheduledAt = Instant.parse("2026-06-24T00:00:00Z");
+        Instant logicalDate = Instant.parse("2026-06-23T00:00:00Z");
+        PipelineDependencyWait wait = new PipelineDependencyWait();
+        wait.setId(UUID.randomUUID());
+        wait.setTenantId(dag.getTenantId());
+        wait.setDagId(dag.getId());
+        wait.setScheduledAt(scheduledAt);
+        wait.setLogicalDate(logicalDate);
+        wait.setCreatedAt(scheduledAt);
+        wait.setUpdatedAt(scheduledAt);
+        when(dependencyWaitRepo.findAllByOrderByCreatedAtAscIdAsc()).thenReturn(List.of(wait));
+        when(dagRepo.findByIdAndTenantId(dag.getId(), dag.getTenantId()))
+                .thenReturn(Optional.of(dag));
+        when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
+        when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
+        when(dagRepo.findByEnabledTrue()).thenReturn(List.of(dag));
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T00:02:45Z"));
+
+        verify(dependencyReadinessService).evaluate(dag, logicalDate);
+        verify(orchestrationService).triggerPipelineRun(dag.getId(), TriggerType.CRON, scheduledAt);
+        verify(dependencyWaitRepo).deleteById(wait.getId());
+        assertThat(TenantContext.getTenantId()).isNull();
+    }
+
+    @Test
+    void duplicateCronRunCleansRecoveredDependencyWaitIdempotently() {
+        Dag dag = scheduledPipeline();
+        dag.setScheduleCron("0 0 0 * * *");
+        Instant scheduledAt = Instant.parse("2026-06-24T00:00:00Z");
+        Instant logicalDate = Instant.parse("2026-06-23T00:00:00Z");
+        PipelineDependencyWait wait = new PipelineDependencyWait();
+        wait.setId(UUID.randomUUID());
+        wait.setTenantId(dag.getTenantId());
+        wait.setDagId(dag.getId());
+        wait.setScheduledAt(scheduledAt);
+        wait.setLogicalDate(logicalDate);
+        wait.setCreatedAt(scheduledAt);
+        wait.setUpdatedAt(scheduledAt);
+        when(dependencyWaitRepo.findAllByOrderByCreatedAtAscIdAsc()).thenReturn(List.of(wait));
+        when(dagRepo.findByIdAndTenantId(dag.getId(), dag.getTenantId()))
+                .thenReturn(Optional.of(dag));
+        when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
+        when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
+        when(dagRepo.findByEnabledTrue()).thenReturn(List.of());
+        when(orchestrationService.triggerPipelineRun(dag.getId(), TriggerType.CRON, scheduledAt))
+                .thenThrow(new DataIntegrityViolationException("uq_job_run_cron_logical"));
+        when(jobRunRepo.existsByDagIdAndLogicalDateAndTriggerType(
+                dag.getId(), logicalDate, TriggerType.CRON)).thenReturn(true);
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T00:02:45Z"));
+
+        verify(dependencyWaitRepo).deleteById(wait.getId());
         assertThat(TenantContext.getTenantId()).isNull();
     }
 

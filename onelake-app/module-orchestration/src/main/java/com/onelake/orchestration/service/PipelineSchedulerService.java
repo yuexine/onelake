@@ -2,6 +2,7 @@ package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
+import com.onelake.orchestration.domain.entity.PipelineDependencyWait;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
 import com.onelake.orchestration.domain.enums.DagStatus;
@@ -9,6 +10,7 @@ import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
+import com.onelake.orchestration.repository.PipelineDependencyWaitRepository;
 import com.onelake.orchestration.repository.ScheduleCalendarDayRepository;
 import com.onelake.orchestration.repository.SchedulerLockRepository;
 import lombok.RequiredArgsConstructor;
@@ -64,6 +66,12 @@ public class PipelineSchedulerService {
     private final CatchupPlanner catchupPlanner;
     /** 将 catchup 周期交给 M1 持久化回填队列。 */
     private final BackfillDispatcher backfillDispatcher;
+    /** 判定当前 logical_date 的同周期/跨周期上游是否全部成功。 */
+    private final DependencyReadinessService dependencyReadinessService;
+    /** 与触发入口复用同一业务区间算法，避免计划点和 logical_date 口径漂移。 */
+    private final DataIntervalCalculator dataIntervalCalculator;
+    /** 持久化被依赖阻塞的计划点，使下一 tick 能脱离 cron 窗口继续重判。 */
+    private final PipelineDependencyWaitRepository dependencyWaitRepo;
 
     /**
      * 每 60 秒触发一次，按当前时间评估已发布流水线是否到期。
@@ -93,6 +101,7 @@ public class PipelineSchedulerService {
         }
 
         try {
+            retryDependencyWaits();
             triggerDuePipelines(tickAt);
         } finally {
             try {
@@ -110,7 +119,7 @@ public class PipelineSchedulerService {
      * 扫描、排序并触发本轮到期流水线。
      *
      * <p>单 DAG 的处理顺序固定为：基础资格 → cron 命中 → 调度窗口 → 日历 →
-     * FROZEN → max_active_runs → catchup 规划 → 当前周期 → 历史回填。
+     * FROZEN → 上游依赖 → max_active_runs → catchup 规划 → 当前周期 → 历史回填。
      * 所有需要租户数据的操作均在对应 DAG 的租户上下文内执行。
      */
     private void triggerDuePipelines(Instant tickAt) {
@@ -155,6 +164,18 @@ public class PipelineSchedulerService {
                 }
                 if (ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
                     log.info("PipelineSchedulerService：流水线 {} 已冻结，本周期跳过", dag.getId());
+                    continue;
+                }
+
+                Instant logicalDate = dataIntervalCalculator.calculate(
+                        dag.getPartitionGrain(), scheduledInstant, dag.getTimezone()).logicalDate();
+                DependencyReadinessService.ReadinessResult readiness =
+                        dependencyReadinessService.evaluate(dag, logicalDate);
+                if (!readiness.ready()) {
+                    dependencyWaitRepo.enqueue(
+                            dag.getTenantId(), dag.getId(), logicalDate, scheduledInstant);
+                    log.info("PipelineSchedulerService：流水线 {} 等待上游/被阻塞，logicalDate={} blockers={}",
+                            dag.getId(), logicalDate, readiness.summary());
                     continue;
                 }
 
@@ -220,6 +241,78 @@ public class PipelineSchedulerService {
         }
         if (triggered > 0) {
             log.info("PipelineSchedulerService：本轮 tick 触发 {} 条流水线", triggered);
+        }
+    }
+
+    /**
+     * 重判之前 tick 因依赖未就绪而保存的计划点。
+     *
+     * <p>等待记录使用原始 {@code scheduledAt} 触发，确保生成的 logical_date 与首次
+     * cron 命中一致；成功或唯一键确认已触发后才删除，其他异常保留到下一 tick。</p>
+     */
+    private void retryDependencyWaits() {
+        List<PipelineDependencyWait> waits;
+        try {
+            waits = dependencyWaitRepo.findAllByOrderByCreatedAtAscIdAsc();
+        } catch (RuntimeException e) {
+            log.warn("PipelineSchedulerService：加载依赖等待计划点失败：{}", e.getMessage());
+            return;
+        }
+
+        for (PipelineDependencyWait wait : waits) {
+            try {
+                Optional<Dag> dagOptional = dagRepo.findByIdAndTenantId(
+                        wait.getDagId(), wait.getTenantId());
+                if (dagOptional.isEmpty()) {
+                    dependencyWaitRepo.deleteById(wait.getId());
+                    continue;
+                }
+                Dag dag = dagOptional.get();
+                if (!isSchedulablePipeline(dag)
+                        || ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
+                    continue;
+                }
+
+                TenantContext.setTenantId(dag.getTenantId());
+                DependencyReadinessService.ReadinessResult readiness =
+                        dependencyReadinessService.evaluate(dag, wait.getLogicalDate());
+                if (!readiness.ready()) {
+                    log.debug("PipelineSchedulerService：流水线 {} 仍等待上游，logicalDate={} blockers={}",
+                            dag.getId(), wait.getLogicalDate(), readiness.summary());
+                    continue;
+                }
+
+                int maxActiveRuns = Math.max(1,
+                        dag.getMaxActiveRuns() == null ? 1 : dag.getMaxActiveRuns());
+                long activeRuns = jobRunRepo.countByDagIdAndStatusIn(
+                        dag.getId(), ACTIVE_RUN_STATUSES);
+                if (activeRuns >= maxActiveRuns) {
+                    continue;
+                }
+
+                try {
+                    orchestrationService.triggerPipelineRun(
+                            dag.getId(), TriggerType.CRON, wait.getScheduledAt());
+                    dependencyWaitRepo.deleteById(wait.getId());
+                    log.info("PipelineSchedulerService：依赖已就绪，恢复触发流水线 {} logicalDate={}",
+                            dag.getId(), wait.getLogicalDate());
+                } catch (DataIntegrityViolationException e) {
+                    // 只把 CRON 唯一键冲突视为成功；其他完整性错误保留等待记录供后续修复重试。
+                    boolean alreadyTriggered = jobRunRepo.existsByDagIdAndLogicalDateAndTriggerType(
+                            dag.getId(), wait.getLogicalDate(), TriggerType.CRON);
+                    if (!alreadyTriggered) {
+                        throw e;
+                    }
+                    dependencyWaitRepo.deleteById(wait.getId());
+                    log.info("PipelineSchedulerService：依赖等待计划点已由其他路径触发，清理 dagId={} logicalDate={}",
+                            dag.getId(), wait.getLogicalDate());
+                }
+            } catch (RuntimeException e) {
+                log.warn("PipelineSchedulerService：恢复依赖等待计划点 {} 失败：{}",
+                        wait.getId(), e.getMessage());
+            } finally {
+                TenantContext.clear();
+            }
         }
     }
 

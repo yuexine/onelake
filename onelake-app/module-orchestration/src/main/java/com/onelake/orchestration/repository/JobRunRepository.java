@@ -2,6 +2,7 @@ package com.onelake.orchestration.repository;
 
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.TriggerType;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -67,6 +68,16 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
      * {@code max_active_runs} 限流。
      */
     long countByDagIdAndStatusIn(UUID dagId, Collection<DagStatus> statuses);
+
+    /** 指定上游流水线在目标业务周期是否已有成功运行；DRY_RUN 成功记录同样命中。 */
+    boolean existsByDagIdAndLogicalDateAndStatus(UUID dagId,
+                                                  Instant logicalDate,
+                                                  DagStatus status);
+
+    /** 判断指定 CRON 计划点是否已经生成运行，供依赖等待队列做唯一键幂等收口。 */
+    boolean existsByDagIdAndLogicalDateAndTriggerType(UUID dagId,
+                                                       Instant logicalDate,
+                                                       TriggerType triggerType);
 
     /**
      * 返回已经到达 DAG 重跑间隔且尚未领取的失败运行 ID。

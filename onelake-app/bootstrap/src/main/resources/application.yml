@@ -1,6 +1,11 @@
 spring:
   application:
     name: onelake-app
+  task:
+    scheduling:
+      # Outbox Stream 消费会阻塞等待消息；至少保留一个线程给 cron/backfill 等调度任务。
+      pool:
+        size: ${SPRING_TASK_SCHEDULING_POOL_SIZE:2}
   datasource:
     url: ${JDBC_URL:jdbc:postgresql://localhost:5432/onelake}
     username: ${JDBC_USER:onelake}

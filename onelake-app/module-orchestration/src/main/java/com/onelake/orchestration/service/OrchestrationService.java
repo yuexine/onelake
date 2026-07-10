@@ -247,7 +247,13 @@ public class OrchestrationService {
         run.setDataIntervalStart(runOptions.dataIntervalStart());
         run.setDataIntervalEnd(runOptions.dataIntervalEnd());
         run.setBackfillId(runOptions.backfillId());
-        runRepo.save(run);
+        // V14 为 CRON logical_date 建立了唯一索引。此处立即 flush，确保重复调度在
+        // 启动 Dagster 前被识别，由 PipelineSchedulerService 安全地当作已触发处理。
+        if (trigger == TriggerType.CRON && runOptions.logicalDate() != null) {
+            runRepo.saveAndFlush(run);
+        } else {
+            runRepo.save(run);
+        }
 
         // 4. 为每个有效节点创建 TaskRun。初始状态由数据流 DAG 推导，避免所有节点被扁平化为 QUEUED。
         List<PipelineTask> observable = observableTasks(plan, tasks);

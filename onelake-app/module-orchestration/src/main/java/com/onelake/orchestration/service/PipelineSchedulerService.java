@@ -4,12 +4,20 @@ import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.SchedulerLockRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * 流水线周期调度触发器。
@@ -31,7 +39,11 @@ import java.util.List;
 @Slf4j
 public class PipelineSchedulerService {
 
+    private static final String SCHEDULER_LOCK_KEY = "pipeline-scheduler";
+    private static final Duration SCHEDULER_LOCK_TTL = Duration.ofMinutes(5);
+
     private final DagRepository dagRepo;
+    private final SchedulerLockRepository schedulerLockRepo;
     private final OrchestrationService orchestrationService;
 
     /**
@@ -39,6 +51,42 @@ public class PipelineSchedulerService {
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 30_000)
     public void tickScheduledPipelines() {
+        tickScheduledPipelines(Instant.now());
+    }
+
+    /**
+     * 执行单次调度 tick。使用参数化时间便于固定 cron 命中分钟的幂等键并进行单元测试。
+     */
+    void tickScheduledPipelines(Instant tickAt) {
+        String lockHolder = UUID.randomUUID().toString();
+        boolean lockAcquired;
+        try {
+            lockAcquired = schedulerLockRepo.acquire(
+                    SCHEDULER_LOCK_KEY, lockHolder, tickAt.plus(SCHEDULER_LOCK_TTL)) == 1;
+        } catch (RuntimeException e) {
+            log.warn("PipelineSchedulerService：获取调度锁失败，本轮跳过：{}", e.getMessage());
+            return;
+        }
+        if (!lockAcquired) {
+            log.debug("PipelineSchedulerService：调度锁正由其他实例持有，本轮跳过");
+            return;
+        }
+
+        try {
+            triggerDuePipelines(tickAt);
+        } finally {
+            try {
+                int released = schedulerLockRepo.release(SCHEDULER_LOCK_KEY, lockHolder);
+                if (released == 0) {
+                    log.warn("PipelineSchedulerService：调度锁已过期或被接管，未释放当前 holder 的锁");
+                }
+            } catch (RuntimeException e) {
+                log.warn("PipelineSchedulerService：释放调度锁失败：{}", e.getMessage());
+            }
+        }
+    }
+
+    private void triggerDuePipelines(Instant tickAt) {
         List<Dag> candidates;
         try {
             candidates = dagRepo.findByEnabledTrue();
@@ -47,14 +95,19 @@ public class PipelineSchedulerService {
             return;
         }
 
-        java.time.ZonedDateTime nowZdt = java.time.Instant.now().atZone(java.time.ZoneId.systemDefault());
-        java.time.ZonedDateTime prevMinuteStart = nowZdt.minusMinutes(1).withSecond(0).withNano(0);
-        java.time.ZonedDateTime nowMinuteStart = nowZdt.withSecond(0).withNano(0);
+        ZonedDateTime nowZdt = tickAt.atZone(ZoneId.systemDefault());
+        ZonedDateTime prevMinuteStart = nowZdt.minusMinutes(1).withSecond(0).withNano(0);
+        ZonedDateTime nowMinuteStart = nowZdt.withSecond(0).withNano(0);
 
         int triggered = 0;
         for (Dag dag : candidates) {
             try {
-                if (!isCronDue(dag, prevMinuteStart, nowMinuteStart)) continue;
+                Optional<ZonedDateTime> scheduledAt = cronDueAt(dag, prevMinuteStart, nowMinuteStart);
+                if (scheduledAt.isEmpty()) continue;
+                // 仓储查询已过滤 enabled；此处再次防御，避免调用方/测试提供非启用记录时误触发。
+                if (!Boolean.TRUE.equals(dag.getEnabled())) {
+                    continue;
+                }
                 // 只触发已发布流水线。
                 if (dag.getStatus() == null || !"PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
                     continue;
@@ -66,13 +119,21 @@ public class PipelineSchedulerService {
                 // 以流水线所属租户上下文运行。
                 TenantContext.setTenantId(dag.getTenantId());
                 try {
-                    orchestrationService.triggerPipelineRun(dag.getId(), TriggerType.CRON);
+                    Instant logicalDate = scheduledAt.get().withSecond(0).withNano(0).toInstant();
+                    orchestrationService.triggerPipelineRun(
+                            dag.getId(),
+                            TriggerType.CRON,
+                            new OrchestrationService.PipelineRunOptions(logicalDate, null, null, null));
                     triggered++;
-                    log.info("PipelineSchedulerService：已按 cron 触发流水线 {} (cron={})",
-                            dag.getId(), dag.getScheduleCron());
+                    log.info("PipelineSchedulerService：已按 cron 触发流水线 {} (cron={}, logicalDate={})",
+                            dag.getId(), dag.getScheduleCron(), logicalDate);
                 } finally {
                     TenantContext.clear();
                 }
+            } catch (DataIntegrityViolationException e) {
+                // V14 的 uq_job_run_cron_logical 表示另一副本已为该 logical_date 创建 JobRun。
+                log.info("PipelineSchedulerService：流水线 {} 在 logical_date 已触发，本轮跳过",
+                        dag.getId());
             } catch (RuntimeException e) {
                 log.warn("PipelineSchedulerService：触发流水线 {} 失败：{}",
                         dag.getId(), e.getMessage());
@@ -89,18 +150,29 @@ public class PipelineSchedulerService {
      */
     static boolean isCronDue(Dag dag, java.time.ZonedDateTime prevMinuteStart,
                               java.time.ZonedDateTime nowMinuteStart) {
+        return cronDueAt(dag, prevMinuteStart, nowMinuteStart).isPresent();
+    }
+
+    /**
+     * 返回半开区间 {@code (prevMinuteStart, nowMinuteStart]} 内的 cron 命中时间。
+     */
+    static Optional<ZonedDateTime> cronDueAt(Dag dag, ZonedDateTime prevMinuteStart,
+                                             ZonedDateTime nowMinuteStart) {
         String cron = dag.getScheduleCron();
-        if (cron == null || cron.isBlank()) return false;
+        if (cron == null || cron.isBlank()) return Optional.empty();
         try {
             org.springframework.scheduling.support.CronExpression expr =
                     org.springframework.scheduling.support.CronExpression.parse(cron);
             // next() 返回严格晚于入参时间的下一次匹配点。
-            java.time.ZonedDateTime next = expr.next(prevMinuteStart);
-            return next != null && !next.isAfter(nowMinuteStart);
+            ZonedDateTime next = expr.next(prevMinuteStart);
+            if (next != null && !next.isAfter(nowMinuteStart)) {
+                return Optional.of(next);
+            }
+            return Optional.empty();
         } catch (IllegalArgumentException e) {
             log.debug("PipelineSchedulerService：流水线 {} 的 cron '{}' 非法：{}",
                     dag.getId(), cron, e.getMessage());
-            return false;
+            return Optional.empty();
         }
     }
 }

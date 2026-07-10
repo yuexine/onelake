@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -7,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from dagster import Array, AssetMaterialization, Field, Int, Shape, String, job, op, repository
+from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothing, Shape, String, graph, job, multiprocess_executor, op, repository
 
 @op(
     name="reconcile_sync_task_schedule",
@@ -491,6 +492,292 @@ def _upload_log(tenant_id, run_id, task_key, attempt, content, log):
         return ""
 
 
+_NATIVE_GRAPH_JOB_PREFIX = "onelake_pipeline_graph_"
+_TASK_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_NATIVE_TASK_OPS = {}
+
+
+_NATIVE_NODE_CONFIG = {
+    "pipeline_id": Field(String),
+    "run_id": Field(String),
+    "tenant_id": Field(String),
+    "task_key": Field(String),
+    "task_type": Field(String),
+    "sql_or_script": Field(String, default_value=""),
+    "target_fqn": Field(String, default_value=""),
+    "from_tables": Field(Array(String), default_value=[]),
+    "resource_profile": Field(
+        Shape({
+            "executor_memory": Field(String, default_value="2g"),
+            "executor_cores": Field(String, default_value="2"),
+            "num_executors": Field(String, default_value="2"),
+            "driver_memory": Field(String, default_value="1g"),
+        }),
+        is_required=False,
+    ),
+    "base_attempt": Field(Int, default_value=1),
+    "max_retries": Field(Int, default_value=0),
+    "iceberg_catalog": Field(String, default_value="onelake"),
+    "callback_base_url": Field(String, default_value=""),
+    "runtime_params": Field(
+        Array(Shape({"key": Field(String), "value": Field(String, default_value="")})),
+        default_value=[],
+    ),
+}
+
+
+def _execute_native_graph_node(context):
+    """Execute one pipeline task in its own Dagster step.
+
+    The legacy graph executor below stays intact for rollout compatibility. This path is
+    used by per-pipeline jobs built at code-location reload time, so Dagster itself owns
+    dependency, skip and retry visibility instead of an internal thread pool.
+    """
+    cfg = context.op_config
+    task_key = cfg["task_key"]
+    node = _node_with_runtime_params(cfg, _runtime_params(cfg))
+    base_url = cfg.get("callback_base_url", "")
+    run_id = cfg["run_id"]
+    tenant_id = cfg["tenant_id"]
+    iceberg_catalog = cfg.get("iceberg_catalog", "onelake")
+    spark_master = os.getenv("SPARK_MASTER_URL", "local[2]")
+    first_attempt = max(1, int(node.get("base_attempt", 1) or 1))
+
+    _callback(base_url, run_id, task_key, {
+        "status": "RUNNING", "startedAt": _now(), "attempt": first_attempt,
+        "dagsterStepKey": task_key,
+    }, context.log)
+
+    if node["task_type"] == "SYNC_REF":
+        log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, "SYNC_REF completed", context.log)
+        context.log_event(AssetMaterialization(
+            asset_key=node.get("target_fqn") or task_key,
+            description=f"pipeline node {task_key}",
+        ))
+        _callback(base_url, run_id, task_key, {
+            "status": "SUCCEEDED", "finishedAt": _now(), "attempt": first_attempt,
+            "dagsterStepKey": task_key, "artifactPath": _table_artifact(node), "logRef": log_ref,
+        }, context.log)
+        return
+
+    attempts = max(1, int(node.get("max_retries", 0)) + 1)
+    last_log = ""
+    last_log_ref = ""
+    for local_attempt in range(1, attempts + 1):
+        attempt = first_attempt + local_attempt - 1
+        temp_paths = []
+        process = None
+        previous_signal_handlers = {}
+
+        def terminate_process_group(reason):
+            if process is None or process.poll() is not None:
+                return
+            try:
+                context.log.warning(
+                    "terminating native spark-submit process group pid=%s reason=%s",
+                    process.pid,
+                    reason,
+                )
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            except Exception as exc:
+                context.log.warning(
+                    "failed to terminate native spark-submit process group pid=%s: %s",
+                    process.pid,
+                    exc,
+                )
+                return
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    context.log.warning(
+                        "force killing native spark-submit process group pid=%s",
+                        process.pid,
+                    )
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception as exc:
+                    context.log.warning(
+                        "failed to force kill native spark-submit process group pid=%s: %s",
+                        process.pid,
+                        exc,
+                    )
+                try:
+                    process.wait(timeout=2)
+                except Exception:
+                    pass
+
+        def handle_termination_signal(signum, frame):
+            reason = signal.Signals(signum).name
+            terminate_process_group(reason)
+            raise KeyboardInterrupt(reason)
+
+        def install_signal_handlers():
+            if threading.current_thread() is not threading.main_thread():
+                return
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                previous_signal_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, handle_termination_signal)
+
+        def restore_signal_handlers():
+            for signum, handler in previous_signal_handlers.items():
+                signal.signal(signum, handler)
+
+        def is_execution_interrupt(exc):
+            return isinstance(exc, (KeyboardInterrupt, SystemExit)) or (
+                exc.__class__.__name__ == "DagsterExecutionInterruptedError"
+            )
+
+        try:
+            cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
+            context.log.info("[%s] attempt %s spark-submit cmd: %s", task_key, attempt, " ".join(cmd))
+            process = subprocess.Popen(
+                cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            )
+            install_signal_handlers()
+            stdout, stderr = process.communicate()
+            result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+            last_log = _spark_log_content(cmd, result)
+            last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
+            if result.returncode == 0:
+                context.log_event(AssetMaterialization(
+                    asset_key=node.get("target_fqn") or task_key,
+                    description=f"pipeline node {task_key}",
+                ))
+                _callback(base_url, run_id, task_key, {
+                    "status": "SUCCEEDED", "finishedAt": _now(), "attempt": attempt,
+                    "dagsterStepKey": task_key, "artifactPath": _table_artifact(node), "logRef": last_log_ref,
+                }, context.log)
+                return
+            context.log.warning("[%s] attempt %s failed with exit code %s", task_key, attempt, result.returncode)
+        except BaseException as exc:
+            last_log = str(exc)
+            last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
+            if is_execution_interrupt(exc):
+                terminate_process_group(exc.__class__.__name__)
+                raise
+            context.log.warning("[%s] attempt %s failed: %s", task_key, attempt, exc)
+        finally:
+            restore_signal_handlers()
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    _callback(base_url, run_id, task_key, {
+        "status": "FAILED", "finishedAt": _now(), "attempt": first_attempt + attempts - 1,
+        "dagsterStepKey": task_key, "errorMsg": _tail(last_log, 3900), "logRef": last_log_ref,
+    }, context.log)
+    raise Failure(description=f"pipeline task {task_key} failed")
+
+
+def _make_native_task_op(task_key, upstream_count):
+    cached = _NATIVE_TASK_OPS.get(task_key)
+    if cached is not None:
+        return cached
+    inputs = {f"upstream_{index}": In(Nothing) for index in range(upstream_count)}
+
+    @op(name=task_key, ins=inputs, config_schema=_NATIVE_NODE_CONFIG)
+    def pipeline_task(context):
+        _execute_native_graph_node(context)
+
+    _NATIVE_TASK_OPS[task_key] = pipeline_task
+    return pipeline_task
+
+
+def _pipeline_graph_job_name(pipeline_id):
+    return _NATIVE_GRAPH_JOB_PREFIX + str(pipeline_id).replace("-", "")
+
+
+def _build_native_pipeline_job(definition, upstream_slots=None):
+    pipeline_id = definition.get("pipeline_id")
+    task_keys = definition.get("task_keys") or []
+    if not pipeline_id or not task_keys or len(task_keys) != len(set(task_keys)):
+        return None
+    if any(not _TASK_KEY_PATTERN.match(str(key)) for key in task_keys):
+        return None
+    upstreams = {key: [] for key in task_keys}
+    for edge in definition.get("edges") or []:
+        source, target = edge.get("source_key"), edge.get("target_key")
+        if source in upstreams and target in upstreams:
+            upstreams[target].append(source)
+    slots = upstream_slots or {}
+    task_ops = {
+        key: _make_native_task_op(key, max(len(upstreams[key]), slots.get(key, 0)))
+        for key in task_keys
+    }
+    job_name = _pipeline_graph_job_name(pipeline_id)
+
+    @graph(name=job_name)
+    def pipeline_graph():
+        outputs = {}
+        pending = list(task_keys)
+        while pending:
+            ready = [
+                key for key in pending
+                if all(source in outputs for source in upstreams[key])
+            ]
+            if not ready:
+                raise ValueError(f"pipeline graph has cyclic or unresolved inputs: {pending}")
+            for key in ready:
+                # Dagster does not resolve multi-input Nothing dependencies from positional
+                # arguments reliably; bind every graph input by its declared name.
+                inputs = {
+                    f"upstream_{index}": outputs[source]
+                    for index, source in enumerate(upstreams[key])
+                }
+                outputs[key] = task_ops[key](**inputs)
+            pending = [key for key in pending if key not in ready]
+
+    return pipeline_graph.to_job(name=job_name, executor_def=multiprocess_executor)
+
+
+def _load_native_pipeline_jobs():
+    base_url = os.getenv("ONELAKE_CALLBACK_BASE_URL", "").rstrip("/")
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "")
+    if not base_url or not token:
+        return []
+    try:
+        import requests
+        response = requests.get(
+            base_url + "/api/v1/internal/orchestration/dagster/graph-definitions",
+            headers={"X-Onelake-Internal-Token": token}, timeout=5,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        definitions = payload.get("data") or []
+        upstream_slots = {}
+        for definition in definitions:
+            task_keys = set(definition.get("task_keys") or [])
+            counts = {key: 0 for key in task_keys}
+            for edge in definition.get("edges") or []:
+                source, target = edge.get("source_key"), edge.get("target_key")
+                if source in task_keys and target in task_keys:
+                    counts[target] += 1
+            for task_key, count in counts.items():
+                upstream_slots[task_key] = max(upstream_slots.get(task_key, 0), count)
+
+        jobs = []
+        for definition in definitions:
+            try:
+                native_job = _build_native_pipeline_job(definition, upstream_slots)
+                if native_job is not None:
+                    jobs.append(native_job)
+            except Exception as exc:
+                pipeline_id = definition.get("pipeline_id", "unknown")
+                print(f"OneLake skipped invalid native pipeline graph {pipeline_id}: {exc}")
+        return jobs
+    except Exception as exc:
+        # The backend may be unavailable while the user-code container boots. A later reload before
+        # GRAPH launch reconstructs the jobs; failure here must not take down all code locations.
+        print(f"OneLake native pipeline graph definitions unavailable: {exc}")
+        return []
+
+
 @op(
     name="run_pipeline_graph_op",
     config_schema={
@@ -916,9 +1203,13 @@ def onelake_notebook_run():
 
 @repository(name="onelake")
 def onelake_repository():
-    return [
+    jobs = [
         onelake_sync_task_schedule_reconcile,
         onelake_pipeline_run,
         onelake_pipeline_graph_run,
         onelake_notebook_run,
     ]
+    # Reload before a GRAPH launch repopulates this list from the Java-owned topology
+    # snapshot. Every pipeline task is consequently a visible Dagster step.
+    jobs.extend(_load_native_pipeline_jobs())
+    return jobs

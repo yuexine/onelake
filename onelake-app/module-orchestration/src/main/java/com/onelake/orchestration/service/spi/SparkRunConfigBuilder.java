@@ -2,7 +2,6 @@ package com.onelake.orchestration.service.spi;
 
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
-import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.PipelineCompileResult.TaskCompileResult;
@@ -35,8 +34,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
     private static final String JOB_NAME = "onelake_pipeline_run";
     private static final String OP_NAME = "run_spark_task_op";
-    private static final String GRAPH_JOB_NAME = "onelake_pipeline_graph_run";
-    private static final String GRAPH_OP_NAME = "run_pipeline_graph_op";
+    private static final String GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
 
     @Override
     public EngineType engine() {
@@ -128,36 +126,30 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             nodes.add(node);
         }
 
-        List<Map<String, Object>> edges = new ArrayList<>();
-        List<PipelineTaskEdge> safeEdges = pipelineEdges == null ? List.of() : pipelineEdges;
-        for (PipelineTaskEdge edge : safeEdges) {
-            if (edge.getEdgeLayer() != EdgeLayer.PIPELINE) {
-                continue;
-            }
-            // 子图重跑只把两端都在本次节点集合内的边交给 Dagster，避免调度等待未提交的上游。
-            if (!taskByKey.containsKey(edge.getSourceKey()) || !taskByKey.containsKey(edge.getTargetKey())) {
-                continue;
-            }
-            Map<String, Object> edgeConfig = new LinkedHashMap<>();
-            edgeConfig.put("source_key", edge.getSourceKey());
-            edgeConfig.put("target_key", edge.getTargetKey());
-            edges.add(edgeConfig);
+        // GRAPH job 在 Dagster code location 重载时按 pipelineId 生成真实 op 图。
+        // 每个 task_key 都是一个 op 名，从而 Dagster step_key 与 task_key 一致；
+        // Java 仍然是每个 op 的 runConfig 唯一构造方。
+        Map<String, Object> ops = new LinkedHashMap<>();
+        for (Map<String, Object> node : nodes) {
+            String taskKey = String.valueOf(node.get("task_key"));
+            Map<String, Object> opConfig = new LinkedHashMap<>(node);
+            opConfig.put("pipeline_id", ctx.pipelineId().toString());
+            opConfig.put("run_id", ctx.runId().toString());
+            opConfig.put("tenant_id", ctx.tenantId().toString());
+            opConfig.put("iceberg_catalog", "onelake");
+            opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
+            opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
+            ops.put(taskKey, Map.of("config", opConfig));
         }
-
-        Map<String, Object> opConfig = new LinkedHashMap<>();
-        opConfig.put("pipeline_id", ctx.pipelineId().toString());
-        opConfig.put("run_id", ctx.runId().toString());
-        opConfig.put("tenant_id", ctx.tenantId().toString());
-        opConfig.put("iceberg_catalog", "onelake");
-        opConfig.put("execution_mode", "GRAPH");
-        opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
-        opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
-        opConfig.put("max_parallel", Math.max(1, maxParallel));
-        opConfig.put("nodes", nodes);
-        opConfig.put("edges", edges);
-        return new DagsterRunConfig(GRAPH_JOB_NAME, Map.of(
-                "ops", Map.of(GRAPH_OP_NAME, Map.of("config", opConfig))
+        return new DagsterRunConfig(graphJobName(ctx.pipelineId()), Map.of(
+                "execution", Map.of("config", Map.of(
+                        "max_concurrent", Math.max(1, maxParallel))),
+                "ops", ops
         ));
+    }
+
+    public static String graphJobName(java.util.UUID pipelineId) {
+        return GRAPH_JOB_PREFIX + pipelineId.toString().replace("-", "");
     }
 
     /**

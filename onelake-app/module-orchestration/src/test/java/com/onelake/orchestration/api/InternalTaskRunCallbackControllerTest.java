@@ -2,8 +2,15 @@ package com.onelake.orchestration.api;
 
 import com.onelake.common.exception.GlobalExceptionHandler;
 import com.onelake.common.security.InternalApiTokenFilter;
+import com.onelake.orchestration.domain.entity.Dag;
+import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
+import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
+import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.service.OrchestrationService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +23,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 
 import java.util.UUID;
+import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
@@ -24,6 +32,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -38,12 +47,22 @@ class InternalTaskRunCallbackControllerTest {
     @Mock
     private OrchestrationService orchestrationService;
 
+    @Mock
+    private DagRepository dagRepository;
+
+    @Mock
+    private PipelineTaskRepository pipelineTaskRepository;
+
+    @Mock
+    private PipelineTaskEdgeRepository pipelineTaskEdgeRepository;
+
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         InternalTaskRunCallbackController controller =
-                new InternalTaskRunCallbackController(orchestrationService);
+                new InternalTaskRunCallbackController(orchestrationService, dagRepository,
+                        pipelineTaskRepository, pipelineTaskEdgeRepository);
         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
@@ -106,5 +125,35 @@ class InternalTaskRunCallbackControllerTest {
                 .andExpect(jsonPath("$.message").value("请求体格式错误"));
 
         verifyNoInteractions(orchestrationService);
+    }
+
+    @Test
+    void graphDefinitionsExposeOnlyPipelineEdgesForDagsterReload() throws Exception {
+        UUID dagId = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        Dag dag = new Dag();
+        dag.setId(dagId);
+        PipelineTask source = new PipelineTask();
+        source.setTaskKey("sync_ref");
+        PipelineTask target = new PipelineTask();
+        target.setTaskKey("spark_sql");
+        PipelineTaskEdge pipelineEdge = new PipelineTaskEdge();
+        pipelineEdge.setSourceKey("sync_ref");
+        pipelineEdge.setTargetKey("spark_sql");
+        pipelineEdge.setEdgeLayer(EdgeLayer.PIPELINE);
+        PipelineTaskEdge crossEngineEdge = new PipelineTaskEdge();
+        crossEngineEdge.setSourceKey("sync_ref");
+        crossEngineEdge.setTargetKey("spark_sql");
+        crossEngineEdge.setEdgeLayer(EdgeLayer.CROSS_ENGINE);
+        when(dagRepository.findAll()).thenReturn(List.of(dag));
+        when(pipelineTaskRepository.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(source, target));
+        when(pipelineTaskEdgeRepository.findByDagId(dagId)).thenReturn(List.of(pipelineEdge, crossEngineEdge));
+
+        mockMvc.perform(get("/api/v1/internal/orchestration/dagster/graph-definitions")
+                        .header(InternalTaskRunCallbackController.INTERNAL_TOKEN_HEADER, "secret-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].pipeline_id").value(dagId.toString()))
+                .andExpect(jsonPath("$.data[0].task_keys[0]").value("sync_ref"))
+                .andExpect(jsonPath("$.data[0].edges.length()").value(1))
+                .andExpect(jsonPath("$.data[0].edges[0].source_key").value("sync_ref"));
     }
 }

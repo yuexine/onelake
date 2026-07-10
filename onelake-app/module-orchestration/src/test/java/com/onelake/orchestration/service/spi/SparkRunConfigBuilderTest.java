@@ -116,27 +116,18 @@ class SparkRunConfigBuilderTest {
                 "http://localhost:8080",
                 6);
 
-        assertThat(config.jobName()).isEqualTo("onelake_pipeline_graph_run");
+        assertThat(config.jobName()).isEqualTo(SparkRunConfigBuilder.graphJobName(pipelineId));
         Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
-        Map<String, Object> op = (Map<String, Object>) ops.get("run_pipeline_graph_op");
-        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
-        assertThat(opConfig).containsEntry("execution_mode", "GRAPH");
-        assertThat(opConfig).containsEntry("callback_base_url", "http://localhost:8080");
-        assertThat(opConfig).containsEntry("max_parallel", 6);
-        List<Map<String, Object>> nodes = (List<Map<String, Object>>) opConfig.get("nodes");
-        assertThat(nodes).hasSize(2);
-        Map<String, Object> sparkNode = nodes.stream()
-                .filter(node -> "spark_dwd".equals(node.get("task_key")))
-                .findFirst()
-                .orElseThrow();
+        assertThat(ops).containsOnlyKeys("sync_user", "spark_dwd");
+        Map<String, Object> sparkOp = (Map<String, Object>) ops.get("spark_dwd");
+        Map<String, Object> sparkNode = (Map<String, Object>) sparkOp.get("config");
         assertThat(sparkNode).containsEntry("task_type", "SPARK_SQL");
         assertThat(sparkNode).containsEntry("base_attempt", 1);
         assertThat(sparkNode).containsEntry("max_retries", 2);
+        assertThat(sparkNode).containsEntry("callback_base_url", "http://localhost:8080");
         assertThat((List<String>) sparkNode.get("from_tables")).containsExactly("onelake.ods.user");
-        List<Map<String, Object>> edges = (List<Map<String, Object>>) opConfig.get("edges");
-        assertThat(edges).containsExactly(Map.of(
-                "source_key", "sync_user",
-                "target_key", "spark_dwd"));
+        Map<String, Object> execution = (Map<String, Object>) config.opConfig().get("execution");
+        assertThat(execution).isEqualTo(Map.of("config", Map.of("max_concurrent", 6)));
     }
 
     @Test
@@ -175,17 +166,11 @@ class SparkRunConfigBuilderTest {
                 Map.of("failed", 3, "downstream", 2));
 
         Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
-        Map<String, Object> op = (Map<String, Object>) ops.get("run_pipeline_graph_op");
-        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
-        List<Map<String, Object>> nodes = (List<Map<String, Object>>) opConfig.get("nodes");
-        assertThat(nodes).extracting(node -> node.get("task_key"))
-                .containsExactly("failed", "downstream");
-        assertThat(nodes).extracting(node -> node.get("base_attempt"))
-                .containsExactly(3, 2);
-        List<Map<String, Object>> edges = (List<Map<String, Object>>) opConfig.get("edges");
-        assertThat(edges).containsExactly(Map.of(
-                "source_key", "failed",
-                "target_key", "downstream"));
+        assertThat(ops).containsOnlyKeys("failed", "downstream");
+        Map<String, Object> failedOp = (Map<String, Object>) ops.get("failed");
+        Map<String, Object> downstreamOp = (Map<String, Object>) ops.get("downstream");
+        assertThat(((Map<String, Object>) failedOp.get("config"))).containsEntry("base_attempt", 3);
+        assertThat(((Map<String, Object>) downstreamOp.get("config"))).containsEntry("base_attempt", 2);
     }
 
     private PipelineTask task(UUID pipelineId, UUID tenantId, String key, TaskType type,

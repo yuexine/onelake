@@ -11,6 +11,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -39,6 +40,25 @@ public class DagsterClient {
         mutation($job: String!, $repo: String!, $location: String!, $config: RunConfigData!, $tags: [ExecutionTag!]) {
           launchRun(executionParams: {
             selector: { repositoryName: $repo, repositoryLocationName: $location, jobName: $job },
+            runConfigData: $config,
+            executionMetadata: { tags: $tags }
+          }) {
+            __typename
+            ... on LaunchRunSuccess { run { runId status } }
+            ... on PythonError { message }
+            ... on RunConfigValidationInvalid { errors { message } }
+          }
+        }""";
+
+    private static final String LAUNCH_RUN_WITH_CONFIG_AND_SELECTION = """
+        mutation($job: String!, $repo: String!, $location: String!, $config: RunConfigData!, $tags: [ExecutionTag!], $solidSelection: [String!]) {
+          launchRun(executionParams: {
+            selector: {
+              repositoryName: $repo,
+              repositoryLocationName: $location,
+              jobName: $job,
+              solidSelection: $solidSelection
+            },
             runConfigData: $config,
             executionMetadata: { tags: $tags }
           }) {
@@ -82,6 +102,14 @@ public class DagsterClient {
           }
         }""";
 
+    private static final String RELOAD_REPOSITORY_LOCATION = """
+        mutation($location: String!) {
+          reloadRepositoryLocation(repositoryLocationName: $location) {
+            __typename
+            ... on PythonError { message }
+          }
+        }""";
+
     private final WebClient.Builder webClientBuilder;
 
     @Value("${onelake.dataplane.dagster.graphql-url:http://localhost:3000/graphql}")
@@ -94,17 +122,38 @@ public class DagsterClient {
     public String launch(String jobName, String repo, String location,
                          Map<String, Object> runConfig,
                          Iterable<Map<String, String>> tags) {
+        return launch(jobName, repo, location, runConfig, tags, null);
+    }
+
+    /**
+     * Launch a Dagster job, optionally selecting a concrete task subgraph.
+     * GRAPH-mode reruns use this so Java only supplies config for the selected
+     * nodes while Dagster keeps their native step identities.
+     */
+    public String launch(String jobName, String repo, String location,
+                         Map<String, Object> runConfig,
+                         Iterable<Map<String, String>> tags,
+                         Iterable<String> solidSelection) {
         WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
-        Map<String, Object> variables = runConfig == null
-            ? Map.of("job", jobName, "repo", repo, "location", location)
-            : Map.of(
-                "job", jobName,
-                "repo", repo,
-                "location", location,
-                "config", runConfig,
-                "tags", tags == null ? java.util.List.of() : tags
-            );
-        var body = Map.of("query", runConfig == null ? LAUNCH_RUN : LAUNCH_RUN_WITH_CONFIG,
+        List<String> selected = new ArrayList<>();
+        if (solidSelection != null) {
+            solidSelection.forEach(selected::add);
+        }
+        Map<String, Object> variables = new LinkedHashMap<>();
+        variables.put("job", jobName);
+        variables.put("repo", repo);
+        variables.put("location", location);
+        if (runConfig != null) {
+            variables.put("config", runConfig);
+            variables.put("tags", tags == null ? List.of() : tags);
+        }
+        if (!selected.isEmpty()) {
+            variables.put("solidSelection", selected);
+        }
+        String query = runConfig == null
+                ? LAUNCH_RUN
+                : (selected.isEmpty() ? LAUNCH_RUN_WITH_CONFIG : LAUNCH_RUN_WITH_CONFIG_AND_SELECTION);
+        var body = Map.of("query", query,
             "variables", variables);
         JsonNode resp = client.post()
             .bodyValue(body)
@@ -224,6 +273,24 @@ public class DagsterClient {
             });
         }
         return jobs;
+    }
+
+    /** 重新加载 code location，使最新流水线拓扑成为 Dagster 原生 job 图。 */
+    public void reloadRepositoryLocation(String location) {
+        WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
+        JsonNode resp = client.post()
+            .bodyValue(Map.of("query", RELOAD_REPOSITORY_LOCATION, "variables", Map.of("location", location)))
+            .retrieve()
+            .bodyToMono(JsonNode.class)
+            .block(Duration.ofSeconds(15));
+        if (resp == null || resp.hasNonNull("errors")) {
+            throw new DataplaneException("dagster reload location failed: " + resp);
+        }
+        JsonNode result = resp.at("/data/reloadRepositoryLocation");
+        if (!"WorkspaceLocationEntry".equals(result.path("__typename").asText())) {
+            throw new DataplaneException("dagster reload location failed: "
+                    + result.path("message").asText(result.toString()));
+        }
     }
 
     private boolean isTerminalDagsterStatus(String status) {

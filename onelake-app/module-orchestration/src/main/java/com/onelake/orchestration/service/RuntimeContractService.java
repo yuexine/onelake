@@ -27,6 +27,7 @@ public class RuntimeContractService {
     private static final String REPOSITORY = "onelake";
     private static final String LOCATION = "onelake-loc";
     private static final Set<String> PIPELINE_JOBS = Set.of("onelake_pipeline_run", "onelake_pipeline_graph_run");
+    private static final String PIPELINE_GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
 
     private static final List<RuntimeSpec> SPECS = List.of(
         new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_run", true, true,
@@ -50,7 +51,7 @@ public class RuntimeContractService {
                 text(safeDefinition.get("compileTarget")), text(safeDefinition.get("engine"))));
         if (StringUtils.hasText(requestedTarget)
                 && !"SPARK".equals(requestedTarget)
-                && PIPELINE_JOBS.contains(dagsterJob)) {
+                && isPipelineJob(dagsterJob)) {
             return Optional.of("流水线运行时已收敛为 Spark 引擎，不再支持 " + requestedTarget);
         }
         RuntimeSpec spec = specFor(dagsterJob, safeDefinition).orElse(null);
@@ -115,6 +116,9 @@ public class RuntimeContractService {
         if (byJob.isPresent()) {
             return byJob;
         }
+        if (dagsterJob != null && dagsterJob.startsWith(PIPELINE_GRAPH_JOB_PREFIX)) {
+            return SPECS.stream().filter(spec -> "onelake_pipeline_graph_run".equals(spec.dagsterJob())).findFirst();
+        }
         String compileTarget = firstText(text(definition.get("compileTarget")), text(definition.get("engine")));
         if (!StringUtils.hasText(compileTarget) && definition.get("operatorGraph") instanceof Map<?, ?> rawGraph) {
             compileTarget = firstText(text(rawGraph.get("compileTarget")), text(rawGraph.get("engine")));
@@ -129,6 +133,11 @@ public class RuntimeContractService {
             }
         }
         return Optional.empty();
+    }
+
+    private boolean isPipelineJob(String dagsterJob) {
+        return PIPELINE_JOBS.contains(dagsterJob)
+                || (dagsterJob != null && dagsterJob.startsWith(PIPELINE_GRAPH_JOB_PREFIX));
     }
 
     private String normalizeTarget(String value) {

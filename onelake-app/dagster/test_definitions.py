@@ -1,9 +1,10 @@
+import signal
 import sys
 from types import SimpleNamespace
 from collections import Counter
 
 import pytest
-from dagster import build_op_context
+from dagster import build_op_context, repository
 
 import definitions
 
@@ -60,6 +61,30 @@ def _legacy_config(tasks, callback_base_url=""):
             "driver_memory": "1g",
         },
         "tasks": tasks,
+    }
+
+
+def _native_node_config(task_key, task_type="SPARK_SQL"):
+    return {
+        "pipeline_id": "00000000-0000-0000-0000-000000000001",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "task_key": task_key,
+        "task_type": task_type,
+        "sql_or_script": "SELECT 1",
+        "target_fqn": f"onelake.dwd.{task_key}",
+        "from_tables": [],
+        "resource_profile": {
+            "executor_memory": "2g",
+            "executor_cores": "2",
+            "num_executors": "2",
+            "driver_memory": "1g",
+        },
+        "base_attempt": 1,
+        "max_retries": 0,
+        "iceberg_catalog": "onelake",
+        "callback_base_url": "",
+        "runtime_params": [],
     }
 
 
@@ -194,6 +219,107 @@ def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
     assert success_payload["logRef"] == "log://placeholder"
     assert success_payload["attempt"] == 1
     assert success_payload["artifactPath"] == "table:onelake.dwd.spark_a"
+
+
+def test_native_pipeline_job_exposes_per_task_steps_and_native_dependencies(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    definition = {
+        "pipeline_id": "00000000-0000-0000-0000-000000000001",
+        # Purposefully list the downstream task first: persistent UI creation order
+        # does not have to match topology order.
+        "task_keys": ["quality_gate", "sync_ref", "sync_orders"],
+        "edges": [
+            {"source_key": "sync_ref", "target_key": "quality_gate"},
+            {"source_key": "sync_orders", "target_key": "quality_gate"},
+        ],
+    }
+
+    pipeline_job = definitions._build_native_pipeline_job(definition)
+    result = pipeline_job.execute_in_process(run_config={
+        "ops": {
+            "sync_ref": {"config": _native_node_config("sync_ref", "SYNC_REF")},
+            "sync_orders": {"config": _native_node_config("sync_orders", "SYNC_REF")},
+            "quality_gate": {"config": _native_node_config("quality_gate", "SYNC_REF")},
+        },
+    })
+
+    assert pipeline_job.name == "onelake_pipeline_graph_00000000000000000000000000000001"
+    assert result.success
+    step_successes = {event.step_key for event in result.all_events if event.is_step_success}
+    assert step_successes == {"sync_ref", "sync_orders", "quality_gate"}
+    running = [key for key, payload in callbacks if payload["status"] == "RUNNING"]
+    assert set(running[:2]) == {"sync_ref", "sync_orders"}
+    assert running[-1] == "quality_gate"
+
+
+def test_native_pipeline_jobs_reuse_same_task_op_definition_across_pipelines():
+    original_ops = dict(definitions._NATIVE_TASK_OPS)
+    definitions._NATIVE_TASK_OPS.clear()
+    try:
+        first = definitions._build_native_pipeline_job(
+            {"pipeline_id": "00000000-0000-0000-0000-000000000011", "task_keys": ["shared"], "edges": []},
+            {"shared": 1},
+        )
+        second = definitions._build_native_pipeline_job(
+            {
+                "pipeline_id": "00000000-0000-0000-0000-000000000012",
+                "task_keys": ["source", "shared"],
+                "edges": [{"source_key": "source", "target_key": "shared"}],
+            },
+            {"shared": 1, "source": 0},
+        )
+
+        @repository
+        def combined_repository():
+            return [first, second]
+
+        assert {job.name for job in combined_repository.get_all_jobs()} == {
+            first.name,
+            second.name,
+        }
+    finally:
+        definitions._NATIVE_TASK_OPS.clear()
+        definitions._NATIVE_TASK_OPS.update(original_ops)
+
+
+def test_native_node_forwards_termination_to_spark_process_group(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    killed = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -signal.SIGTERM
+            return self.returncode
+
+        def communicate(self):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+    process = FakeProcess()
+    monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: (["spark-submit"], []))
+    monkeypatch.setattr(definitions.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def killpg(pid, signum):
+        killed.append((pid, signum))
+        process.returncode = -signum
+
+    monkeypatch.setattr(definitions.os, "killpg", killpg)
+    context = SimpleNamespace(
+        op_config=_native_node_config("slow_node"),
+        log=_Log(),
+        log_event=lambda event: None,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="SIGTERM"):
+        definitions._execute_native_graph_node(context)
+
+    assert killed == [(4321, signal.SIGTERM)]
+    assert _statuses(callbacks, "slow_node") == ["RUNNING"]
 
 
 def test_graph_linear_order_and_sync_ref(monkeypatch):

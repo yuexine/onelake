@@ -71,6 +71,22 @@ class DagsterClientTest {
                 .hasMessageContaining("terminate denied");
     }
 
+    @Test
+    void launchWithSelectionSendsNativeDagsterSolidSelection() throws IOException {
+        DagsterClient client = clientResponding("""
+            {"data":{"launchRun":{"__typename":"LaunchRunSuccess","run":{"runId":"dagster-rerun","status":"QUEUED"}}}}
+            """);
+
+        String runId = client.launch(
+                "onelake_pipeline_graph_demo", "onelake", "onelake-loc",
+                java.util.Map.of("ops", java.util.Map.of()), java.util.List.of(),
+                java.util.List.of("spark_fail", "quality_gate"));
+
+        assertThat(runId).isEqualTo("dagster-rerun");
+        assertThat(requestBody.get()).contains("solidSelection");
+        assertThat(requestBody.get()).contains("\"solidSelection\":[\"spark_fail\",\"quality_gate\"]");
+    }
+
     private DagsterClient clientResponding(String responseBody) throws IOException {
         server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/graphql", exchange -> {

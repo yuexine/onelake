@@ -34,6 +34,9 @@ public class JobRun {
 
     private String dagsterRunId;
 
+    /** 实际启动的 Dagster job；GRAPH 模式按流水线生成 job，不能再只从 dag 读取。 */
+    private String dagsterJob;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private TriggerType triggerType = TriggerType.MANUAL;

@@ -78,6 +78,7 @@ class OrchestrationServiceTest {
     private static final UUID TENANT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID DAG_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID RUN_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final String GRAPH_JOB = SparkRunConfigBuilder.graphJobName(DAG_ID);
     @Mock
     private DagRepository dagRepo;
 
@@ -759,8 +760,8 @@ class OrchestrationServiceTest {
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap(), anyMap()))
-                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
-        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-graph");
 
         UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
@@ -769,8 +770,27 @@ class OrchestrationServiceTest {
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
         verify(sparkBuilder, never()).build(any(), anyList(), anyString(), anyMap());
         verify(sparkBuilder).buildGraphRunConfig(any(), anyList(), anyList(), eq("http://localhost:8080"), eq(8), anyMap(), anyMap());
-        verify(dagster).launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+        verify(dagster).launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphInitialTaskStatusesLeaveSyncRefQueuedForDagsterCallback() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        PipelineTask syncRef = pipelineTask("sync_ref");
+        syncRef.setTaskType(TaskType.SYNC_REF);
+        PipelineTask spark = pipelineTask("spark_sql");
+
+        Map<String, TaskRunStatus> statuses = ReflectionTestUtils.invokeMethod(
+                service,
+                "initialTaskRunStatuses",
+                List.of(syncRef, spark),
+                List.of(pipelineEdge("sync_ref", "spark_sql")));
+
+        assertThat(statuses).containsOnly(
+                org.assertj.core.data.MapEntry.entry("sync_ref", TaskRunStatus.QUEUED),
+                org.assertj.core.data.MapEntry.entry("spark_sql", TaskRunStatus.QUEUED));
     }
 
     @Test
@@ -779,16 +799,17 @@ class OrchestrationServiceTest {
         Dag dag = dag();
         dag.setDagsterJob("onelake_pipeline_run");
         when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(runtimeContractService.launchBlockedReason(eq("onelake_pipeline_graph_run"), anyMap()))
-                .thenReturn(Optional.of("Dagster repository 未暴露作业: onelake_pipeline_graph_run"));
+        when(runtimeContractService.launchBlockedReason(eq(GRAPH_JOB), anyMap()))
+                .thenReturn(Optional.of("Dagster repository 未暴露作业: " + GRAPH_JOB));
 
         assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
                 .isInstanceOf(BizException.class)
-                .hasMessageContaining("onelake_pipeline_graph_run");
+                .hasMessageContaining(GRAPH_JOB);
 
         verify(pipelineCompileService, never()).compile(any());
         verifyNoInteractions(runRepo);
-        verifyNoInteractions(dagster);
+        verify(dagster).reloadRepositoryLocation("onelake-loc");
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), anyMap(), anyList());
     }
 
     @Test
@@ -817,7 +838,8 @@ class OrchestrationServiceTest {
                 .hasMessageContaining("仅可对失败节点重跑");
 
         verify(pipelineCompileService, never()).compile(any());
-        verifyNoInteractions(dagster);
+        verify(dagster).reloadRepositoryLocation("onelake-loc");
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), anyMap(), anyList());
     }
 
     @Test
@@ -844,9 +866,9 @@ class OrchestrationServiceTest {
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
                 .thenReturn(List.of(pipelineEdge("failed", "downstream")));
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
-                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
-        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
-                anyMap(), anyList())).thenReturn("dagster-rerun-single");
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-single");
 
         var result = service.rerunTask(DAG_ID, RUN_ID, "failed", "SINGLE");
 
@@ -861,6 +883,8 @@ class OrchestrationServiceTest {
         assertThat(downstream.getAttempt()).isEqualTo(1);
         assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
         assertThat(downstream.getErrorMsg()).isEqualTo("Upstream task failed: failed");
+        verify(dagster).launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), eq(List.of("failed")));
         assertThat(run.getStatus()).isEqualTo(DagStatus.RUNNING);
         assertThat(run.getFinishedAt()).isNull();
         assertThat(run.getDagsterRunId()).isEqualTo("dagster-rerun-single");
@@ -907,9 +931,9 @@ class OrchestrationServiceTest {
                 .thenReturn(List.of(rootTask, leftTask, rightTask, joinTask));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
-                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
-        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
-                anyMap(), anyList())).thenReturn("dagster-rerun-downstream");
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-downstream");
 
         var result = service.rerunTask(DAG_ID, RUN_ID, "left", "DOWNSTREAM");
 
@@ -960,9 +984,9 @@ class OrchestrationServiceTest {
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
                 .thenReturn(List.of(upstreamTask, sparkTask, gateTask));
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
-                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
-        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
-                anyMap(), anyList())).thenReturn("dagster-rerun-resume");
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-resume");
 
         var result = service.rerunTask(DAG_ID, RUN_ID, "spark_sql", "DOWNSTREAM");
 
@@ -1012,7 +1036,8 @@ class OrchestrationServiceTest {
         assertThat(right.getStatus()).isEqualTo(TaskRunStatus.FAILED);
         assertThat(join.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
         verify(pipelineCompileService, never()).compile(any());
-        verifyNoInteractions(dagster);
+        verify(dagster).reloadRepositoryLocation("onelake-loc");
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), anyMap(), anyList());
     }
 
     @Test
@@ -1041,7 +1066,8 @@ class OrchestrationServiceTest {
                 .hasMessageContaining("从失败续跑存在未成功的外部上游: left -> join");
 
         verify(pipelineCompileService, never()).compile(any());
-        verifyNoInteractions(dagster);
+        verify(dagster).reloadRepositoryLocation("onelake-loc");
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), anyMap(), anyList());
     }
 
     @Test
@@ -1063,9 +1089,9 @@ class OrchestrationServiceTest {
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
                 .thenReturn(List.of(pipelineEdge("failed", "downstream")));
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
-                .thenReturn(new DagsterRunConfig("onelake_pipeline_graph_run", Map.of("ops", Map.of())));
-        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
-                anyMap(), anyList())).thenThrow(new RuntimeException("connection refused"));
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), anyList())).thenThrow(new RuntimeException("connection refused"));
 
         assertThatThrownBy(() -> service.rerunTask(DAG_ID, RUN_ID, "failed", "DOWNSTREAM"))
                 .isInstanceOfSatisfying(BizException.class,

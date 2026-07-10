@@ -214,7 +214,10 @@ public class OrchestrationService {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag dag = findTenantDag(dagId);
-        String activeJobName = activePipelineDagsterJob();
+        String activeJobName = activePipelineDagsterJob(dagId);
+        if (isGraphPipelineExecutionMode()) {
+            dagster.reloadRepositoryLocation("onelake-loc");
+        }
         validatePipelineRuntimeContract(dag, activeJobName);
 
         // 1. 编译流水线。
@@ -247,6 +250,7 @@ public class OrchestrationService {
         run.setDataIntervalStart(runOptions.dataIntervalStart());
         run.setDataIntervalEnd(runOptions.dataIntervalEnd());
         run.setBackfillId(runOptions.backfillId());
+        run.setDagsterJob(activeJobName);
         // V14 为 CRON logical_date 建立了唯一索引。此处立即 flush，确保重复调度在
         // 启动 Dagster 前被识别，由 PipelineSchedulerService 安全地当作已触发处理。
         if (trigger == TriggerType.CRON && runOptions.logicalDate() != null) {
@@ -330,7 +334,9 @@ public class OrchestrationService {
         }
         RerunMode mode = RerunMode.parse(modeRaw);
         Dag dag = findTenantDag(dagId);
-        validatePipelineRuntimeContract(dag, PIPELINE_GRAPH_JOB_NAME);
+        String graphJobName = activePipelineDagsterJob(dagId);
+        dagster.reloadRepositoryLocation("onelake-loc");
+        validatePipelineRuntimeContract(dag, graphJobName);
         JobRun run = runRepo.findByIdAndDagIdIn(runId, Set.of(dag.getId()))
                 .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
 
@@ -428,7 +434,8 @@ public class OrchestrationService {
         try {
             String dagsterRunId = dagster.launch(
                     runConfig.jobName(), "onelake", "onelake-loc",
-                    runConfig.opConfig(), pipelineRerunTags(dag, run, taskKey, mode, subgraphTasks));
+                    runConfig.opConfig(), pipelineRerunTags(dag, run, taskKey, mode, subgraphTasks),
+                    new ArrayList<>(subgraph));
             run.setDagsterRunId(dagsterRunId);
             run.setStatus(DagStatus.RUNNING);
             run.setUpdatedAt(Instant.now());
@@ -475,6 +482,13 @@ public class OrchestrationService {
 
     private Map<String, TaskRunStatus> initialTaskRunStatuses(List<PipelineTask> tasks,
                                                               List<PipelineTaskEdge> allEdges) {
+        // GRAPH 模式的每个节点（包括 SYNC_REF）都是 Dagster 的真实 step。
+        // 必须由节点回调推进状态，避免预置 SUCCEEDED 使 step key/log 等观测字段被终态保护丢弃。
+        if (isGraphPipelineExecutionMode()) {
+            Map<String, TaskRunStatus> queued = new LinkedHashMap<>();
+            tasks.forEach(task -> queued.put(task.getTaskKey(), TaskRunStatus.QUEUED));
+            return queued;
+        }
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
                         LinkedHashMap::new));
@@ -694,8 +708,10 @@ public class OrchestrationService {
         );
     }
 
-    private String activePipelineDagsterJob() {
-        return isGraphPipelineExecutionMode() ? PIPELINE_GRAPH_JOB_NAME : PIPELINE_JOB_NAME;
+    private String activePipelineDagsterJob(UUID dagId) {
+        return isGraphPipelineExecutionMode()
+                ? SparkRunConfigBuilder.graphJobName(dagId)
+                : PIPELINE_JOB_NAME;
     }
 
     private void validatePipelineRuntimeContract(Dag dag, String activeJobName) {
@@ -1629,7 +1645,7 @@ public class OrchestrationService {
     private JobRunDTO toRunDTO(JobRun r, Dag dag) {
         return new JobRunDTO(r.getId(), r.getDagId(),
             dag == null ? null : dag.getName(),
-            dag == null ? null : dag.getDagsterJob(),
+            StringUtils.hasText(r.getDagsterJob()) ? r.getDagsterJob() : (dag == null ? null : dag.getDagsterJob()),
             r.getDagsterRunId(),
             r.getTriggerType().name(), r.getStatus().name(),
             r.getLogicalDate(), r.getDataIntervalStart(), r.getDataIntervalEnd(), r.getBackfillId(),

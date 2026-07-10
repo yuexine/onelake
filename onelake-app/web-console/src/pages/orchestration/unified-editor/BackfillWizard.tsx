@@ -103,19 +103,24 @@ export function BackfillWizard({ dagId, open, onCancel, onCreated }: BackfillWiz
 
   const handleNext = async () => {
     setError(null);
-    if (currentStep === 0) {
-      await form.validateFields(['rangeStartDate', 'rangeEndDate']);
-      setCurrentStep(1);
+    let values: BackfillWizardValues;
+    try {
+      if (currentStep === 0) {
+        await form.validateFields(['rangeStartDate', 'rangeEndDate']);
+        setCurrentStep(1);
+        return;
+      }
+      if (currentStep === 1) {
+        await form.validateFields(['grain']);
+        if (total > MAX_BACKFILL_RUNS) return;
+        setCurrentStep(2);
+        return;
+      }
+      values = await form.validateFields();
+    } catch {
+      // Ant Design 已在字段旁展示校验信息；不要让 rejected validation 进入控制台。
       return;
     }
-    if (currentStep === 1) {
-      await form.validateFields(['grain']);
-      if (total > MAX_BACKFILL_RUNS) return;
-      setCurrentStep(2);
-      return;
-    }
-
-    const values = await form.validateFields();
     const [rangeStart, rangeEnd] = normalizedUtcRange(
       [values.rangeStartDate, values.rangeEndDate],
       values.grain,

@@ -30,8 +30,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -376,6 +379,7 @@ public class BackfillService {
     /** 查询 RUNNING 明细关联的 JobRun，并把终态单调同步回回填队列。 */
     private void syncChildRuns(Backfill backfill) {
         List<BackfillRun> runs = backfillRunRepo.findByBackfillIdForUpdate(backfill.getId());
+        Dag dag = dagRepo.findByIdAndTenantId(backfill.getDagId(), backfill.getTenantId()).orElse(null);
         for (BackfillRun backfillRun : runs) {
             if (backfillRun.getStatus() != BackfillRunStatus.RUNNING) {
                 continue;
@@ -388,6 +392,11 @@ public class BackfillService {
                 continue;
             }
             JobRun jobRun = orchestrationService.refreshRunStatusForBackfill(backfillRun.getJobRunId());
+            jobRun = followAutomaticRetryChain(dag, backfillRun, jobRun);
+            if (jobRun == null) {
+                // 来源已失败但仍在等待 DAG 级重跑间隔/并发槽位，回填明细继续保持 RUNNING。
+                continue;
+            }
             BackfillRunStatus mapped = mapJobRunStatus(jobRun.getStatus());
             if (mapped == null) {
                 continue;
@@ -400,6 +409,39 @@ public class BackfillService {
             backfillRunRepo.save(backfillRun);
         }
         aggregateBackfill(backfill);
+    }
+
+    /**
+     * 沿 retry_source_run_id 链切换到最新自动重跑；尚未派发但仍有次数时返回 null 表示等待。
+     */
+    private JobRun followAutomaticRetryChain(Dag dag, BackfillRun backfillRun, JobRun source) {
+        JobRun current = source;
+        Set<UUID> visited = new HashSet<>();
+        while (current != null
+                && current.getStatus() == DagStatus.FAILED
+                && current.getId() != null
+                && visited.add(current.getId())) {
+            Optional<JobRun> retry = jobRunRepo.findFirstByRetrySourceRunIdOrderByStartedAtDesc(current.getId());
+            if (retry.isEmpty()) {
+                return automaticRetryPending(dag, current) ? null : current;
+            }
+            current = orchestrationService.refreshRunStatusForBackfill(retry.get().getId());
+            backfillRun.setJobRunId(current.getId());
+            backfillRun.setErrorMsg(null);
+            backfillRun.setUpdatedAt(Instant.now());
+            backfillRunRepo.save(backfillRun);
+        }
+        return current;
+    }
+
+    private boolean automaticRetryPending(Dag dag, JobRun failedRun) {
+        if (dag == null || failedRun == null || failedRun.getRetryDispatchedAt() != null) {
+            return false;
+        }
+        int retryLimit = Math.max(0, dag.getRunRetryCount() == null ? 0 : dag.getRunRetryCount());
+        int attempt = Math.max(0,
+                failedRun.getRunRetryAttempt() == null ? 0 : failedRun.getRunRetryAttempt());
+        return attempt < retryLimit;
     }
 
     /**

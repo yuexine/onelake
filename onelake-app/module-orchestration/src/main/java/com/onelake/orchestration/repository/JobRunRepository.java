@@ -10,7 +10,9 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -65,4 +67,40 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
      * {@code max_active_runs} 限流。
      */
     long countByDagIdAndStatusIn(UUID dagId, Collection<DagStatus> statuses);
+
+    /**
+     * 返回已经到达 DAG 重跑间隔且尚未领取的失败运行 ID。
+     *
+     * <p>到期条件直接在 PostgreSQL 查询中计算，避免长间隔旧记录反复占据固定分页并
+     * 饿死后续已到期候选；服务层仍会在加锁后重判策略和并发。</p>
+     */
+    @Query(value = """
+            select jr.id
+            from orchestration.job_run jr
+            join orchestration.dag d on d.id = jr.dag_id
+            where jr.status = 'FAILED'
+              and jr.retry_dispatched_at is null
+              and jr.run_retry_attempt < d.run_retry_count
+              and upper(d.schedule_mode) <> 'FROZEN'
+              and coalesce(jr.finished_at, jr.updated_at, jr.started_at)
+                    + (d.run_retry_interval_seconds * interval '1 second') <= :now
+            order by jr.finished_at, jr.id
+            """, nativeQuery = true)
+    List<UUID> findRetryCandidateIds(@Param("now") Instant now, Pageable pageable);
+
+    /** 后台需要主动同步的非终态运行；包含达到上限的最后一次重跑以收口最终状态。 */
+    @Query("""
+            select jr.id
+            from JobRun jr, Dag d
+            where jr.status in :statuses
+              and jr.dagsterRunId is not null
+              and d.id = jr.dagId
+              and d.runRetryCount > 0
+              and jr.runRetryAttempt <= d.runRetryCount
+            order by jr.startedAt, jr.id
+            """)
+    List<UUID> findRetryWatchRunIds(@Param("statuses") Collection<DagStatus> statuses);
+
+    /** 查询某次失败运行直接创建的最新自动重跑，用于回填队列沿重跑链推进。 */
+    Optional<JobRun> findFirstByRetrySourceRunIdOrderByStartedAtDesc(UUID retrySourceRunId);
 }

@@ -4,6 +4,8 @@ import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
+import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
@@ -156,6 +158,21 @@ class PipelineSchedulerServiceTest {
 
         verifyNoInteractions(orchestrationService);
         verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        assertThat(TenantContext.getTenantId()).isNull();
+    }
+
+    @Test
+    void frozenPipelineDoesNotTriggerAndBlocksDependencyReadiness() {
+        Dag dag = scheduledPipeline();
+        dag.setScheduleMode("FROZEN");
+        stubLockedTick(List.of(dag));
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
+
+        verifyNoInteractions(orchestrationService);
+        verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        assertThat(ScheduleMode.from(dag.getScheduleMode()).satisfiesDependency(DagStatus.SUCCEEDED))
+                .isFalse();
         assertThat(TenantContext.getTenantId()).isNull();
     }
 

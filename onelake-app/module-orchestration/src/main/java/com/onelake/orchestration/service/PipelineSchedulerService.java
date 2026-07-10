@@ -5,6 +5,7 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
@@ -152,7 +153,7 @@ public class PipelineSchedulerService {
                             dag.getId(), scheduledAt.get().toLocalDate());
                     continue;
                 }
-                if ("FROZEN".equalsIgnoreCase(dag.getScheduleMode())) {
+                if (ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
                     log.info("PipelineSchedulerService：流水线 {} 已冻结，本周期跳过", dag.getId());
                     continue;
                 }

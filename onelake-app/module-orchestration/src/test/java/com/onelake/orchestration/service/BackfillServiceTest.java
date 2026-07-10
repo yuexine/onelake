@@ -315,6 +315,50 @@ class BackfillServiceTest {
     }
 
     @Test
+    void dispatchBackfillWaitsForAndThenFollowsAutomaticRetryChild() {
+        Backfill backfill = backfill(BackfillStatus.RUNNING, 1);
+        backfill.setTotalRuns(1);
+        BackfillRun backfillRun = backfillRun(
+                Instant.parse("2026-01-01T00:00:00Z"), BackfillRunStatus.RUNNING);
+        backfillRun.setJobRunId(RUN_ID);
+        Dag dag = dag();
+        dag.setRunRetryCount(1);
+        JobRun sourceFailure = new JobRun();
+        sourceFailure.setId(RUN_ID);
+        sourceFailure.setDagId(DAG_ID);
+        sourceFailure.setStatus(DagStatus.FAILED);
+        sourceFailure.setRunRetryAttempt(0);
+        UUID retryRunId = UUID.randomUUID();
+        JobRun retryRun = new JobRun();
+        retryRun.setId(retryRunId);
+        retryRun.setDagId(DAG_ID);
+        retryRun.setStatus(DagStatus.RUNNING);
+        retryRun.setRunRetryAttempt(1);
+
+        when(backfillRepo.findByIdForUpdate(BACKFILL_ID)).thenReturn(Optional.of(backfill));
+        when(backfillRunRepo.findByBackfillIdForUpdate(BACKFILL_ID)).thenReturn(List.of(backfillRun));
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(orchestrationService.refreshRunStatusForBackfill(RUN_ID)).thenReturn(sourceFailure);
+        when(jobRunRepo.findFirstByRetrySourceRunIdOrderByStartedAtDesc(RUN_ID))
+                .thenReturn(Optional.empty(), Optional.of(retryRun));
+        when(orchestrationService.refreshRunStatusForBackfill(retryRunId)).thenReturn(retryRun);
+        when(backfillRunRepo.countByBackfillIdAndStatus(BACKFILL_ID, BackfillRunStatus.RUNNING))
+                .thenReturn(1L);
+        when(jobRunRepo.countByDagIdAndStatusIn(eq(DAG_ID), any())).thenReturn(1L);
+
+        assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
+        assertThat(backfillRun.getStatus()).isEqualTo(BackfillRunStatus.RUNNING);
+        assertThat(backfillRun.getJobRunId()).isEqualTo(RUN_ID);
+
+        sourceFailure.setRetryDispatchedAt(Instant.now());
+        assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
+        assertThat(backfillRun.getStatus()).isEqualTo(BackfillRunStatus.RUNNING);
+        assertThat(backfillRun.getJobRunId()).isEqualTo(retryRunId);
+        assertThat(backfill.getStatus()).isEqualTo(BackfillStatus.RUNNING);
+        verify(orchestrationService).refreshRunStatusForBackfill(retryRunId);
+    }
+
+    @Test
     void dataEngineerBackfillWorkflowHonorsDateOrderParallelLimitAndCancel() {
         Backfill serialBackfill = backfill(BackfillStatus.QUEUED, 1);
         List<BackfillRun> serialRuns = List.of(

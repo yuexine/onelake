@@ -76,6 +76,16 @@ public class JobRun {
     @Column(nullable = false)
     private Integer priority = 5;
 
+    /** 自动重跑直接来源；普通运行为空，形成可审计的失败重跑链。 */
+    private UUID retrySourceRunId;
+
+    /** DAG 级自动重跑序号；首次运行为 0，第一条 AUTO_RETRY 为 1。 */
+    @Column(nullable = false)
+    private Integer runRetryAttempt = 0;
+
+    /** 失败运行已被自动重跑派发器领取或确认达到次数上限的时间。 */
+    private Instant retryDispatchedAt;
+
     /** OneLake 接受并开始创建运行的时间。 */
     private Instant startedAt;
     /** 运行进入终态的时间。 */

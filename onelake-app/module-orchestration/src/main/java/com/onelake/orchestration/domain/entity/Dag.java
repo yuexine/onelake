@@ -85,6 +85,14 @@ public class Dag {
     @Column(nullable = false, length = 16)
     private String scheduleMode = "NORMAL";
 
+    /** 首次运行失败后允许创建的 DAG 级 AUTO_RETRY 运行数量。 */
+    @Column(nullable = false)
+    private Integer runRetryCount = 0;
+
+    /** DAG 级失败自动重跑间隔，单位为秒。 */
+    @Column(nullable = false)
+    private Integer runRetryIntervalSeconds = 0;
+
     /** 错过计划点的处理策略元数据：FIRE_ONCE 或 SKIP。 */
     @Column(nullable = false, length = 16)
     private String misfirePolicy = "FIRE_ONCE";

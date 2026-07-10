@@ -59,6 +59,18 @@ public record RunContext(
                 value);
     }
 
+    /** 替换运行模式并返回新对象。 */
+    public RunContext withRunMode(String value) {
+        return new RunContext(
+                logicalDate,
+                dataIntervalStart,
+                dataIntervalEnd,
+                timezone,
+                value,
+                backfillId,
+                triggerType);
+    }
+
     /** 为 logical-date-only 上下文补齐数据区间并返回新对象。 */
     public RunContext withDataInterval(Instant start, Instant end) {
         return new RunContext(

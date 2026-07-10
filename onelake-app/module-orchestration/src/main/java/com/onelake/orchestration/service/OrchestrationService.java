@@ -14,6 +14,7 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
@@ -284,17 +285,70 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, RunContext context) {
+        return triggerPipelineRunInternal(dagId, trigger, context, null);
+    }
+
+    /**
+     * 为一条失败 JobRun 创建新的 DAG 级自动重跑。
+     *
+     * <p>该入口只被 {@link PipelineRunRetryService} 调用。新运行使用 AUTO_RETRY 触发类型，
+     * 继承原业务时间上下文，并通过 retrySourceRunId/runRetryAttempt 记录独立于节点重试的来源。</p>
+     */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRetry(JobRun sourceRun) {
+        if (sourceRun == null || sourceRun.getId() == null || sourceRun.getDagId() == null) {
+            throw new BizException(40020, "自动重跑来源不能为空");
+        }
+        if (sourceRun.getStatus() != DagStatus.FAILED) {
+            throw new BizException(40020, "仅失败终态可自动重跑");
+        }
+        int nextAttempt = Math.max(0,
+                sourceRun.getRunRetryAttempt() == null ? 0 : sourceRun.getRunRetryAttempt()) + 1;
+        RunContext context = new RunContext(
+                sourceRun.getLogicalDate(),
+                sourceRun.getDataIntervalStart(),
+                sourceRun.getDataIntervalEnd(),
+                sourceRun.getTimezone(),
+                sourceRun.getRunMode(),
+                sourceRun.getBackfillId(),
+                TriggerType.AUTO_RETRY);
+        RunRetryMetadata retryMetadata = new RunRetryMetadata(sourceRun.getId(), nextAttempt);
+        try {
+            return triggerPipelineRunInternal(
+                    sourceRun.getDagId(),
+                    TriggerType.AUTO_RETRY,
+                    context,
+                    retryMetadata);
+        } catch (RuntimeException ex) {
+            // 运行时契约或编译可能在 JobRun 建档前失败；仍需生成失败子运行承接次数链和审计来源。
+            if (!retryMetadata.runCreated()) {
+                persistRejectedPipelineRetry(sourceRun, retryMetadata, ex);
+            }
+            if (ex instanceof BizException bizException) {
+                throw bizException;
+            }
+            throw new BizException(50200, "自动重跑触发失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    private UUID triggerPipelineRunInternal(UUID dagId,
+                                            TriggerType trigger,
+                                            RunContext context,
+                                            RunRetryMetadata retryMetadata) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag dag = findTenantDag(dagId);
         RunContext runContext = normalizeRunContext(context, dag, trigger);
+        boolean dryRun = ScheduleMode.DRY_RUN.name().equalsIgnoreCase(runContext.runMode());
         String activeJobName = activePipelineDagsterJob(dagId);
-        if (isGraphPipelineExecutionMode()) {
+        if (!dryRun && isGraphPipelineExecutionMode()) {
             dagster.reloadRepositoryLocation("onelake-loc");
         }
-        validatePipelineRuntimeContract(dag, activeJobName);
+        if (!dryRun) {
+            validatePipelineRuntimeContract(dag, activeJobName);
+        }
 
         // 1. 编译流水线。
         PipelineCompileResult plan = pipelineCompileService.compile(dagId);
@@ -329,12 +383,19 @@ public class OrchestrationService {
         run.setTimezone(runContext.timezone());
         run.setRunMode(runContext.runMode());
         run.setDagsterJob(activeJobName);
+        if (retryMetadata != null) {
+            run.setRetrySourceRunId(retryMetadata.sourceRunId());
+            run.setRunRetryAttempt(retryMetadata.attempt());
+        }
         // V14 为 CRON logical_date 建立了唯一索引。此处立即 flush，确保重复调度在
         // 启动 Dagster 前被识别，由 PipelineSchedulerService 安全地当作已触发处理。
         if (trigger == TriggerType.CRON && runContext.logicalDate() != null) {
             runRepo.saveAndFlush(run);
         } else {
             runRepo.save(run);
+        }
+        if (retryMetadata != null) {
+            retryMetadata.markRunCreated(run.getId());
         }
 
         // 4. 为每个有效节点创建 TaskRun。初始状态由数据流 DAG 推导，避免所有节点被扁平化为 QUEUED。
@@ -348,31 +409,45 @@ public class OrchestrationService {
             tr.setTaskKey(t.getTaskKey());
             tr.setDataIntervalStart(runContext.dataIntervalStart());
             tr.setDataIntervalEnd(runContext.dataIntervalEnd());
-            TaskRunStatus initialStatus = initialStatuses.getOrDefault(t.getTaskKey(), TaskRunStatus.QUEUED);
+            TaskRunStatus initialStatus = dryRun
+                    ? TaskRunStatus.SUCCEEDED
+                    : initialStatuses.getOrDefault(t.getTaskKey(), TaskRunStatus.QUEUED);
             tr.setStatus(initialStatus);
             if (initialStatus == TaskRunStatus.RUNNING || initialStatus == TaskRunStatus.SUCCEEDED) {
                 tr.setStartedAt(run.getStartedAt());
             }
             if (initialStatus == TaskRunStatus.SUCCEEDED) {
                 tr.setFinishedAt(run.getStartedAt());
-                if (StringUtils.hasText(t.getTargetFqn())) {
+                if (!dryRun && StringUtils.hasText(t.getTargetFqn())) {
                     tr.setArtifactPath("table:" + normalizeTableFqn(t.getTargetFqn()));
                 }
             }
             taskRunRepo.save(tr);
         }
 
-        // 5. 构建 Dagster runConfig：Java 生成配置，Dagster 负责执行。
-        TaskBundleContext ctx = new TaskBundleContext(
-                dagId, tenantId, run.getId(), plan,
-                plan.pipelineTag(),
-                dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
-                dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
-        );
-        DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runContext);
+        if (dryRun) {
+            // 空跑只验证编译、节点集合和拓扑建档；不构建 runConfig、不启动 Dagster，因而不会 spark-submit。
+            Instant finishedAt = Instant.now();
+            run.setStatus(DagStatus.SUCCEEDED);
+            run.setFinishedAt(finishedAt);
+            run.setUpdatedAt(finishedAt);
+            runRepo.save(run);
+            // 仅发布聚合成功事件供依赖侧观测；不发布 pipeline.task.loaded，避免伪造数据落表。
+            publishPipelineRunEvent(dag, run, plan, true, null);
+            log.info("Spark 流水线 {} 已空跑成功，runId={}，taskCount={}",
+                    dagId, run.getId(), observable.size());
+            return run.getId();
+        }
 
-        // 6. 启动 Dagster。
+        // 5-6. 构建 runConfig 并启动 Dagster；两步共用失败收口，避免配置构建异常留下 QUEUED 孤儿运行。
         try {
+            TaskBundleContext ctx = new TaskBundleContext(
+                    dagId, tenantId, run.getId(), plan,
+                    plan.pipelineTag(),
+                    dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
+                    dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
+            );
+            DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runContext);
             List<Map<String, String>> tags = pipelineRunTags(dagId, tenantId, run, trigger, tasks);
             String dagsterRunId = dagster.launch(
                     runConfig.jobName(), "onelake", "onelake-loc",
@@ -400,6 +475,36 @@ public class OrchestrationService {
             throw new BizException(50200, "Dagster 触发失败: " + ex.getMessage());
         }
         return run.getId();
+    }
+
+    /** 为前置校验失败的自动重跑补一条 FAILED JobRun，确保剩余次数可沿子运行继续推进。 */
+    private void persistRejectedPipelineRetry(JobRun sourceRun,
+                                              RunRetryMetadata retryMetadata,
+                                              RuntimeException failure) {
+        Instant failedAt = Instant.now();
+        JobRun rejected = new JobRun();
+        rejected.setDagId(sourceRun.getDagId());
+        rejected.setDagsterJob(activePipelineDagsterJob(sourceRun.getDagId()));
+        rejected.setTriggerType(TriggerType.AUTO_RETRY);
+        rejected.setStatus(DagStatus.FAILED);
+        rejected.setLogicalDate(sourceRun.getLogicalDate());
+        rejected.setDataIntervalStart(sourceRun.getDataIntervalStart());
+        rejected.setDataIntervalEnd(sourceRun.getDataIntervalEnd());
+        rejected.setBackfillId(sourceRun.getBackfillId());
+        rejected.setTimezone(sourceRun.getTimezone());
+        rejected.setRunMode(StringUtils.hasText(sourceRun.getRunMode()) ? sourceRun.getRunMode() : "NORMAL");
+        rejected.setPriority(sourceRun.getPriority());
+        rejected.setRetrySourceRunId(retryMetadata.sourceRunId());
+        rejected.setRunRetryAttempt(retryMetadata.attempt());
+        rejected.setStartedAt(failedAt);
+        rejected.setFinishedAt(failedAt);
+        rejected.setTriggeredBy(sourceRun.getTriggeredBy());
+        rejected.setTriggeredByName(sourceRun.getTriggeredByName());
+        rejected.setUpdatedAt(failedAt);
+        runRepo.save(rejected);
+        retryMetadata.markRunCreated(rejected.getId());
+        log.warn("流水线 {} 自动重跑在建档前校验失败，已记录失败 runId={} sourceRunId={}：{}",
+                sourceRun.getDagId(), rejected.getId(), sourceRun.getId(), failure.getMessage());
     }
 
     /**
@@ -763,6 +868,10 @@ public class OrchestrationService {
         if (run.getLogicalDate() != null) {
             tags.add(Map.of("key", "onelake.logical_date", "value", run.getLogicalDate().toString()));
         }
+        if (run.getRetrySourceRunId() != null) {
+            tags.add(Map.of("key", "onelake.retry_source_run_id", "value", run.getRetrySourceRunId().toString()));
+            tags.add(Map.of("key", "onelake.run_retry_attempt", "value", String.valueOf(run.getRunRetryAttempt())));
+        }
         return tags;
     }
 
@@ -783,6 +892,10 @@ public class OrchestrationService {
         RunContext normalized = (context == null ? RunContext.empty(trigger) : context)
                 .withDefaults(defaultTimezone, trigger)
                 .withTriggerType(trigger);
+        if (ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.DRY_RUN) {
+            // DAG 配置是权威运行模式；CRON/回填显式传入的 NORMAL 不能覆盖空跑策略。
+            normalized = normalized.withRunMode(ScheduleMode.DRY_RUN.name());
+        }
         try {
             ZoneId.of(normalized.timezone());
             normalized.validateBusinessTime();
@@ -902,6 +1015,14 @@ public class OrchestrationService {
      */
     @Transactional
     public JobRun refreshRunStatusForBackfill(UUID runId) {
+        return refreshRunStatusForAutomation(runId);
+    }
+
+    /**
+     * 后台调度器使用的内部状态同步入口；调用方负责恢复运行所属租户上下文。
+     */
+    @Transactional
+    public JobRun refreshRunStatusForAutomation(UUID runId) {
         JobRun run = runRepo.findById(runId)
                 .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
         return refreshRunStatus(run);
@@ -1801,6 +1922,33 @@ public class OrchestrationService {
     }
 
     private record TriggerReadiness(boolean triggerable, String reason) {}
+
+    private static final class RunRetryMetadata {
+        private final UUID sourceRunId;
+        private final int attempt;
+        private UUID createdRunId;
+
+        private RunRetryMetadata(UUID sourceRunId, int attempt) {
+            this.sourceRunId = sourceRunId;
+            this.attempt = attempt;
+        }
+
+        UUID sourceRunId() {
+            return sourceRunId;
+        }
+
+        int attempt() {
+            return attempt;
+        }
+
+        void markRunCreated(UUID runId) {
+            this.createdRunId = runId;
+        }
+
+        boolean runCreated() {
+            return createdRunId != null;
+        }
+    }
 
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 

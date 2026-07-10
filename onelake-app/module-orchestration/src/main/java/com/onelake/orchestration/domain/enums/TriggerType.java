@@ -11,5 +11,7 @@ public enum TriggerType {
     /** 由上游事件触发。 */
     EVENT,
     /** 业务日期回填派发触发。 */
-    BACKFILL
+    BACKFILL,
+    /** DAG 级失败策略创建的新 JobRun；与节点级 M1 重试分开计数。 */
+    AUTO_RETRY
 }

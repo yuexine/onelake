@@ -11,6 +11,7 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
@@ -210,6 +211,142 @@ class OrchestrationPipelineTriggerTest {
         assertThat(statusByKey).containsEntry("spark_a", TaskRunStatus.RUNNING);
         assertThat(statusByKey).containsEntry("spark_b", TaskRunStatus.RUNNING);
         assertThat(statusByKey).containsEntry("quality_gate", TaskRunStatus.QUEUED);
+    }
+
+    @Test
+    void dryRunCreatesSuccessfulTopologyWithoutLaunchingOrPublishingLoadedData() {
+        Dag dag = pipelineDag();
+        dag.setScheduleMode("DRY_RUN");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("extract", "transform"));
+        PipelineTask extract = task("extract", true);
+        PipelineTask transform = task("transform", true);
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(extract, transform));
+        when(edgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge("extract", "transform")));
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
+
+        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun savedRun = runCaptor.getValue();
+        assertThat(savedRun.getId()).isEqualTo(runId);
+        assertThat(savedRun.getRunMode()).isEqualTo("DRY_RUN");
+        assertThat(savedRun.getStatus()).isEqualTo(DagStatus.SUCCEEDED);
+        assertThat(savedRun.getFinishedAt()).isNotNull();
+        assertThat(savedRun.getDagsterRunId()).isNull();
+        assertThat(ScheduleMode.from(dag.getScheduleMode()).satisfiesDependency(savedRun.getStatus()))
+                .isTrue();
+
+        ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
+        verify(taskRunRepo, org.mockito.Mockito.times(2)).save(taskRunCaptor.capture());
+        assertThat(taskRunCaptor.getAllValues())
+                .extracting(TaskRun::getTaskKey)
+                .containsExactlyInAnyOrder("extract", "transform");
+        assertThat(taskRunCaptor.getAllValues()).allSatisfy(taskRun -> {
+            assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
+            assertThat(taskRun.getArtifactPath()).isNull();
+            assertThat(taskRun.getRowsWritten()).isNull();
+        });
+
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
+        verify(sparkBuilder, never()).build(any(), anyList(), anyString(), any());
+        ArgumentCaptor<String> eventTypeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxPublisher).publish(eventTypeCaptor.capture(), anyString(), any());
+        assertThat(eventTypeCaptor.getAllValues())
+                .containsExactly("pipeline.run.succeeded")
+                .doesNotContain("pipeline.task.loaded");
+        verify(jdbc, never()).update(anyString(), any(Object[].class));
+    }
+
+    @Test
+    void automaticRetryCreatesNewRunWithSourceAndIndependentAttempt() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("retry_task"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(task("retry_task", true)));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-auto-retry");
+        JobRun source = new JobRun();
+        source.setId(UUID.randomUUID());
+        source.setDagId(DAG_ID);
+        source.setTriggerType(TriggerType.MANUAL);
+        source.setStatus(DagStatus.FAILED);
+        source.setRunMode("NORMAL");
+        source.setRunRetryAttempt(0);
+        source.setTimezone("UTC");
+
+        service.triggerPipelineRetry(source);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun retryRun = runCaptor.getValue();
+        assertThat(retryRun.getTriggerType()).isEqualTo(TriggerType.AUTO_RETRY);
+        assertThat(retryRun.getRetrySourceRunId()).isEqualTo(source.getId());
+        assertThat(retryRun.getRunRetryAttempt()).isEqualTo(1);
+        assertThat(retryRun.getDagsterRunId()).isEqualTo("dagster-auto-retry");
+    }
+
+    @Test
+    void automaticRetryPreflightFailureStillCreatesAuditableFailedChild() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runtimeContractService.launchBlockedReason(anyString(), any()))
+                .thenReturn(Optional.of("Dagster job missing"));
+        JobRun source = new JobRun();
+        source.setId(UUID.randomUUID());
+        source.setDagId(DAG_ID);
+        source.setTriggerType(TriggerType.MANUAL);
+        source.setStatus(DagStatus.FAILED);
+        source.setRunMode("NORMAL");
+        source.setRunRetryAttempt(0);
+        source.setTimezone("UTC");
+
+        assertThatThrownBy(() -> service.triggerPipelineRetry(source))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("Dagster job missing");
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo).save(runCaptor.capture());
+        JobRun rejectedRetry = runCaptor.getValue();
+        assertThat(rejectedRetry.getStatus()).isEqualTo(DagStatus.FAILED);
+        assertThat(rejectedRetry.getTriggerType()).isEqualTo(TriggerType.AUTO_RETRY);
+        assertThat(rejectedRetry.getRetrySourceRunId()).isEqualTo(source.getId());
+        assertThat(rejectedRetry.getRunRetryAttempt()).isEqualTo(1);
+        assertThat(rejectedRetry.getFinishedAt()).isNotNull();
+        verify(compileService, never()).compile(any());
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
+    }
+
+    @Test
+    void automaticRetryRunConfigFailureClosesCreatedChildAsFailed() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("retry_task"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(task("retry_task", true)));
+        when(sparkBuilder.build(any(), anyList(), anyString(), any()))
+                .thenThrow(new RuntimeException("invalid run config"));
+        when(taskRunRepo.findByJobRunId(any())).thenReturn(List.of());
+        JobRun source = new JobRun();
+        source.setId(UUID.randomUUID());
+        source.setDagId(DAG_ID);
+        source.setStatus(DagStatus.FAILED);
+        source.setRunMode("NORMAL");
+        source.setRunRetryAttempt(0);
+
+        assertThatThrownBy(() -> service.triggerPipelineRetry(source))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("invalid run config");
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun retryRun = runCaptor.getValue();
+        assertThat(retryRun.getStatus()).isEqualTo(DagStatus.FAILED);
+        assertThat(retryRun.getRetrySourceRunId()).isEqualTo(source.getId());
+        assertThat(retryRun.getFinishedAt()).isNotNull();
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
     }
 
     @Test

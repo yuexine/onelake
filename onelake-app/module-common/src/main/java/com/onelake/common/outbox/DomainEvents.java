@@ -58,6 +58,8 @@ public final class DomainEvents {
     public static final String PIPELINE_PUBLISHED = "pipeline.published";
     public static final String PIPELINE_RUN_SUCCEEDED = "pipeline.run.succeeded";
     public static final String PIPELINE_RUN_FAILED = "pipeline.run.failed";
+    public static final String PIPELINE_RUN_SLA_MISSED = "pipeline.run.sla_missed";
+    public static final String PIPELINE_RUN_TIMEOUT = "pipeline.run.timeout";
     public static final String PIPELINE_TASK_LOADED = "pipeline.task.loaded";
 
     // ============ 数据分析与可视化（analytics）============

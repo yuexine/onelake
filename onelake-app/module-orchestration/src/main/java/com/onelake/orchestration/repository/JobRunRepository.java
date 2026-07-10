@@ -112,6 +112,24 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
             """)
     List<UUID> findRetryWatchRunIds(@Param("statuses") Collection<DagStatus> statuses);
 
+    /**
+     * 查询需要 SLA/超时巡检的非终态运行。
+     *
+     * <p>已标记 SLA 违约且未配置 timeout 的运行不再进入候选集合；配置了 timeout 的
+     * 运行会持续被检查，直至超时取消或由正常状态同步收口为终态。</p>
+     */
+    @Query("""
+            select jr.id
+            from JobRun jr, Dag d
+            where d.id = jr.dagId
+              and jr.status in :statuses
+              and jr.startedAt is not null
+              and (d.timeoutMinutes is not null
+                   or (d.slaMinutes is not null and jr.slaMissed = false))
+            order by jr.startedAt, jr.id
+            """)
+    List<UUID> findSlaMonitorCandidateIds(@Param("statuses") Collection<DagStatus> statuses);
+
     /** 查询某次失败运行直接创建的最新自动重跑，用于回填队列沿重跑链推进。 */
     Optional<JobRun> findFirstByRetrySourceRunIdOrderByStartedAtDesc(UUID retrySourceRunId);
 }

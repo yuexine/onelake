@@ -5,6 +5,7 @@ import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.dto.BackfillDTO;
 import com.onelake.orchestration.dto.BackfillRunDTO;
 import com.onelake.orchestration.dto.CreateBackfillRequest;
+import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.service.BackfillDispatcher;
 import com.onelake.orchestration.service.BackfillService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -16,6 +17,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
@@ -30,6 +33,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -39,6 +43,7 @@ class BackfillControllerTest {
 
     private static final UUID DAG_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID BACKFILL_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final UUID RUN_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
     private static final Instant RANGE_START = Instant.parse("2026-01-01T00:00:00Z");
     private static final Instant RANGE_END = Instant.parse("2026-01-03T00:00:00Z");
 
@@ -105,7 +110,55 @@ class BackfillControllerTest {
         assertEndpointMetadata("create", UUID.class, CreateBackfillRequest.class);
         assertEndpointMetadata("get", UUID.class);
         assertEndpointMetadata("list", UUID.class);
+        assertEndpointMetadata("listRuns", UUID.class, int.class, int.class);
+        assertEndpointMetadata("getRun", UUID.class, UUID.class);
         assertEndpointMetadata("cancel", UUID.class);
+    }
+
+    @Test
+    void listRunsReturnsPagedJobRunMetadata() throws Exception {
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(backfillService.listJobRuns(BACKFILL_ID, pageable)).thenReturn(Page.empty(pageable));
+
+        mockMvc.perform(get("/api/v1/orchestration/backfills/" + BACKFILL_ID + "/runs")
+                        .param("page", "0")
+                        .param("size", "20"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.content").isEmpty())
+                .andExpect(jsonPath("$.data.totalElements").value(0));
+
+        verify(backfillService).listJobRuns(BACKFILL_ID, pageable);
+    }
+
+    @Test
+    void getRunReturnsBackfillScopedJobRunMetadata() throws Exception {
+        JobRunDTO run = new JobRunDTO(
+                RUN_ID,
+                DAG_ID,
+                "orders_pipeline",
+                "onelake_pipeline_run",
+                "dagster-run-1",
+                "BACKFILL",
+                "RUNNING",
+                RANGE_START,
+                RANGE_START,
+                RANGE_START.plus(java.time.Duration.ofDays(1)),
+                BACKFILL_ID,
+                RANGE_START,
+                null,
+                null,
+                "operator");
+        when(backfillService.getJobRun(BACKFILL_ID, RUN_ID)).thenReturn(run);
+
+        mockMvc.perform(get("/api/v1/orchestration/backfills/" + BACKFILL_ID + "/runs/" + RUN_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.id").value(RUN_ID.toString()))
+                .andExpect(jsonPath("$.data.backfillId").value(BACKFILL_ID.toString()))
+                .andExpect(jsonPath("$.data.triggeredByName").value("operator"));
+
+        verify(backfillService).getJobRun(BACKFILL_ID, RUN_ID);
     }
 
     private void assertEndpointMetadata(String methodName, Class<?>... parameterTypes) throws Exception {

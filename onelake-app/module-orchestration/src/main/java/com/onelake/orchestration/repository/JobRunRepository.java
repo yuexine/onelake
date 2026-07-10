@@ -21,7 +21,13 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
 
     Page<JobRun> findByDagIdInOrderByStartedAtDesc(Collection<UUID> dagIds, Pageable pageable);
 
+    Page<JobRun> findByDagIdAndBackfillIdOrderByLogicalDateAsc(UUID dagId,
+                                                               UUID backfillId,
+                                                               Pageable pageable);
+
     Optional<JobRun> findByIdAndDagIdIn(UUID id, Collection<UUID> dagIds);
+
+    Optional<JobRun> findByIdAndDagIdAndBackfillId(UUID id, UUID dagId, UUID backfillId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select jr from JobRun jr where jr.id = :id")

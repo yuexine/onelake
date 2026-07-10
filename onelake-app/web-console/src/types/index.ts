@@ -119,10 +119,53 @@ export interface JobRun {
   dagsterRunId?: string;
   triggerType: 'CRON' | 'MANUAL' | 'EVENT' | string;
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
+  logicalDate?: string;
+  dataIntervalStart?: string;
+  dataIntervalEnd?: string;
+  backfillId?: UUID;
   startedAt?: string;
   finishedAt?: string;
   triggeredBy?: UUID;
   triggeredByName?: string;
+}
+
+export type BackfillGrain = 'DAY' | 'HOUR' | 'MONTH';
+export type BackfillStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'PARTIAL';
+export type BackfillRunStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+
+export interface BackfillRun {
+  id: UUID;
+  job_run_id?: UUID;
+  logical_date: string;
+  data_interval_start: string;
+  data_interval_end: string;
+  status: BackfillRunStatus;
+  error_msg?: string;
+}
+
+export interface Backfill {
+  id: UUID;
+  dag_id: UUID;
+  status: BackfillStatus;
+  total: number;
+  succeeded: number;
+  failed: number;
+  max_parallel: number;
+  range: {
+    start: string;
+    end: string;
+  };
+  grain: BackfillGrain;
+  created_at: string;
+  updated_at: string;
+  runs: BackfillRun[];
+}
+
+export interface CreateBackfillRequest {
+  rangeStart: string;
+  rangeEnd: string;
+  grain: BackfillGrain;
+  maxParallel: number;
 }
 
 export interface DagNode {

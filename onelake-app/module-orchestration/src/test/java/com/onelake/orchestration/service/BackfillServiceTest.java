@@ -10,6 +10,7 @@ import com.onelake.orchestration.domain.enums.BackfillStatus;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.BackfillDTO;
+import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.repository.BackfillRepository;
 import com.onelake.orchestration.repository.BackfillRunRepository;
 import com.onelake.orchestration.repository.DagRepository;
@@ -21,6 +22,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -101,6 +104,37 @@ class BackfillServiceTest {
                 Instant.parse("2026-01-02T00:00:00Z"),
                 Instant.parse("2026-01-03T00:00:00Z"),
                 Instant.parse("2026-01-04T00:00:00Z"));
+    }
+
+    @Test
+    void listJobRunsValidatesTenantBackfillAndDelegatesPagedQuery() {
+        Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
+        PageRequest pageable = PageRequest.of(0, 20);
+        Page<JobRunDTO> expected = Page.empty(pageable);
+        when(backfillRepo.findByIdAndTenantId(BACKFILL_ID, TENANT_ID)).thenReturn(Optional.of(backfill));
+        when(orchestrationService.listBackfillRuns(DAG_ID, BACKFILL_ID, pageable)).thenReturn(expected);
+
+        Page<JobRunDTO> result = service.listJobRuns(BACKFILL_ID, pageable);
+
+        assertThat(result).isSameAs(expected);
+        verify(orchestrationService).listBackfillRuns(DAG_ID, BACKFILL_ID, pageable);
+    }
+
+    @Test
+    void getJobRunValidatesTenantBackfillAndDelegatesScopedLookup() {
+        Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
+        JobRunDTO expected = new JobRunDTO(
+                RUN_ID, DAG_ID, "orders_pipeline", "onelake_pipeline_run", "dagster-run-1",
+                "BACKFILL", "RUNNING", Instant.parse("2026-01-01T00:00:00Z"),
+                Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-02T00:00:00Z"),
+                BACKFILL_ID, Instant.parse("2026-01-01T00:00:00Z"), null, CREATOR_ID, "operator");
+        when(backfillRepo.findByIdAndTenantId(BACKFILL_ID, TENANT_ID)).thenReturn(Optional.of(backfill));
+        when(orchestrationService.getBackfillRun(DAG_ID, BACKFILL_ID, RUN_ID)).thenReturn(expected);
+
+        JobRunDTO result = service.getJobRun(BACKFILL_ID, RUN_ID);
+
+        assertThat(result).isSameAs(expected);
+        verify(orchestrationService).getBackfillRun(DAG_ID, BACKFILL_ID, RUN_ID);
     }
 
     @Test

@@ -18,6 +18,8 @@ import type {
   BusinessTermRequest,
   BusinessTermVersion,
   BusinessTermVersionDiff,
+  Backfill,
+  CreateBackfillRequest,
   DataSource,
   ImpactReport,
   LineageGraphData,
@@ -340,6 +342,21 @@ export const OrchestrationAPI = {
     unwrap<JobRun>(http.post(`/orchestration/runs/${id}/cancel`)),
   listDagRuns: (id: string, page = 0, size = 20) =>
     unwrap<PageResult<JobRun>>(http.get(`/orchestration/dags/${id}/runs`, { params: { page, size } })),
+};
+
+export const BackfillAPI = {
+  create: (dagId: string, payload: CreateBackfillRequest) =>
+    unwrap<Backfill>(http.post(`/orchestration/pipelines/${dagId}/backfill`, payload)),
+  get: (id: string) =>
+    unwrap<Backfill>(http.get(`/orchestration/backfills/${id}`)),
+  list: (dagId: string) =>
+    unwrap<Backfill[]>(http.get(`/orchestration/pipelines/${dagId}/backfills`)),
+  listRuns: (id: string, page = 0, size = 20) =>
+    unwrap<PageResult<JobRun>>(http.get(`/orchestration/backfills/${id}/runs`, { params: { page, size } })),
+  getRun: (id: string, runId: string) =>
+    unwrap<JobRun>(http.get(`/orchestration/backfills/${id}/runs/${runId}`)),
+  cancel: (id: string) =>
+    unwrap<Backfill>(http.post(`/orchestration/backfills/${id}/cancel`)),
 };
 
 /**

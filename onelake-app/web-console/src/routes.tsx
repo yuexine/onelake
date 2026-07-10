@@ -38,6 +38,7 @@ const GovernanceFactory = lazy(() => import('./pages/lakehouse/GovernanceFactory
 const PipelineList = lazy(() => import('./pages/orchestration/PipelineList'));
 const DagCanvas = lazy(() => import('./pages/orchestration/DagCanvas'));
 const UnifiedPipelineEditor = lazy(() => import('./pages/orchestration/unified-editor/UnifiedPipelineEditor'));
+const BackfillProgress = lazy(() => import('./pages/orchestration/BackfillProgress'));
 const OperatorMarket = lazy(() => import('./pages/orchestration/OperatorMarket'));
 const RunInstances = lazy(() => import('./pages/orchestration/RunInstances'));
 
@@ -146,6 +147,7 @@ export function AppRoutes() {
           <Route path="/orchestration/pipelines" element={<PipelineList />} />
           <Route path="/orchestration/pipelines/new" element={<PipelineCreateRoute />} />
           <Route path="/orchestration/pipelines/:id" element={<UnifiedPipelineEditor />} />
+          <Route path="/orchestration/pipelines/:pipelineId/backfills/:backfillId" element={<BackfillProgress />} />
           {/* Historical graph route redirects to the unified editor. */}
           <Route path="/orchestration/pipelines/:id/graph" element={<DagCanvasRedirect />} />
           <Route path="/orchestration/pipelines/:pipelineId/editor" element={<UnifiedPipelineEditor />} />

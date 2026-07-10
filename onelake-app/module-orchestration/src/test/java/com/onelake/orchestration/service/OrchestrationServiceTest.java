@@ -176,6 +176,46 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void listBackfillRunsScopesToTenantDagAndPreservesJobMetadata() {
+        UUID backfillId = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setDagsterRunId(null);
+        run.setTriggerType(TriggerType.BACKFILL);
+        run.setBackfillId(backfillId);
+        run.setLogicalDate(Instant.parse("2026-07-01T00:00:00Z"));
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByDagIdAndBackfillIdOrderByLogicalDateAsc(DAG_ID, backfillId, pageable))
+                .thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+
+        Page<JobRunDTO> page = service.listBackfillRuns(DAG_ID, backfillId, pageable);
+
+        assertThat(page.getTotalElements()).isEqualTo(1);
+        assertThat(page.getContent().get(0).backfillId()).isEqualTo(backfillId);
+        assertThat(page.getContent().get(0).logicalDate()).isEqualTo(Instant.parse("2026-07-01T00:00:00Z"));
+        verify(runRepo).findByDagIdAndBackfillIdOrderByLogicalDateAsc(DAG_ID, backfillId, pageable);
+    }
+
+    @Test
+    void getBackfillRunRequiresMatchingTenantDagAndBackfill() {
+        UUID backfillId = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setDagsterRunId(null);
+        run.setTriggerType(TriggerType.BACKFILL);
+        run.setBackfillId(backfillId);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdAndBackfillId(RUN_ID, DAG_ID, backfillId)).thenReturn(Optional.of(run));
+
+        JobRunDTO result = service.getBackfillRun(DAG_ID, backfillId, RUN_ID);
+
+        assertThat(result.id()).isEqualTo(RUN_ID);
+        assertThat(result.backfillId()).isEqualTo(backfillId);
+        verify(runRepo).findByIdAndDagIdAndBackfillId(RUN_ID, DAG_ID, backfillId);
+    }
+
+    @Test
     void listRunsRefreshesNonTerminalDagsterStatus() {
         Dag dag = dag();
         JobRun run = jobRun(dag.getId());

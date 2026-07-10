@@ -779,6 +779,21 @@ public class OrchestrationService {
     }
 
     @Transactional
+    public Page<JobRunDTO> listBackfillRuns(UUID dagId, UUID backfillId, Pageable pageable) {
+        Dag dag = findTenantDag(dagId);
+        return runRepo.findByDagIdAndBackfillIdOrderByLogicalDateAsc(dagId, backfillId, pageable)
+                .map(run -> toRunDTO(refreshRunStatus(run), dag));
+    }
+
+    @Transactional
+    public JobRunDTO getBackfillRun(UUID dagId, UUID backfillId, UUID runId) {
+        Dag dag = findTenantDag(dagId);
+        JobRun run = runRepo.findByIdAndDagIdAndBackfillId(runId, dagId, backfillId)
+                .orElseThrow(() -> new BizException(40400, "回填子运行不存在"));
+        return toRunDTO(refreshRunStatus(run), dag);
+    }
+
+    @Transactional
     public JobRunDTO getRun(UUID runId) {
         List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
         if (dags.isEmpty()) {

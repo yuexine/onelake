@@ -9,9 +9,10 @@ import { Alert, App as AntApp, Descriptions, Drawer, Dropdown, Select, Space, Bu
 import { ArrowLeftOutlined, DownOutlined, DownloadOutlined, EyeOutlined, FileTextOutlined, HistoryOutlined, RedoOutlined, ReloadOutlined, StopOutlined, UpOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { StatusBadge, PageHeader, SectionCard, StateView } from '../../components';
-import { CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
+import { BackfillAPI, CatalogAPI, OrchestrationAPI, PipelineAPI } from '../../api';
 import { BizError } from '../../api/http';
-import type { Asset, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRerunMode, TaskRun } from '../../types';
+import { getAuthUser } from '../../auth/oidc';
+import type { Asset, Backfill, JobRun, PipelineTask, PipelineTaskEdge, PipelineTaskType, TaskRerunMode, TaskRun } from '../../types';
 import { normalizeCatalogAssets } from '../lakehouse/assetAdapter';
 
 const { Text } = Typography;
@@ -29,6 +30,11 @@ interface UiError {
 function formatDate(value?: string) {
   if (!value) return '-';
   return new Date(value).toLocaleString('zh-CN');
+}
+
+function formatBusinessDate(value?: string) {
+  if (!value) return '-';
+  return `${new Date(value).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 function formatDuration(run: JobRun) {
@@ -54,6 +60,25 @@ function triggerActorTitle(run: JobRun) {
 
 function isRunTerminal(status?: string) {
   return ['SUCCEEDED', 'SUCCESS', 'FAILED', 'CANCELLED'].includes((status || '').toUpperCase());
+}
+
+function isBackfillTerminal(status?: string) {
+  return ['SUCCEEDED', 'FAILED', 'PARTIAL', 'CANCELLED'].includes((status || '').toUpperCase());
+}
+
+function shortId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 8)}...` : value;
+}
+
+function groupRunsByBackfill(runs: JobRun[]) {
+  const groups = new Map<string, JobRun[]>();
+  runs.forEach((run) => {
+    const key = run.backfillId ? `backfill:${run.backfillId}` : `run:${run.id}`;
+    const group = groups.get(key) ?? [];
+    group.push(run);
+    groups.set(key, group);
+  });
+  return [...groups.values()].flat();
 }
 
 function toNumberCode(value: unknown) {
@@ -760,11 +785,14 @@ function RunTaskGraph({
 
 export default function RunInstances() {
   const { message } = AntApp.useApp();
+  const canManageRuns = getAuthUser()?.roles.includes('DE') ?? false;
   const navigate = useNavigate();
   const { runId: routeRunId } = useParams<{ runId: string }>();
   const [searchParams] = useSearchParams();
   const dagIdFilter = searchParams.get('dagId') || searchParams.get('pipelineId') || '';
+  const backfillIdFilter = searchParams.get('backfill_id') || searchParams.get('backfillId') || '';
   const [runs, setRuns] = useState<JobRun[]>([]);
+  const [backfillGroup, setBackfillGroup] = useState<Backfill | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
   const [page, setPage] = useState(0);
@@ -780,9 +808,18 @@ export default function RunInstances() {
   const loadRuns = (nextPage = page, nextSize = pageSize, options?: { silent?: boolean }) => {
     if (!options?.silent) setLoading(true);
     setError(null);
-    const request = dagIdFilter
-      ? OrchestrationAPI.listDagRuns(dagIdFilter, nextPage, nextSize)
-      : OrchestrationAPI.listRuns(nextPage, nextSize);
+    const request = backfillIdFilter
+      ? Promise.all([
+          BackfillAPI.get(backfillIdFilter),
+          BackfillAPI.listRuns(backfillIdFilter, nextPage, nextSize),
+        ]).then(([backfill, result]) => {
+          setBackfillGroup(backfill);
+          return result;
+        })
+      : dagIdFilter
+        ? OrchestrationAPI.listDagRuns(dagIdFilter, nextPage, nextSize)
+        : OrchestrationAPI.listRuns(nextPage, nextSize);
+    if (!backfillIdFilter) setBackfillGroup(null);
     request
       .then((result) => {
         setRuns(result.content || []);
@@ -807,11 +844,15 @@ export default function RunInstances() {
       });
   };
 
+  const requestRunDetail = (runId: string) => backfillIdFilter
+    ? BackfillAPI.getRun(backfillIdFilter, runId)
+    : OrchestrationAPI.getRun(runId);
+
   const loadRunDetail = (options?: { silent?: boolean }) => {
     if (!routeRunId) return;
     if (!options?.silent) setDetailLoading(true);
     setDetailError(null);
-    OrchestrationAPI.getRun(routeRunId)
+    requestRunDetail(routeRunId)
       .then(setDetailRun)
       .catch((e) => {
         const nextError = toUiError(e, '运行详情加载失败');
@@ -828,32 +869,36 @@ export default function RunInstances() {
   useEffect(() => {
     if (routeRunId) return;
     loadRuns(0, pageSize);
-  }, [dagIdFilter, routeRunId]);
+  }, [backfillIdFilter, dagIdFilter, routeRunId]);
 
   useEffect(() => {
     if (!routeRunId) return;
     loadRunDetail();
-  }, [routeRunId]);
+  }, [backfillIdFilter, routeRunId]);
 
   const visibleRuns = useMemo(
-    () => (dagIdFilter ? runs.filter((run) => run.dagId === dagIdFilter) : runs),
-    [dagIdFilter, runs],
+    () => groupRunsByBackfill(runs.filter((run) => (
+      (!dagIdFilter || run.dagId === dagIdFilter)
+      && (!backfillIdFilter || run.backfillId === backfillIdFilter)
+    ))),
+    [backfillIdFilter, dagIdFilter, runs],
   );
   const hasNonTerminalVisibleRun = visibleRuns.some((run) => !isRunTerminal(run.status));
+  const hasActiveBackfill = Boolean(backfillGroup && !isBackfillTerminal(backfillGroup.status));
   const detailRunIsActive = Boolean(detailRun && !isRunTerminal(detailRun.status));
 
   useEffect(() => {
-    if (routeRunId || !hasNonTerminalVisibleRun) return undefined;
+    if (routeRunId || (!hasNonTerminalVisibleRun && !hasActiveBackfill)) return undefined;
     const timer = window.setInterval(() => {
       loadRuns(page, pageSize, { silent: true });
     }, RUN_LIST_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [routeRunId, hasNonTerminalVisibleRun, page, pageSize, dagIdFilter]);
+  }, [routeRunId, hasNonTerminalVisibleRun, hasActiveBackfill, page, pageSize, dagIdFilter, backfillIdFilter]);
 
   useEffect(() => {
     if (!routeRunId || !detailRunIsActive) return undefined;
     const timer = window.setInterval(() => {
-      OrchestrationAPI.getRun(routeRunId)
+      requestRunDetail(routeRunId)
         .then((nextRun) => {
           const reachedTerminal = detailRun && !isRunTerminal(detailRun.status) && isRunTerminal(nextRun.status);
           setDetailRun(nextRun);
@@ -867,7 +912,7 @@ export default function RunInstances() {
         .catch((e) => setDetailError(toUiError(e, '运行详情刷新失败')));
     }, RUN_DETAIL_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [routeRunId, detailRunIsActive]);
+  }, [backfillIdFilter, routeRunId, detailRunIsActive]);
 
   const handleCancelRun = async () => {
     if (!routeRunId || !detailRun) return;
@@ -901,7 +946,29 @@ export default function RunInstances() {
     success: visibleRuns.filter((r) => r.status === 'SUCCESS' || r.status === 'SUCCEEDED').length,
     failed: visibleRuns.filter((r) => r.status === 'FAILED').length,
     cron: visibleRuns.filter((r) => r.triggerType === 'CRON').length,
+    backfills: new Set(visibleRuns.flatMap((run) => run.backfillId ? [run.backfillId] : [])).size,
   }), [visibleRuns]);
+
+  const backfillRowSpans = useMemo(() => {
+    const spans = new Map<string, number>();
+    let index = 0;
+    while (index < visibleRuns.length) {
+      const run = visibleRuns[index];
+      if (!run.backfillId) {
+        spans.set(run.id, 1);
+        index += 1;
+        continue;
+      }
+      let end = index + 1;
+      while (end < visibleRuns.length && visibleRuns[end].backfillId === run.backfillId) end += 1;
+      spans.set(run.id, end - index);
+      for (let hiddenIndex = index + 1; hiddenIndex < end; hiddenIndex += 1) {
+        spans.set(visibleRuns[hiddenIndex].id, 0);
+      }
+      index = end;
+    }
+    return spans;
+  }, [visibleRuns]);
 
   if (routeRunId) {
     return (
@@ -911,19 +978,27 @@ export default function RunInstances() {
           title="运行详情"
           subtitle={<span className="ol-chip">编排 · 运行实例</span>}
           description={detailRun ? `${detailRun.dagName || detailRun.dagId} 的单次运行观测` : '查看单次运行的概览、任务拓扑和节点状态'}
-          meta={detailRun ? [
+        meta={detailRun ? [
             { label: '状态', value: detailRun.status },
             { label: '触发方式', value: detailRun.triggerType },
+            ...(detailRun.backfillId ? [{ label: '回填批次', value: shortId(detailRun.backfillId) }] : []),
             { label: '触发人', value: triggerActorName(detailRun) },
             { label: '耗时', value: formatDuration(detailRun) },
           ] : []}
           actions={(
             <Space size={8} wrap>
-              <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/orchestration/runs')}>返回列表</Button>
+              <Button
+                icon={<ArrowLeftOutlined />}
+                onClick={() => navigate(backfillIdFilter
+                  ? `/orchestration/runs?backfill_id=${encodeURIComponent(backfillIdFilter)}`
+                  : '/orchestration/runs')}
+              >
+                返回列表
+              </Button>
               {detailRun?.dagId && (
                 <Button onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}`)}>打开流水线</Button>
               )}
-              {detailRun && !isRunTerminal(detailRun.status) && (
+              {canManageRuns && detailRun && !isRunTerminal(detailRun.status) && (
                 <Popconfirm
                   title="取消运行"
                   description="确认取消当前运行？"
@@ -976,6 +1051,19 @@ export default function RunInstances() {
                 <Descriptions.Item label="Dagster Job">{detailRun.dagsterJob || '-'}</Descriptions.Item>
                 <Descriptions.Item label="触发方式">{detailRun.triggerType}</Descriptions.Item>
                 <Descriptions.Item label="状态"><StatusBadge status={detailRun.status} /></Descriptions.Item>
+                {detailRun.backfillId && (
+                  <Descriptions.Item label="回填批次">
+                    <a
+                      className="ol-link"
+                      onClick={() => navigate(`/orchestration/pipelines/${detailRun.dagId}/backfills/${detailRun.backfillId}`)}
+                    >
+                      {detailRun.backfillId}
+                    </a>
+                  </Descriptions.Item>
+                )}
+                {detailRun.logicalDate && (
+                  <Descriptions.Item label="业务日期">{formatBusinessDate(detailRun.logicalDate)}</Descriptions.Item>
+                )}
                 <Descriptions.Item label="触发人">
                   <span title={triggerActorTitle(detailRun)}>{triggerActorName(detailRun)}</span>
                 </Descriptions.Item>
@@ -992,6 +1080,7 @@ export default function RunInstances() {
                   runStatus={detailRun.status}
                   refreshVersion={taskRefreshVersion}
                   onRunChanged={loadRunDetail}
+                  allowPrivilegedActions={canManageRuns}
                 />
               </div>
             </SectionCard>
@@ -1005,24 +1094,33 @@ export default function RunInstances() {
     <div className="ol-page">
       <PageHeader
         icon={<HistoryOutlined />}
-        title="运行实例"
+        title={backfillIdFilter ? '回填子 Run' : '运行实例'}
         subtitle={<span className="ol-chip">编排 · L4</span>}
-        description={dagIdFilter ? '查看当前流水线运行历史，含触发方式、耗时、责任人' : '查看所有流水线运行历史，含触发方式、耗时、责任人'}
+        description={backfillIdFilter
+          ? `按回填批次 ${backfillIdFilter} 分组展示已派发的子 Run`
+          : dagIdFilter
+            ? '查看当前流水线运行历史，含触发方式、耗时、责任人'
+            : '查看所有流水线运行历史，含触发方式、耗时、责任人'}
         meta={[
-          { label: dagIdFilter ? '当前流水线' : '当前页', value: counts.total },
-          { label: '成功', value: counts.success },
-          { label: '失败', value: counts.failed },
-          { label: '调度触发', value: counts.cron },
+          { label: backfillIdFilter ? '已派发' : dagIdFilter ? '当前流水线' : '当前页', value: backfillIdFilter ? total : counts.total },
+          { label: '成功', value: backfillGroup?.succeeded ?? counts.success },
+          { label: '失败', value: backfillGroup?.failed ?? counts.failed },
+          { label: backfillIdFilter ? '批次状态' : '回填批次', value: backfillGroup?.status ?? counts.backfills },
         ]}
         actions={(
           <Space size={8} wrap>
-            {dagIdFilter && <Button onClick={() => navigate('/orchestration/runs')}>查看全部</Button>}
+            {backfillIdFilter && backfillGroup && (
+              <Button onClick={() => navigate(`/orchestration/pipelines/${backfillGroup.dag_id}/backfills/${backfillGroup.id}`)}>
+                回填进度
+              </Button>
+            )}
+            {(dagIdFilter || backfillIdFilter) && <Button onClick={() => navigate('/orchestration/runs')}>查看全部</Button>}
             <Button icon={<ReloadOutlined />} onClick={() => loadRuns()} loading={loading}>刷新</Button>
           </Space>
         )}
       />
 
-      <SectionCard title="运行历史" icon={<HistoryOutlined />} flatBody>
+      <SectionCard title={backfillIdFilter ? '批次子 Run' : '运行历史'} icon={<HistoryOutlined />} flatBody>
         {loading && visibleRuns.length === 0 ? (
           <StateView state="loading" rows={6} />
         ) : error ? (
@@ -1045,6 +1143,7 @@ export default function RunInstances() {
                 run={run}
                 onRunChanged={() => loadRuns()}
                 onCollapse={() => setExpandedRunIds((keys) => keys.filter((key) => key !== run.id))}
+                allowPrivilegedActions={canManageRuns}
               />
             ),
             rowExpandable: (record) => Boolean(record.dagId),
@@ -1053,12 +1152,13 @@ export default function RunInstances() {
             emptyText: (
               <StateView
                 state="empty"
-                title="暂无运行记录"
-                description="触发流水线后，运行历史将自动出现"
+                title={backfillIdFilter ? '尚未派发子 Run' : '暂无运行记录'}
+                description={backfillIdFilter ? '回填窗口仍在队列中，派发后将在此出现' : '触发流水线后，运行历史将自动出现'}
               />
             ),
           }}
           size="middle"
+          scroll={{ x: 1480 }}
           pagination={{
             current: page + 1,
             pageSize,
@@ -1087,6 +1187,27 @@ export default function RunInstances() {
                 {r.dagsterJob && <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{r.dagsterJob}</div>}
               </div>
             ) },
+            {
+              title: 'Backfill',
+              width: 150,
+              onCell: (r: JobRun) => ({ rowSpan: backfillRowSpans.get(r.id) ?? 1 }),
+              render: (_: unknown, r: JobRun) => r.backfillId ? (
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  onClick={() => navigate(`/orchestration/runs?backfill_id=${encodeURIComponent(r.backfillId!)}`)}
+                >
+                  <Text code>{shortId(r.backfillId)}</Text>
+                </Button>
+              ) : <Text type="secondary">-</Text>,
+            },
+            {
+              title: '业务日期',
+              dataIndex: 'logicalDate',
+              width: 170,
+              render: (value?: string) => <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>{formatBusinessDate(value)}</span>,
+            },
             { title: '触发方式', dataIndex: 'triggerType', width: 110, render: (t: string) => (
               <span style={{
                 padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
@@ -1103,7 +1224,13 @@ export default function RunInstances() {
             ) },
             { title: '操作', width: 190, render: (_: unknown, r: JobRun) => (
               <Space>
-                <Button size="small" type="link" onClick={() => navigate(`/orchestration/runs/${r.id}`)}>查看详情</Button>
+                <Button
+                  size="small"
+                  type="link"
+                  onClick={() => navigate(`/orchestration/runs/${r.id}${r.backfillId ? `?backfill_id=${encodeURIComponent(r.backfillId)}` : ''}`)}
+                >
+                  查看详情
+                </Button>
                 <Button size="small" type="link" onClick={() => navigate(`/orchestration/pipelines/${r.dagId}`)}>打开流水线</Button>
               </Space>
             ) },
@@ -1115,7 +1242,17 @@ export default function RunInstances() {
   );
 }
 
-function ExpandedTaskRunsPanel({ run, onCollapse, onRunChanged }: { run: JobRun; onCollapse: () => void; onRunChanged?: () => void }) {
+function ExpandedTaskRunsPanel({
+  run,
+  onCollapse,
+  onRunChanged,
+  allowPrivilegedActions,
+}: {
+  run: JobRun;
+  onCollapse: () => void;
+  onRunChanged?: () => void;
+  allowPrivilegedActions: boolean;
+}) {
   return (
     <div
       className="orchestration-run-expanded-panel"
@@ -1163,7 +1300,13 @@ function ExpandedTaskRunsPanel({ run, onCollapse, onRunChanged }: { run: JobRun;
           padding: 12,
         }}
       >
-        <TaskRunsPanel runId={run.id} dagId={run.dagId} runStatus={run.status} onRunChanged={onRunChanged} />
+        <TaskRunsPanel
+          runId={run.id}
+          dagId={run.dagId}
+          runStatus={run.status}
+          onRunChanged={onRunChanged}
+          allowPrivilegedActions={allowPrivilegedActions}
+        />
       </div>
     </div>
   );
@@ -1364,6 +1507,7 @@ function TaskRunDrawer({
   activeTab,
   onTabChange,
   onClose,
+  allowLogs,
 }: {
   row: TaskRunDisplayRow | null;
   dagId: string;
@@ -1372,6 +1516,7 @@ function TaskRunDrawer({
   activeTab: string;
   onTabChange: (key: string) => void;
   onClose: () => void;
+  allowLogs: boolean;
 }) {
   return (
     <Drawer
@@ -1392,7 +1537,7 @@ function TaskRunDrawer({
               label: '概览',
               children: <TaskRunOverviewPanel row={row} assetByFqn={assetByFqn} />,
             },
-            {
+            ...(allowLogs ? [{
               key: 'log',
               label: (
                 <span>
@@ -1407,7 +1552,7 @@ function TaskRunDrawer({
                   enabled={activeTab === 'log'}
                 />
               ),
-            },
+            }] : []),
           ]}
         />
       )}
@@ -1425,12 +1570,14 @@ function TaskRunsPanel({
   runStatus,
   refreshVersion,
   onRunChanged,
+  allowPrivilegedActions,
 }: {
   runId: string;
   dagId: string;
   runStatus?: string;
   refreshVersion?: number;
   onRunChanged?: () => void;
+  allowPrivilegedActions: boolean;
 }) {
   const { message } = AntApp.useApp();
   const [taskRuns, setTaskRuns] = useState<TaskRun[] | null>(null);
@@ -1463,6 +1610,7 @@ function TaskRunsPanel({
   }, [dagId, hasLoadedTaskRuns, runId]);
 
   const handleRerunTask = async (row: TaskRunDisplayRow, mode: TaskRerunMode) => {
+    if (!allowPrivilegedActions) return;
     if (!canRerunTaskForMode(row, mode)) {
       message.warning(mode === 'DOWNSTREAM' ? '仅失败节点或存在失败下游的已修复节点可从失败续跑' : '仅失败或上游失败节点可重跑');
       return;
@@ -1782,15 +1930,15 @@ function TaskRunsPanel({
                 >
                   详情
                 </Button>
-                <Button
+                {allowPrivilegedActions && <Button
                   size="small"
                   type="link"
                   icon={<FileTextOutlined />}
                   onClick={() => openTaskDrawer(row, 'log')}
                 >
                   查看日志
-                </Button>
-                <Dropdown
+                </Button>}
+                {allowPrivilegedActions && <Dropdown
                   trigger={['click']}
                   disabled={row.synthetic || (!canRerunSingle && !canRerunDownstream) || Boolean(rerunningTask)}
                   menu={{
@@ -1820,7 +1968,7 @@ function TaskRunsPanel({
                       重跑
                       <DownOutlined />
                     </Button>
-                </Dropdown>
+                </Dropdown>}
               </Space>
             );
           },
@@ -1835,6 +1983,7 @@ function TaskRunsPanel({
         activeTab={drawerTab}
         onTabChange={setDrawerTab}
         onClose={() => setSelectedRow(null)}
+        allowLogs={allowPrivilegedActions}
       />
     </div>
   );

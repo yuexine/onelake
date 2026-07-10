@@ -12,12 +12,15 @@ import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.BackfillDTO;
 import com.onelake.orchestration.dto.BackfillRunDTO;
+import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.repository.BackfillRepository;
 import com.onelake.orchestration.repository.BackfillRunRepository;
 import com.onelake.orchestration.repository.DagRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -110,6 +113,22 @@ public class BackfillService {
                 .filter(backfill -> tenantId.equals(backfill.getTenantId()))
                 .map(backfill -> toDTO(backfill, List.of()))
                 .toList();
+    }
+
+    @Transactional
+    public Page<JobRunDTO> listJobRuns(UUID id, Pageable pageable) {
+        UUID tenantId = requireTenant();
+        Backfill backfill = backfillRepo.findByIdAndTenantId(id, tenantId)
+                .orElseThrow(() -> new BizException(40400, "回填批次不存在"));
+        return orchestrationService.listBackfillRuns(backfill.getDagId(), id, pageable);
+    }
+
+    @Transactional
+    public JobRunDTO getJobRun(UUID id, UUID runId) {
+        UUID tenantId = requireTenant();
+        Backfill backfill = backfillRepo.findByIdAndTenantId(id, tenantId)
+                .orElseThrow(() -> new BizException(40400, "回填批次不存在"));
+        return orchestrationService.getBackfillRun(backfill.getDagId(), id, runId);
     }
 
     @Transactional(readOnly = true)

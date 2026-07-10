@@ -3,18 +3,22 @@ package com.onelake.orchestration.api;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.orchestration.dto.BackfillDTO;
 import com.onelake.orchestration.dto.CreateBackfillRequest;
+import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.service.BackfillDispatcher;
 import com.onelake.orchestration.service.BackfillService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -68,6 +72,30 @@ public class BackfillController {
     @PreAuthorize("hasAnyRole('DE','OPS')")
     public ApiResponse<List<BackfillDTO>> list(@PathVariable UUID dagId) {
         return ApiResponse.ok(backfillService.listBackfills(dagId));
+    }
+
+    @Operation(
+        summary = "分页查询回填子运行",
+        description = "用途：按 backfillId 分页返回真实 JobRun 元数据，供进度页和运行实例页展示。"
+    )
+    @GetMapping("/backfills/{id}/runs")
+    @PreAuthorize("hasAnyRole('DE','OPS')")
+    public ApiResponse<Page<JobRunDTO>> listRuns(@PathVariable UUID id,
+                                                  @RequestParam(defaultValue = "0") int page,
+                                                  @RequestParam(defaultValue = "20") int size) {
+        int pageNumber = Math.max(page, 0);
+        int pageSize = Math.min(Math.max(size, 1), 100);
+        return ApiResponse.ok(backfillService.listJobRuns(id, PageRequest.of(pageNumber, pageSize)));
+    }
+
+    @Operation(
+        summary = "获取回填子运行详情",
+        description = "用途：校验回填批次归属后，按 runId 返回真实 JobRun 元数据。"
+    )
+    @GetMapping("/backfills/{id}/runs/{runId}")
+    @PreAuthorize("hasAnyRole('DE','OPS')")
+    public ApiResponse<JobRunDTO> getRun(@PathVariable UUID id, @PathVariable UUID runId) {
+        return ApiResponse.ok(backfillService.getJobRun(id, runId));
     }
 
     @Operation(

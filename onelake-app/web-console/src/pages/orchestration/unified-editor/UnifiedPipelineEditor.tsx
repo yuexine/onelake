@@ -37,6 +37,7 @@ import {
 import {
   CheckCircleOutlined,
   CheckOutlined,
+  CalendarOutlined,
   CloseCircleOutlined,
   CloseOutlined,
   DeleteOutlined,
@@ -55,6 +56,7 @@ import { InspectorRouter, type InspectorProps } from './InspectorRouter';
 import type { TaskTypeMeta } from './taskTypes';
 import { PipelineAPI } from '../../../api';
 import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
+import { BackfillWizard } from './BackfillWizard';
 
 const { Text } = Typography;
 
@@ -422,6 +424,7 @@ export default function UnifiedPipelineEditor() {
   const [validationActiveStep, setValidationActiveStep] = useState(0);
   const [validationResult, setValidationResult] = useState<PipelineValidationResult | undefined>(undefined);
   const [validationRequestError, setValidationRequestError] = useState<string | undefined>(undefined);
+  const [backfillOpen, setBackfillOpen] = useState(false);
 
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
     setCreateMeta(meta);
@@ -833,6 +836,11 @@ export default function UnifiedPipelineEditor() {
             >
               校验
             </Button>
+            {['PUBLISHED', 'VALIDATED'].includes(editor.pipeline.status ?? '') && (
+              <Button icon={<CalendarOutlined />} onClick={() => setBackfillOpen(true)}>
+                回填
+              </Button>
+            )}
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -857,6 +865,17 @@ export default function UnifiedPipelineEditor() {
         requestError={validationRequestError}
         onClose={() => setValidationOpen(false)}
         onValidate={runValidation}
+      />
+
+      <BackfillWizard
+        dagId={dagId}
+        open={backfillOpen}
+        onCancel={() => setBackfillOpen(false)}
+        onCreated={(backfill) => {
+          setBackfillOpen(false);
+          message.success('回填已创建');
+          navigate(`/orchestration/pipelines/${dagId}/backfills/${backfill.id}`);
+        }}
       />
 
       {/* P6-A: live run banner */}

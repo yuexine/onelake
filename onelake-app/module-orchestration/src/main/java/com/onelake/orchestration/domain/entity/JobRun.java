@@ -50,6 +50,16 @@ public class JobRun {
     private Instant dataIntervalEnd;
     private UUID backfillId;
 
+    /** M2 运行策略；默认值与 V16 迁移保持一致。 */
+    @Column(nullable = false, length = 16)
+    private String runMode = "NORMAL";
+
+    @Column(nullable = false)
+    private Boolean slaMissed = false;
+
+    @Column(nullable = false)
+    private Integer priority = 5;
+
     private Instant startedAt;
     private Instant finishedAt;
     private UUID triggeredBy;

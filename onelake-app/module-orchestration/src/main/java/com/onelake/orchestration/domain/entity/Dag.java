@@ -53,5 +53,31 @@ public class Dag {
     private String computeProfile;   // 例如 spark-small。
     private String partitionGrain = "DAY";
 
+    /** M2 调度策略；默认值与 V16 迁移保持一致，保证存量流水线行为不变。 */
+    @Column(nullable = false, length = 64)
+    private String timezone = "Asia/Shanghai";
+
+    @Column(nullable = false)
+    private Boolean catchup = false;
+
+    @Column(nullable = false)
+    private Integer maxActiveRuns = 1;
+
+    @Column(nullable = false)
+    private Integer priority = 5;
+
+    private Integer slaMinutes;
+    private Integer timeoutMinutes;
+
+    @Column(nullable = false, length = 16)
+    private String scheduleMode = "NORMAL";
+
+    @Column(nullable = false, length = 16)
+    private String misfirePolicy = "FIRE_ONCE";
+
+    private UUID calendarId;
+    private Instant scheduleStart;
+    private Instant scheduleEnd;
+
     private Instant createdAt = Instant.now();
 }

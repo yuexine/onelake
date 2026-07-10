@@ -40,6 +40,9 @@ public class PipelineLogStorage {
         this.bucket = bucket;
     }
 
+    /**
+     * 打开日志对象流。调用方负责关闭返回的 InputStream，组件不把完整日志载入内存。
+     */
     public InputStream open(String objectKey) {
         try {
             return client.getObject(GetObjectArgs.builder()
@@ -52,6 +55,7 @@ public class PipelineLogStorage {
         }
     }
 
+    /** 查询日志对象长度，供流式 HTTP 响应设置 Content-Length。 */
     public long size(String objectKey) {
         try {
             return client.statObject(StatObjectArgs.builder()

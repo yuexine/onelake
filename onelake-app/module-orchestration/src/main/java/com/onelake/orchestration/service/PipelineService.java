@@ -54,6 +54,7 @@ import java.util.UUID;
 @Slf4j
 public class PipelineService {
 
+    /** 统一流水线 DAG 的控制面引擎标识。 */
     private static final String PIPELINE_ENGINE = "SPARK";
     private static final String SPARK_SQL_ENGINE = "SPARK_SQL";
     private static final String PYSPARK_ENGINE = "PYSPARK";
@@ -74,12 +75,14 @@ public class PipelineService {
 
     // ---------- 流水线（dag） ----------
 
+    /** 在当前租户边界内读取流水线。 */
     @Transactional
     public Dag getPipeline(UUID dagId) {
         return dagRepo.findByIdAndTenantId(dagId, requireTenant())
                 .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
     }
 
+    /** 创建带默认 Spark 资源契约的流水线草稿。 */
     @Transactional
     public Dag createPipeline(String name, String pipelineKind) {
         UUID tenantId = requireTenant();
@@ -146,6 +149,7 @@ public class PipelineService {
         return dag;
     }
 
+    /** 发布流水线版本事件，携带目标资产集合供下游目录/血缘消费者处理。 */
     private void emitPipelinePublishedEvent(Dag dag) {
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) {
@@ -174,6 +178,7 @@ public class PipelineService {
 
     // ---------- 节点 ----------
 
+    /** 按稳定创建顺序返回流水线节点。 */
     @Transactional
     public List<PipelineTaskDTO> listTasks(UUID dagId) {
         getPipeline(dagId); // 先通过流水线查询完成租户隔离。
@@ -182,6 +187,7 @@ public class PipelineService {
                 .toList();
     }
 
+    /** 创建节点并校验 taskKey 唯一性、类型和执行引擎契约。 */
     @Transactional
     public PipelineTaskDTO createTask(UUID dagId, PipelineTaskRequest req) {
         Dag dag = getPipeline(dagId);
@@ -207,6 +213,7 @@ public class PipelineService {
         return PipelineTaskDTO.of(t);
     }
 
+    /** 更新节点可编辑字段，并重置编译状态等待重新校验。 */
     @Transactional
     public PipelineTaskDTO updateTask(UUID dagId, String taskKey, PipelineTaskRequest req) {
         getPipeline(dagId);
@@ -230,6 +237,7 @@ public class PipelineService {
         return PipelineTaskDTO.of(t);
     }
 
+    /** 删除节点及所有入边/出边，避免图中残留悬空引用。 */
     @Transactional
     public void deleteTask(UUID dagId, String taskKey) {
         getPipeline(dagId);
@@ -244,6 +252,7 @@ public class PipelineService {
 
     // ---------- 边 ----------
 
+    /** 返回流水线全部数据流/执行依赖边。 */
     @Transactional
     public List<PipelineTaskEdgeDTO> listEdges(UUID dagId) {
         getPipeline(dagId);
@@ -252,6 +261,7 @@ public class PipelineService {
                 .toList();
     }
 
+    /** 创建边并补齐端口、输入别名、触发和新鲜度默认策略。 */
     @Transactional
     public PipelineTaskEdgeDTO createEdge(UUID dagId, PipelineTaskEdgeRequest req) {
         getPipeline(dagId);
@@ -290,6 +300,7 @@ public class PipelineService {
         return "LATEST";
     }
 
+    /** 删除 sourceKey -> targetKey 的确定边；不存在时幂等返回。 */
     @Transactional
     public void deleteEdge(UUID dagId, String sourceKey, String targetKey) {
         getPipeline(dagId);
@@ -336,6 +347,7 @@ public class PipelineService {
 
     // ---------- 节点运行 ----------
 
+    /** 校验 run 属于当前租户流水线后返回节点运行观测信息。 */
     @Transactional
     public List<TaskRunDTO> listTaskRuns(UUID dagId, UUID runId) {
         getPipeline(dagId);
@@ -476,6 +488,7 @@ public class PipelineService {
         return t;
     }
 
+    /** 校验节点请求的必填字段、支持类型和 Spark-only 引擎边界。 */
     private void validateTaskRequest(PipelineTaskRequest req, boolean forCreate) {
         if (forCreate && !StringUtils.hasText(req.taskKey())) {
             throw new BizException(40020, "taskKey 不能为空");

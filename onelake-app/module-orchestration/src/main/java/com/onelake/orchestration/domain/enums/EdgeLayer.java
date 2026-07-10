@@ -10,6 +10,8 @@ package com.onelake.orchestration.domain.enums;
  * </ul>
  */
 public enum EdgeLayer {
+    /** 同一流水线内部的数据流/执行依赖。 */
     PIPELINE,
+    /** 预留的跨运行时或跨引擎边界。 */
     CROSS_ENGINE
 }

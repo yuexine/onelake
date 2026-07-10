@@ -19,11 +19,19 @@ import static com.onelake.orchestration.domain.enums.OperatorCategory.QUALITY_GA
 import static com.onelake.orchestration.domain.enums.OperatorCategory.STANDARD;
 import static com.onelake.orchestration.domain.enums.OperatorCategory.TRANSFORM;
 
+/**
+ * 平台内置算子 Manifest 的代码目录。
+ *
+ * <p>目录以紧凑 {@link BuiltinSpec} 描述稳定元数据，再统一生成 OperatorManifestDTO，
+ * 避免每个算子重复编写端口、参数 Schema、血缘、安全规则、资源提示和示例。返回值由
+ * OperatorSeeder 在应用启动后幂等写入算子表。
+ */
 public final class BuiltInOperatorCatalog {
 
     private BuiltInOperatorCatalog() {
     }
 
+    /** 生成完整 Manifest 所需的最小内置算子规格。 */
     private record BuiltinSpec(
         String ref,
         OperatorCategory category,
@@ -36,6 +44,7 @@ public final class BuiltInOperatorCatalog {
     ) {
     }
 
+    /** 固定顺序保证种子写入和测试结果可重复。 */
     private static final List<BuiltinSpec> SPECS = List.of(
         spec("input.ods_table", INPUT, "ODS 表输入", "读取 ODS 分层表作为算子图起点", "DERIVE", "SELECT_EXPR", "{{ source('ods', sourceFqn) }}", "sourceFqn"),
         spec("input.dwd_table", INPUT, "DWD 表输入", "读取已有 DWD 表作为输入", "DERIVE", "SELECT_EXPR", "{{ dwd(modelRef) }}", "modelRef"),
@@ -113,10 +122,12 @@ public final class BuiltInOperatorCatalog {
         spec("gate.custom_sql", QUALITY_GATE, "自定义 SQL 门禁", "执行只读断言 SQL", "ASSERT", "QUALITY_ASSERT", "{{ assertionSql }}", "assertionSql")
     );
 
+    /** 返回所有内置算子的完整不可变 Manifest 列表。 */
     public static List<OperatorManifestDTO> manifests() {
         return SPECS.stream().map(BuiltInOperatorCatalog::manifest).toList();
     }
 
+    /** 返回目录内置算子数量，供启动日志和完整性测试使用。 */
     public static int size() {
         return SPECS.size();
     }
@@ -128,6 +139,7 @@ public final class BuiltInOperatorCatalog {
             templateKind, sql, List.of(params));
     }
 
+    /** 把紧凑规格展开为对外统一 Manifest 契约。 */
     private static OperatorManifestDTO manifest(BuiltinSpec spec) {
         Map<String, Object> outputSchema = new LinkedHashMap<>();
         outputSchema.put("mode", spec.outputMode());
@@ -181,6 +193,7 @@ public final class BuiltInOperatorCatalog {
         );
     }
 
+    /** 按算子分类生成输入端口：INPUT 无输入、JOIN 多输入，其余为单输入。 */
     private static List<Map<String, Object>> inputPorts(BuiltinSpec spec) {
         if (spec.category() == INPUT) {
             return List.of();
@@ -202,6 +215,7 @@ public final class BuiltInOperatorCatalog {
         return port;
     }
 
+    /** 根据参数名约定生成 JSON-Schema 子集，供注册校验和前端参数表单复用。 */
     private static Map<String, Object> paramsSchema(List<String> params) {
         Map<String, Object> schema = new LinkedHashMap<>();
         Map<String, Object> properties = new LinkedHashMap<>();
@@ -232,6 +246,7 @@ public final class BuiltInOperatorCatalog {
         return schema;
     }
 
+    /** 为内置算子文档和编辑器预览生成确定性示例参数。 */
     private static Map<String, Object> exampleParams(List<String> params) {
         Map<String, Object> values = new LinkedHashMap<>();
         for (String param : params) {
@@ -293,6 +308,7 @@ public final class BuiltInOperatorCatalog {
         };
     }
 
+    /** 将安全类算子映射为编译期安全标签传播策略。 */
     private static String securityEffect(OperatorCategory category) {
         if (category == MASK) {
             return "DOWNGRADE_ALLOWED";

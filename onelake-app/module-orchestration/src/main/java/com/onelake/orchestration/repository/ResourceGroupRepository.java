@@ -12,11 +12,15 @@ import java.util.UUID;
  */
 public interface ResourceGroupRepository extends JpaRepository<ResourceGroup, UUID> {
 
+    /** 查询平台级默认资源组。 */
     List<ResourceGroup> findByTenantIdIsNullOrderByCodeAsc();
 
+    /** 查询租户私有资源组。 */
     List<ResourceGroup> findByTenantIdOrderByCodeAsc(UUID tenantId);
 
+    /** 按编码查询平台级默认组。 */
     Optional<ResourceGroup> findByTenantIdIsNullAndCode(String code);
 
+    /** 按编码查询租户私有组。 */
     Optional<ResourceGroup> findByTenantIdAndCode(UUID tenantId, String code);
 }

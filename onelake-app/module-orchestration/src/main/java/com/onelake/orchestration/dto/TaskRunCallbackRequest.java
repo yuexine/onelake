@@ -12,6 +12,17 @@ import java.time.Instant;
  * Dagster 节点执行器回调的请求体。
  *
  * <p>该对象只承载节点状态、运行指标和日志/产物位置；租户身份由 runId 反查得到。
+ *
+ * @param status 节点目标状态
+ * @param startedAt 节点开始时间
+ * @param finishedAt 节点终态时间
+ * @param errorMsg 错误摘要
+ * @param artifactPath 输出产物位置
+ * @param rowsWritten 写入行数
+ * @param scanBytes 扫描字节数
+ * @param logRef 租户/run 前缀下的对象存储日志键
+ * @param attempt 跨 Dagster run 累计 attempt
+ * @param dagsterStepKey Dagster step key，GRAPH 模式应等于 taskKey
  */
 public record TaskRunCallbackRequest(
         @NotNull TaskRunStatus status,

@@ -17,6 +17,12 @@ public interface SchedulerLockRepository extends JpaRepository<SchedulerLock, St
     /**
      * 原子创建锁，或在已有锁已过期时接管它。
      *
+     * <p>{@code ON CONFLICT ... WHERE expires_at <= now()} 将“检查是否过期”和“写入新
+     * holder”合并为一条数据库语句，避免多副本先查后写的竞态。
+     *
+     * @param lockKey 业务锁名
+     * @param holder 当前调度实例生成的唯一持有令牌
+     * @param expiresAt 本次租约到期时间
      * @return 1 表示已获得锁；0 表示锁仍由其他实例持有
      */
     @Transactional
@@ -37,6 +43,8 @@ public interface SchedulerLockRepository extends JpaRepository<SchedulerLock, St
     /**
      * 仅当前持有者可以释放锁，避免旧实例释放后来接管的锁。
      *
+     * @param lockKey 业务锁名
+     * @param holder acquire 成功时使用的同一持有令牌
      * @return 1 表示已释放；0 表示锁不存在或持有者不匹配
      */
     @Transactional

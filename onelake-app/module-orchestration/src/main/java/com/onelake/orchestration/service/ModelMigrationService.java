@@ -59,6 +59,9 @@ public class ModelMigrationService {
 
     /**
      * 扫描并按需执行迁移。建议先以 {@code dryRun=true} 干跑审计候选清单。
+     *
+     * @param dryRun true 仅生成计划，false 在同一事务中创建流水线实体
+     * @return 候选、计划、创建、跳过和错误的完整迁移报告
      */
     @Transactional
     public ModelMigrationResult migrate(boolean dryRun) {
@@ -129,6 +132,7 @@ public class ModelMigrationService {
                 dryRun, models.size(), planned, createdIds, skippedIds, errors);
     }
 
+    /** 将单个历史模型转换为 SYNC_REF -> SPARK_SQL 的最小可运行流水线。 */
     private UUID createPipelineForModel(UUID tenantId, UUID modelId, String modelName,
                                         String modelNameHint, String sourceFqn, String targetFqn) {
         // 1. 创建流水线主体。历史模型迁移出的流水线默认保持 VALIDATED，后续可直接纳入发布/运行链路。

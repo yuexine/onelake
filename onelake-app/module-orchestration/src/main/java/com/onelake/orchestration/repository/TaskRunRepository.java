@@ -12,13 +12,21 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 节点运行持久化接口。
+ *
+ * <p>除详情查询外，还提供回调状态机和图短路传播所需的悲观锁查询。
+ */
 @Repository
 public interface TaskRunRepository extends JpaRepository<TaskRun, UUID> {
 
+    /** 查询 JobRun 下全部节点运行。 */
     List<TaskRun> findByJobRunId(UUID jobRunId);
 
+    /** 查询 JobRun 下指定状态节点。 */
     List<TaskRun> findByJobRunIdAndStatus(UUID jobRunId, String status);
 
+    /** 用 JobRun + taskKey 定位唯一节点运行。 */
     Optional<TaskRun> findByJobRunIdAndTaskKey(UUID jobRunId, String taskKey);
 
     /**

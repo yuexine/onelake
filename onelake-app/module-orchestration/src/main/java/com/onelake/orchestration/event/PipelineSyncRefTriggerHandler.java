@@ -52,14 +52,23 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
     private final OrchestrationService orchestrationService;
+    /** Handler 无请求级 ObjectMapper 注入需求，使用局部 JSON 解析器读取稳定事件载荷。 */
     private final ObjectMapper objectMapper = new ObjectMapper();
+    /**
+     * 多 SYNC_REF 输入的进程内就绪屏障：dagId -> taskKey -> 最近就绪时间。
+     * 持久化跨批次屏障属于后续演进，本结构用于避免单实例内过早触发。
+     */
     private final Map<UUID, Map<String, Instant>> readinessByDag = new ConcurrentHashMap<>();
 
+    /** 声明本 Handler 只消费集成表落地成功事件。 */
     @Override
     public Set<String> eventTypes() {
         return Set.of(DomainEvents.INTEGRATION_TABLE_LOADED);
     }
 
+    /**
+     * 解析事件租户和目标表，匹配 SYNC_REF 节点并在恢复的租户上下文中尝试触发流水线。
+     */
     @Override
     public void handle(OutboxEvent event) {
         try {
@@ -81,7 +90,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 return;
             }
 
-            // 找出包含匹配 SYNC_REF 节点的流水线。
+            // 先按租户和节点类型缩小集合，再用 targetFqn 精确匹配事件目标表。
             List<PipelineTask> syncRefs = taskRepo.findByTenantIdAndTaskType(
                     tenantId, TaskType.SYNC_REF.name());
             Map<UUID, Set<String>> pipelineReadyTasks = new HashMap<>();
@@ -96,7 +105,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 return;
             }
 
-            // 在租户上下文中逐条触发匹配的流水线。
+            // Outbox 在线程池中执行；触发服务依赖 TenantContext，因此必须显式恢复并还原。
             UUID previousTenant = TenantContext.getTenantId();
             try {
                 TenantContext.setTenantId(tenantId);
@@ -150,6 +159,11 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         }
     }
 
+    /**
+     * 记录本次已就绪 SYNC_REF，并检查其共同下游的所有同步输入是否均已到达。
+     *
+     * <p>单输入目标无需等待；多输入目标只有缺失集合为空才允许触发整条流水线。
+     */
     private boolean markReadyAndCheckBarrier(UUID dagId, Set<String> readyTaskKeys, Instant eventOccurredAt) {
         if (readyTaskKeys == null || readyTaskKeys.isEmpty()) {
             return false;
@@ -203,6 +217,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         return true;
     }
 
+    /** 流水线成功触发后清除本轮屏障，允许下一批输入重新汇合。 */
     private void clearSatisfiedReadiness(UUID dagId) {
         readinessByDag.remove(dagId);
     }

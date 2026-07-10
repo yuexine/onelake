@@ -53,6 +53,7 @@ public class PipelineController {
 
     // ---------- 流水线（dag） ----------
 
+    /** 创建空白或模板类型流水线草稿。 */
     @PostMapping
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Dag> create(@RequestBody Map<String, String> body) {
@@ -61,12 +62,14 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.createPipeline(name, kind));
     }
 
+    /** 在租户边界内读取统一流水线定义。 */
     @GetMapping("/{dagId}")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
     public ApiResponse<Dag> get(@PathVariable UUID dagId) {
         return ApiResponse.ok(pipelineService.getPipeline(dagId));
     }
 
+    /** 执行 DRAFT、VALIDATED、PUBLISHED 生命周期流转。 */
     @PutMapping("/{dagId}/status")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Dag> updateStatus(@PathVariable UUID dagId,
@@ -76,12 +79,14 @@ public class PipelineController {
 
     // ---------- 节点 ----------
 
+    /** 返回画布节点及其最近编译状态。 */
     @GetMapping("/{dagId}/tasks")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
     public ApiResponse<List<PipelineTaskDTO>> listTasks(@PathVariable UUID dagId) {
         return ApiResponse.ok(pipelineService.listTasks(dagId));
     }
 
+    /** 创建一个流水线节点并使已校验/发布版本回到可编辑状态。 */
     @PostMapping("/{dagId}/tasks")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<PipelineTaskDTO> createTask(@PathVariable UUID dagId,
@@ -89,6 +94,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.createTask(dagId, req));
     }
 
+    /** 按稳定 taskKey 更新节点配置。 */
     @PutMapping("/{dagId}/tasks/{taskKey}")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<PipelineTaskDTO> updateTask(@PathVariable UUID dagId,
@@ -97,6 +103,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.updateTask(dagId, taskKey, req));
     }
 
+    /** 删除节点及与其相连的边。 */
     @DeleteMapping("/{dagId}/tasks/{taskKey}")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Void> deleteTask(@PathVariable UUID dagId,
@@ -107,12 +114,14 @@ public class PipelineController {
 
     // ---------- 边 ----------
 
+    /** 返回流水线数据流和执行依赖边。 */
     @GetMapping("/{dagId}/edges")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
     public ApiResponse<List<PipelineTaskEdgeDTO>> listEdges(@PathVariable UUID dagId) {
         return ApiResponse.ok(pipelineService.listEdges(dagId));
     }
 
+    /** 创建边并校验节点、端口、重复连接与环路约束。 */
     @PostMapping("/{dagId}/edges")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<PipelineTaskEdgeDTO> createEdge(@PathVariable UUID dagId,
@@ -120,6 +129,7 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.createEdge(dagId, req));
     }
 
+    /** 用源/目标 taskKey 删除确定边。 */
     @DeleteMapping("/{dagId}/edges")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Void> deleteEdge(@PathVariable UUID dagId,
@@ -131,6 +141,7 @@ public class PipelineController {
 
     // ---------- L1 + L2 校验 ----------
 
+    /** 执行节点级 L1 和图级 L2 校验，并持久化节点编译结果。 */
     @PostMapping("/{dagId}/validate")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<PipelineValidationResult> validate(@PathVariable UUID dagId) {
@@ -139,6 +150,9 @@ public class PipelineController {
 
     // ---------- 触发 ----------
 
+    /**
+     * 手动触发流水线，可选显式业务时间；RunContext 在服务边界完成默认值和区间校验。
+     */
     @PostMapping("/{dagId}/trigger")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<Map<String, UUID>> trigger(@PathVariable UUID dagId,
@@ -161,6 +175,7 @@ public class PipelineController {
         return ApiResponse.ok(Map.of("runId", runId));
     }
 
+    /** 对失败节点执行 SINGLE 或 DOWNSTREAM 图级重跑。 */
     @PostMapping("/{dagId}/runs/{runId}/tasks/{taskKey}/rerun")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<TaskRerunResult> rerunTask(@PathVariable UUID dagId,
@@ -173,6 +188,7 @@ public class PipelineController {
 
     // ---------- ODS→DWD 模板（P3） ----------
 
+    /** 幂等应用 ODS→DWD 标准节点和边模板。 */
     @PostMapping("/templates/ods-dwd")
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<OdsDwdTemplateResult> applyOdsDwdTemplate(@RequestBody OdsDwdTemplateRequest req) {
@@ -181,6 +197,7 @@ public class PipelineController {
 
     // ---------- 节点运行 ----------
 
+    /** 查询确定 JobRun 下的全部节点运行。 */
     @GetMapping("/{dagId}/runs/{runId}/tasks")
     @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
     public ApiResponse<List<TaskRunDTO>> listTaskRuns(@PathVariable UUID dagId,
@@ -188,6 +205,9 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.listTaskRuns(dagId, runId));
     }
 
+    /**
+     * 流式读取节点持久化日志；tail 模式由存储层生成截断视图，download 控制响应头。
+     */
     @GetMapping("/{dagId}/runs/{runId}/tasks/{taskKey}/log")
     @PreAuthorize("hasRole('DE')")
     public ResponseEntity<StreamingResponseBody> readTaskRunLog(

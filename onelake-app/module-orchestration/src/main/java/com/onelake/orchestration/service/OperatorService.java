@@ -50,8 +50,11 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class OperatorService {
 
+    /** 稳定算子引用格式：namespace.name。 */
     private static final Pattern OPERATOR_REF_PATTERN = Pattern.compile("^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$");
+    /** 支持预发布后缀的语义版本格式。 */
     private static final Pattern SEMVER_PATTERN = Pattern.compile("^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$");
+    /** 从受控表达式中抽取字段引用的标识符格式。 */
     private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
     private static final Set<String> FIELD_REF_STOP_WORDS = Set.of(
         "and", "or", "not", "null", "is", "case", "when", "then", "else", "end", "as",
@@ -64,6 +67,11 @@ public class OperatorService {
     private final AuditLogger audit;
     private final ResourceGroupService resourceGroupService;
 
+    /**
+     * 查询当前租户可见算子，并应用分类、作用域和关键字过滤。
+     *
+     * <p>可见集合由平台内置、租户自有和显式安装三部分合并，按 operator ID 去重。
+     */
     @Transactional(readOnly = true)
     public List<OperatorDTO> listOperators(String category, String scope, String keyword) {
         UUID tenantId = requireTenant();
@@ -92,6 +100,7 @@ public class OperatorService {
             .toList();
     }
 
+    /** 返回可见算子的当前 Manifest、版本历史和安装状态。 */
     @Transactional(readOnly = true)
     public OperatorDTO getOperator(String ref) {
         UUID tenantId = requireTenant();
@@ -101,11 +110,15 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
+    /** 仅校验单个 Manifest，不写入数据库。 */
     @Transactional(readOnly = true)
     public OperatorValidationResultDTO validateOperator(OperatorManifestDTO manifest) {
         return validate(manifest);
     }
 
+    /**
+     * 校验算子图的节点、边、端口、版本、参数、字段治理、资源契约和环路。
+     */
     @Transactional(readOnly = true)
     public OperatorValidationResultDTO validateGraph(Map<String, Object> request) {
         UUID tenantId = requireTenant();
@@ -122,6 +135,7 @@ public class OperatorService {
             return new OperatorValidationResultDTO(false, errors, warnings);
         }
 
+        // 第一阶段建立图索引和入/出边结构，后续端口、环路与字段传播共享该视图。
         Map<String, Map<String, Object>> nodeById = indexNodes(nodes, errors);
         Map<String, Integer> inbound = new LinkedHashMap<>();
         Map<String, List<Map<String, Object>>> inboundEdges = new LinkedHashMap<>();
@@ -136,14 +150,17 @@ public class OperatorService {
             errors.add("DAG 存在环路");
         }
 
+        // 第二阶段逐节点校验 Manifest、版本、配置和端口基数。
         for (Map<String, Object> node : nodes) {
             validateGraphNode(tenantId, node, inbound, inboundEdges, errors, warnings);
         }
+        // 第三阶段执行跨节点字段 Schema、敏感等级传播和资源运行契约校验。
         validateFieldSchemaAndGovernance(graph, nodes, errors, warnings);
         validateExecutionResourceContract(graph, nodes, errors, warnings);
         return new OperatorValidationResultDTO(errors.isEmpty(), errors, warnings);
     }
 
+    /** 注册当前租户自定义/私有算子，并创建首个不可变版本快照。 */
     @Transactional
     public OperatorDTO registerOperator(OperatorManifestDTO manifest) {
         UUID tenantId = requireTenant();
@@ -176,6 +193,7 @@ public class OperatorService {
         return toDTO(operator, null, true);
     }
 
+    /** 为当前租户可维护算子发布新 Manifest 版本，并更新 latestVersion 指针。 */
     @Transactional
     public OperatorDTO publishVersion(String ref, OperatorVersionRequest request) {
         UUID tenantId = requireTenant();
@@ -200,6 +218,7 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
+    /** 更新算子展示元数据或生命周期状态，不改写历史版本。 */
     @Transactional
     public OperatorDTO updateOperator(String ref, UpdateOperatorRequest request) {
         UUID tenantId = requireTenant();
@@ -220,6 +239,7 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
+    /** 安装可见算子或固定租户使用的版本。 */
     @Transactional
     public OperatorDTO installOperator(String ref, OperatorInstallRequest request) {
         UUID tenantId = requireTenant();
@@ -243,6 +263,9 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
+    /**
+     * 幂等写入代码目录中的平台内置算子；允许覆盖同版本快照以同步代码修订。
+     */
     @Transactional
     public int seedBuiltIns() {
         int count = 0;
@@ -354,6 +377,7 @@ public class OperatorService {
         return JsonUtil.fromJson(version.getManifest(), OperatorManifestDTO.class);
     }
 
+    /** 执行单 Manifest 的结构、枚举、模板、端口、资源和版本格式校验。 */
     private OperatorValidationResultDTO validate(OperatorManifestDTO manifest) {
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -704,6 +728,9 @@ public class OperatorService {
         validateTargetPorts(nodeId, inboundEdges, portCardinality, errors);
     }
 
+    /**
+     * 沿拓扑传播字段集合和敏感字段集合，验证字段引用存在且敏感数据经过保护算子。
+     */
     @SuppressWarnings("unchecked")
     private void validateFieldSchemaAndGovernance(
         Map<String, Object> graph,
@@ -1099,6 +1126,7 @@ public class OperatorService {
         return text.isBlank() ? null : text;
     }
 
+    /** 校验图/节点声明的 Spark 资源组和计算画像是否在当前租户运行契约中可用。 */
     @SuppressWarnings("unchecked")
     private void validateExecutionResourceContract(
         Map<String, Object> graph,
@@ -1194,6 +1222,7 @@ public class OperatorService {
         }
     }
 
+    /** 用 DFS 三色状态检测算子图环路。 */
     private boolean hasCycle(Map<String, List<String>> outgoing) {
         Set<String> visiting = new HashSet<>();
         Set<String> visited = new HashSet<>();
@@ -1282,6 +1311,9 @@ public class OperatorService {
         }
     }
 
+    /**
+     * 构造忽略 null 的审计详情 Map，避免 Map.of 对可选字段抛出异常。
+     */
     public static Map<String, Object> auditDetail(Object... kv) {
         Map<String, Object> detail = new LinkedHashMap<>();
         for (int i = 0; i + 1 < kv.length; i += 2) {
@@ -1290,6 +1322,7 @@ public class OperatorService {
         return detail;
     }
 
+    /** 字段级治理校验所需的输入/输出 Schema 和列治理元数据。 */
     private record FieldGraphContext(
         Set<String> sourceColumns,
         Set<String> outputColumns,
@@ -1298,9 +1331,11 @@ public class OperatorService {
     ) {
     }
 
+    /** 单列分类分级元数据。 */
     private record ColumnGovernance(String classification, String piiType, String suggestLevel) {
     }
 
+    /** 一个节点执行后的字段集合和仍未解除的敏感字段集合。 */
     private record SchemaStep(Set<String> columns, Set<String> sensitiveColumns) {
     }
 }

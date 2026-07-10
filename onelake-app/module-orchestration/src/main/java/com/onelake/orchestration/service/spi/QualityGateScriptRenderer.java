@@ -16,6 +16,16 @@ final class QualityGateScriptRenderer {
     private QualityGateScriptRenderer() {
     }
 
+    /**
+     * 将质量门禁配置渲染为自包含的 PySpark 程序。
+     *
+     * <p>脚本支持主键、枚举值、数值范围和自定义 SQL 四类规则。它会先把每条规则的
+     * PASS/WARN/FAIL 证据写入质量结果表，再对 FAIL 规则抛出异常，使失败本身不会抹掉
+     * 可追溯的检查结果。</p>
+     *
+     * @param task QUALITY_GATE 节点；规则来自其 JSON config
+     * @return 可直接放入 Dagster Spark op 配置的 Python 源码
+     */
     static String render(PipelineTask task) {
         JsonNode config = parseConfig(task);
         String targetFqn = targetFqn(task, config);
@@ -180,6 +190,7 @@ final class QualityGateScriptRenderer {
         ).trim();
     }
 
+    /** 解析被检查模型，配置值优先于任务通用的 targetFqn。 */
     static String targetFqn(PipelineTask task, JsonNode config) {
         String configured = firstText(
                 text(config.path("targetModelFqn")),
@@ -189,6 +200,9 @@ final class QualityGateScriptRenderer {
         return firstText(configured, task == null ? null : task.getTargetFqn());
     }
 
+    /**
+     * 解析质量结果表；未显式配置时在目标表名后追加 {@code _quality_check}。
+     */
     private static String qualityTableFqn(String targetFqn, JsonNode config) {
         String configured = firstText(
                 text(config.path("qualityTableFqn")),
@@ -208,6 +222,9 @@ final class QualityGateScriptRenderer {
         return trimmed.substring(0, dot + 1) + trimmed.substring(dot + 1) + "_quality_check";
     }
 
+    /**
+     * 容错解析节点配置。编译阶段负责报告配置错误，渲染器只保证不会因空配置而崩溃。
+     */
     private static JsonNode parseConfig(PipelineTask task) {
         if (task == null || !StringUtils.hasText(task.getConfig())) {
             return JsonUtil.mapper().createObjectNode();
@@ -236,6 +253,9 @@ final class QualityGateScriptRenderer {
         return "";
     }
 
+    /**
+     * 使用 JSON 字符串编码生成合法 Python 字面量，避免表名或规则 JSON 破坏脚本结构。
+     */
     private static String pythonString(String value) {
         try {
             return JsonUtil.mapper().writeValueAsString(value == null ? "" : value);

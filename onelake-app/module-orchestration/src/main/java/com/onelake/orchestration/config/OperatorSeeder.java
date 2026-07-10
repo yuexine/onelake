@@ -18,6 +18,11 @@ public class OperatorSeeder {
 
     private final OperatorService operatorService;
 
+    /**
+     * 应用就绪后幂等注册内置算子。
+     *
+     * <p>Flyway 或数据库尚未就绪时只记录告警，不阻断整个控制面启动；后续重启会重试。
+     */
     @EventListener(ApplicationReadyEvent.class)
     public void seedBuiltIns() {
         try {

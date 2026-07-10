@@ -18,13 +18,14 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 消费 integration.table.loaded 事件，自动触发依赖该表的下游 DAG。
+ * 旧版 definition-JSON 事件触发兼容处理器。
  *
  * <p>设计意图（CLAUDE.md §3 旅程一闭环）：
  * 采集任务完成 → 数据已落入 ODS → 自动触发加工 DAG（清洗/脱敏/入 DWD/DWS）。
  *
  * <p>匹配逻辑：遍历 tenant 下所有 enabled=true 的 DAG，
  * 解析 definition JSON 中的 INPUT 类型节点，若 node.name 匹配 payload.targetTable 则触发。
+ * 新 V2 流水线优先使用 {@link PipelineSyncRefTriggerHandler} 的结构化 SYNC_REF 路径。
  */
 @Slf4j
 @Component
@@ -35,11 +36,13 @@ public class SyncRunSucceededEventHandler implements DomainEventHandler {
     private final OrchestrationService orchestrationService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** 声明兼容处理器消费的事件类型。 */
     @Override
     public Set<String> eventTypes() {
         return Set.of(DomainEvents.INTEGRATION_TABLE_LOADED);
     }
 
+    /** 解析旧 definition 依赖并逐 DAG 最佳努力触发；单条失败不阻断其他 DAG。 */
     @Override
     public void handle(OutboxEvent event) {
         try {

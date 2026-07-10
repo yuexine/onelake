@@ -22,6 +22,7 @@ final class PipelineNodePortRegistry {
     private PipelineNodePortRegistry() {
     }
 
+    /** 根据节点类型和 dataflow.nodeKind 返回编译期端口基数契约。 */
     static NodeContract contractFor(PipelineTask task) {
         if (task == null || task.getTaskType() == null) {
             return NodeContract.empty("UNKNOWN", "UNKNOWN");
@@ -99,6 +100,7 @@ final class PipelineNodePortRegistry {
         }
     }
 
+    /** 节点完整端口契约，包括允许忽略的历史兼容输入端口。 */
     record NodeContract(
             String taskType,
             String engine,
@@ -127,9 +129,11 @@ final class PipelineNodePortRegistry {
         }
     }
 
+    /** 输入端口及允许的入边基数。 */
     record InputPort(String name, boolean required, int minCount, int maxCount) {
     }
 
+    /** 输出端口定义。 */
     record OutputPort(String name) {
     }
 }

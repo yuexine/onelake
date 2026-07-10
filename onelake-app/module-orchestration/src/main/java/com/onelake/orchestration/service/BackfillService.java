@@ -16,6 +16,7 @@ import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.repository.BackfillRepository;
 import com.onelake.orchestration.repository.BackfillRunRepository;
 import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.JobRunRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -41,13 +42,27 @@ import java.util.UUID;
 @Slf4j
 public class BackfillService {
 
+    /** 单个回填批次允许持久化的最大业务周期数，同时作为 catchup 放大保护。 */
     private static final int MAX_BACKFILL_RUNS = 10_000;
 
     private final BackfillRepository backfillRepo;
     private final BackfillRunRepository backfillRunRepo;
     private final DagRepository dagRepo;
+    private final JobRunRepository jobRunRepo;
     private final OrchestrationService orchestrationService;
 
+    /**
+     * 创建用户指定连续业务日期范围的回填批次。
+     *
+     * <p>rangeStart/rangeEnd 都表示 logical_date 且包含端点；窗口按 DAG 时区和粒度展开。
+     *
+     * @param dagId 被补跑的流水线
+     * @param rangeStart 首个 logical_date
+     * @param rangeEnd 最后一个 logical_date
+     * @param grain 可选粒度，缺省使用 DAG partitionGrain
+     * @param maxParallel 批次内部最大并行数
+     * @return 已持久化的批次和明细摘要
+     */
     @Transactional
     public BackfillDTO createBackfill(UUID dagId,
                                       Instant rangeStart,
@@ -62,9 +77,83 @@ public class BackfillService {
         String timezone = StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai";
         List<BackfillWindow> windows = expandWindows(rangeStart, rangeEnd, normalizedGrain, timezone);
 
+        return persistBackfill(
+                tenantId,
+                dag,
+                rangeStart,
+                rangeEnd,
+                normalizedGrain,
+                timezone,
+                maxParallel,
+                windows);
+    }
+
+    /**
+     * 为 scheduler catchup 持久化精确 cron 周期，避免用连续日期范围补出未命中的周期。
+     *
+     * <p>该入口不对外暴露 REST 契约，由 {@link BackfillDispatcher} 调用。与普通范围回填
+     * 共用同一组 backfill/backfill_run 表和后续派发状态机。
+     *
+     * @param dagId 需要补跑的流水线 ID
+     * @param intervals CatchupPlanner 已按 cron 展开的精确业务区间
+     * @param grain DAG 的分区粒度，用于冻结回填批次元数据
+     * @param maxParallel 回填批次并发上限；实际派发还会受 DAG max_active_runs 限制
+     * @return 已持久化的回填批次及明细摘要
+     */
+    @Transactional
+    public BackfillDTO createCatchupBackfill(
+            UUID dagId,
+            List<DataIntervalCalculator.DataInterval> intervals,
+            String grain,
+            Integer maxParallel) {
+        UUID tenantId = requireTenant();
+        Dag dag = dagRepo.findByIdAndTenantId(dagId, tenantId)
+                .orElseThrow(() -> new BizException(40400, "DAG 不存在"));
+        if (intervals == null || intervals.isEmpty()) {
+            throw new BizException(40020, "catchup intervals 不能为空");
+        }
+        if (intervals.size() > MAX_BACKFILL_RUNS) {
+            throw new BizException(40022, "回填区间过大，最多支持 " + MAX_BACKFILL_RUNS + " 个业务日期");
+        }
+
+        BackfillGrain normalizedGrain = BackfillGrain.parse(
+                StringUtils.hasText(grain) ? grain : dag.getPartitionGrain());
+        String timezone = StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai";
+        // 精确周期可能是周调度等稀疏序列，不能复用 rangeStart/rangeEnd 连续展开。
+        List<BackfillWindow> windows = intervals.stream()
+                .sorted(java.util.Comparator.comparing(DataIntervalCalculator.DataInterval::logicalDate))
+                .map(this::toBackfillWindow)
+                .toList();
+        return persistBackfill(
+                tenantId,
+                dag,
+                windows.get(0).logicalDate(),
+                windows.get(windows.size() - 1).logicalDate(),
+                normalizedGrain,
+                timezone,
+                maxParallel,
+                windows);
+    }
+
+    /**
+     * 普通范围回填与 scheduler catchup 共用的批次/明细持久化逻辑。
+     *
+     * <p>调用方负责提前生成并校验窗口；本方法只冻结批次元数据并按窗口顺序创建
+     * QUEUED 明细，后续实际 JobRun 由 BackfillDispatcher 异步产生。
+     */
+    private BackfillDTO persistBackfill(
+            UUID tenantId,
+            Dag dag,
+            Instant rangeStart,
+            Instant rangeEnd,
+            BackfillGrain normalizedGrain,
+            String timezone,
+            Integer maxParallel,
+            List<BackfillWindow> windows) {
+
         Backfill backfill = new Backfill();
         backfill.setTenantId(tenantId);
-        backfill.setDagId(dagId);
+        backfill.setDagId(dag.getId());
         backfill.setRangeStart(rangeStart);
         backfill.setRangeEnd(rangeEnd);
         backfill.setGrain(normalizedGrain.name());
@@ -85,7 +174,7 @@ public class BackfillService {
             BackfillRun run = new BackfillRun();
             run.setTenantId(tenantId);
             run.setBackfillId(backfill.getId());
-            run.setDagId(dagId);
+            run.setDagId(dag.getId());
             run.setLogicalDate(window.logicalDate());
             run.setDataIntervalStart(window.dataIntervalStart());
             run.setDataIntervalEnd(window.dataIntervalEnd());
@@ -94,7 +183,7 @@ public class BackfillService {
         }
         backfillRunRepo.saveAll(plannedRuns);
         log.info("已创建回填批次 dagId={} backfillId={} grain={} totalRuns={} maxParallel={}",
-                dagId, backfill.getId(), normalizedGrain, plannedRuns.size(), backfill.getMaxParallel());
+                dag.getId(), backfill.getId(), normalizedGrain, plannedRuns.size(), backfill.getMaxParallel());
         return toDTO(backfill, plannedRuns);
     }
 
@@ -142,6 +231,16 @@ public class BackfillService {
                 .toList();
     }
 
+    /**
+     * 为一个回填批次执行单轮状态同步和队列派发。
+     *
+     * <p>方法在事务中悲观锁定批次及被领取明细，先同步已运行子任务，再计算批次级与
+     * DAG 级剩余槽位，最后按 logical_date 顺序领取 QUEUED 明细。返回后由定时 tick
+     * 继续推进尚未完成的批次。
+     *
+     * @param backfillId 回填批次 ID
+     * @return 本轮实际尝试派发的子运行数量
+     */
     @Transactional(noRollbackFor = BizException.class)
     public int dispatchBackfill(UUID backfillId) {
         Backfill backfill = backfillRepo.findByIdForUpdate(backfillId)
@@ -150,6 +249,7 @@ public class BackfillService {
             return 0;
         }
 
+        // 异步 Dispatcher 没有请求线程上下文；从批次快照恢复租户和创建人，并在 finally 还原。
         TenantSnapshot previousTenant = TenantSnapshot.capture();
         TenantContext.setTenantId(backfill.getTenantId());
         if (TenantContext.getUserId() == null && backfill.getCreatedBy() != null) {
@@ -160,6 +260,7 @@ public class BackfillService {
             TenantContext.setUsername(backfill.getCreatedByName());
         }
         try {
+            // 先把外部 JobRun 终态同步回队列，释放已结束子运行占用的批次槽位。
             syncChildRuns(backfill);
             if (isTerminal(backfill.getStatus()) || backfill.getStatus() == BackfillStatus.CANCELLED) {
                 return 0;
@@ -167,7 +268,10 @@ public class BackfillService {
 
             long running = backfillRunRepo.countByBackfillIdAndStatus(backfill.getId(), BackfillRunStatus.RUNNING);
             int maxParallel = Math.max(1, backfill.getMaxParallel() == null ? 1 : backfill.getMaxParallel());
-            int slots = Math.max(0, maxParallel - Math.toIntExact(Math.min(running, Integer.MAX_VALUE)));
+            // 第一层限制当前批次自身的 max_parallel，第二层限制 DAG 全部触发来源的活跃运行数。
+            int batchSlots = Math.max(0, maxParallel - Math.toIntExact(Math.min(running, Integer.MAX_VALUE)));
+            int dagSlots = availableDagSlots(backfill, maxParallel);
+            int slots = Math.min(batchSlots, dagSlots);
             if (slots == 0) {
                 aggregateBackfill(backfill);
                 return 0;
@@ -177,6 +281,7 @@ public class BackfillService {
                     backfill.getId(), BackfillRunStatus.QUEUED, PageRequest.of(0, slots));
             String timezone = resolveBackfillTimezone(backfill);
             int dispatched = 0;
+            // Repository 已按 logical_date 排序并加锁，保证业务周期有序领取且避免多实例重复领取。
             for (BackfillRun backfillRun : queuedRuns) {
                 if (backfill.getStatus() == BackfillStatus.CANCELLED) {
                     break;
@@ -191,6 +296,12 @@ public class BackfillService {
         }
     }
 
+    /**
+     * 取消批次并停止后续派发。
+     *
+     * <p>QUEUED 明细直接取消；RUNNING 明细先尽力终止关联 JobRun，再把本地队列状态
+     * 置为 CANCELLED。已经成功的明细保持原状态以保留真实进度。
+     */
     @Transactional
     public BackfillDTO cancelBackfill(UUID id) {
         UUID tenantId = requireTenant();
@@ -224,6 +335,12 @@ public class BackfillService {
         return toDTO(backfill, runs);
     }
 
+    /**
+     * 将一个已领取明细转换为真实 BACKFILL JobRun。
+     *
+     * <p>先把明细置为 RUNNING 并持久化，确保进程中断后能够被恢复扫描识别；启动失败
+     * 则记录 FAILED 和截断后的错误信息，不回滚整个批次中其他周期。
+     */
     private void dispatchChildRun(Backfill backfill, BackfillRun backfillRun, String timezone) {
         Instant now = Instant.now();
         backfillRun.setStatus(BackfillRunStatus.RUNNING);
@@ -256,6 +373,7 @@ public class BackfillService {
         }
     }
 
+    /** 查询 RUNNING 明细关联的 JobRun，并把终态单调同步回回填队列。 */
     private void syncChildRuns(Backfill backfill) {
         List<BackfillRun> runs = backfillRunRepo.findByBackfillIdForUpdate(backfill.getId());
         for (BackfillRun backfillRun : runs) {
@@ -284,6 +402,12 @@ public class BackfillService {
         aggregateBackfill(backfill);
     }
 
+    /**
+     * 从全部明细重新计算成功数、失败数和批次聚合状态。
+     *
+     * <p>CANCELLED 为用户显式终态，不会被子运行统计覆盖；无失败且全部成功为
+     * SUCCEEDED，成功与失败并存为 PARTIAL，全部失败为 FAILED。
+     */
     private void aggregateBackfill(Backfill backfill) {
         List<BackfillRun> runs = backfillRunRepo.findByBackfillIdForUpdate(backfill.getId());
         long succeeded = runs.stream().filter(run -> run.getStatus() == BackfillRunStatus.SUCCEEDED).count();
@@ -360,6 +484,44 @@ public class BackfillService {
             cursor = next;
         }
         return windows;
+    }
+
+    /** 将规划器区间转换为回填持久化窗口，并守住 logical_date == interval_start 契约。 */
+    private BackfillWindow toBackfillWindow(DataIntervalCalculator.DataInterval interval) {
+        if (interval == null
+                || interval.logicalDate() == null
+                || interval.dataIntervalStart() == null
+                || interval.dataIntervalEnd() == null
+                || !interval.logicalDate().equals(interval.dataIntervalStart())
+                || !interval.dataIntervalEnd().isAfter(interval.dataIntervalStart())) {
+            throw new BizException(40020, "catchup interval 非法");
+        }
+        return new BackfillWindow(
+                interval.logicalDate(),
+                interval.dataIntervalStart(),
+                interval.dataIntervalEnd());
+    }
+
+    /**
+     * 计算 DAG 级剩余并发槽位。
+     *
+     * <p>统计覆盖 CRON、MANUAL、BACKFILL 等所有触发来源，从而避免 catchup 子运行
+     * 与刚创建的当前 CRON 周期叠加后超过 {@code dag.max_active_runs}。
+     * 数据异常找不到 DAG 时退回批次上限，保留 M1 队列的可恢复性。
+     */
+    private int availableDagSlots(Backfill backfill, int fallbackLimit) {
+        int dagLimit = dagRepo.findByIdAndTenantId(backfill.getDagId(), backfill.getTenantId())
+                .map(Dag::getMaxActiveRuns)
+                .map(value -> Math.max(1, value))
+                .orElse(fallbackLimit);
+        long activeRuns = jobRunRepo.countByDagIdAndStatusIn(
+                backfill.getDagId(), List.of(DagStatus.QUEUED, DagStatus.RUNNING));
+        int available = Math.max(0, dagLimit - Math.toIntExact(Math.min(activeRuns, Integer.MAX_VALUE)));
+        if (available == 0) {
+            log.info("回填批次 {} 因 dag max_active_runs 限流，activeRuns={} limit={}",
+                    backfill.getId(), activeRuns, dagLimit);
+        }
+        return available;
     }
 
     private UUID requireTenant() {

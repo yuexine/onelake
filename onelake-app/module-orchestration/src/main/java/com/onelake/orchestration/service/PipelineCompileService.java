@@ -112,6 +112,7 @@ public class PipelineCompileService {
         );
     }
 
+    /** 按节点类型分派最小运行契约校验。 */
     private TaskCompileResult validateTask(PipelineTask t, UUID tenantId) {
         TaskType type = t.getTaskType();
         return switch (type) {
@@ -121,6 +122,7 @@ public class PipelineCompileService {
         };
     }
 
+    /** 校验质量门禁规则集合和目标资产。 */
     private TaskCompileResult validateQualityGate(PipelineTask t) {
         if (!StringUtils.hasText(t.getConfig()) || "{}".equals(t.getConfig().trim())) {
             return fail(t, "QUALITY_GATE task requires non-empty config (rule definitions)");
@@ -140,6 +142,7 @@ public class PipelineCompileService {
         return ok(t);
     }
 
+    /** 校验集成引用节点至少声明其等待的 ODS 资产。 */
     private TaskCompileResult validateSyncRef(PipelineTask t) {
         if (!StringUtils.hasText(t.getTargetFqn())) {
             return fail(t, "SYNC_REF task requires targetFqn (the ODS table FQN it depends on)");
@@ -147,6 +150,7 @@ public class PipelineCompileService {
         return ok(t);
     }
 
+    /** 校验 Spark 节点脚本和目标资产这两个最小真实执行条件。 */
     private TaskCompileResult validateSparkTask(PipelineTask t) {
         JsonNode cfg = parseSafeJson(t.getConfig());
         String expectedField = t.getTaskType() == TaskType.PYSPARK ? "script" : "sql";
@@ -202,6 +206,9 @@ public class PipelineCompileService {
         t.setExecutable(executable);
     }
 
+    /**
+     * 校验悬空边、端口存在性、入边基数、资产解析和节点类型之间的图契约。
+     */
     private List<String> validateGraph(List<PipelineTask> tasks,
                                        List<PipelineTaskEdge> edges,
                                        Map<String, PipelineTask> taskByKey) {
@@ -294,6 +301,12 @@ public class PipelineCompileService {
         return TaskType.SPARK_SQL.name().equals(tt) || TaskType.PYSPARK.name().equals(tt);
     }
 
+    /**
+     * 将 PIPELINE 边解析为 Spark 节点的结构化输入并回写 config。
+     *
+     * <p>边是输入资产、别名、端口和新鲜度策略的单一事实来源；编译器据此生成 SQL，
+     * 避免画布边和节点 from_tables 配置发生双写漂移。
+     */
     private void applyDataflowInputs(List<PipelineTask> tasks, List<PipelineTaskEdge> edges) {
         Map<String, PipelineTask> taskByKey = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
@@ -389,6 +402,7 @@ public class PipelineCompileService {
         return JsonUtil.mapper().createObjectNode();
     }
 
+    /** 从左右输入端口和 join 条件渲染结构化 JOIN SQL。 */
     private String renderJoinSql(PipelineTask task, ObjectNode cfg, List<DataflowInput> inputs) {
         DataflowInput left = findInput(inputs, "left", 0);
         DataflowInput right = findInput(inputs, "right", 1);
@@ -415,6 +429,7 @@ public class PipelineCompileService {
                 """.formatted(task.getTargetFqn(), select, left.assetFqn(), leftAlias, joinClause).trim();
     }
 
+    /** 渲染派生字段节点 SQL，并保留上游字段。 */
     private String renderDeriveColumnSql(PipelineTask task, ObjectNode cfg, List<DataflowInput> inputs) {
         DataflowInput input = findInput(inputs, "in", 0);
         if (input == null || !StringUtils.hasText(task.getTargetFqn())) {
@@ -441,6 +456,7 @@ public class PipelineCompileService {
                 """.formatted(task.getTargetFqn(), String.join(", ", selectItems), input.assetFqn(), alias).trim();
     }
 
+    /** 渲染单输入落表节点 SQL。 */
     private String renderSinkSql(PipelineTask task, ObjectNode cfg, List<DataflowInput> inputs) {
         DataflowInput input = findInput(inputs, "in", 0);
         if (input == null || !StringUtils.hasText(task.getTargetFqn())) {
@@ -558,6 +574,7 @@ public class PipelineCompileService {
         return "";
     }
 
+    /** 从一条入边解析出的结构化数据流输入。 */
     private record DataflowInput(
             String sourceTaskKey,
             String assetFqn,
@@ -569,10 +586,14 @@ public class PipelineCompileService {
             String freshnessPolicy
     ) {}
 
+    /** 派生字段名和受控表达式。 */
     private record DerivedColumn(String name, String expression) {}
 
     /**
      * 按 PIPELINE 层边做拓扑排序；数据依赖由显式的 {@code pipeline_task_edge} 契约表达。
+     */
+    /**
+     * 对 PIPELINE 边执行稳定 Kahn 拓扑排序；同层节点保持原创建顺序。
      */
     private List<PipelineTask> topologicalSort(List<PipelineTask> tasks,
                                                List<PipelineTaskEdge> edges) {

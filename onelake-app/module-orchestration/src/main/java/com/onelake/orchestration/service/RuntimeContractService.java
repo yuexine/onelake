@@ -38,6 +38,7 @@ public class RuntimeContractService {
 
     private final DagsterClient dagster;
 
+    /** 返回静态 Java 能力与当前 Dagster code location 可用性的合并视图。 */
     public List<RuntimeContractDTO> listRuntimeContracts() {
         Set<String> availableJobs = availableDagsterJobs();
         return SPECS.stream()
@@ -45,6 +46,9 @@ public class RuntimeContractService {
             .toList();
     }
 
+    /**
+     * 在创建运行前校验目标引擎和图执行能力是否已注册；不访问 Dagster 实时状态。
+     */
     public Optional<String> triggerBlockedReason(String dagsterJob, Map<String, Object> definition) {
         Map<String, Object> safeDefinition = definition == null ? Map.of() : definition;
         String requestedTarget = normalizeTarget(firstText(
@@ -64,6 +68,9 @@ public class RuntimeContractService {
         return Optional.of(spec.blockedReason());
     }
 
+    /**
+     * 在真正 launch 前同时校验静态契约与 Dagster 当前暴露的 job，返回阻断原因。
+     */
     public Optional<String> launchBlockedReason(String dagsterJob, Map<String, Object> definition) {
         // 真正触发前额外确认 Dagster 当前 code location 暴露该 job，避免先落库再在 launch 阶段失败。
         Optional<String> contractReason = triggerBlockedReason(dagsterJob, definition);
@@ -159,6 +166,7 @@ public class RuntimeContractService {
         return value == null ? "" : String.valueOf(value);
     }
 
+    /** Java 侧声明的一条编译目标到 Dagster job 的支持矩阵。 */
     private record RuntimeSpec(
         String compileTarget,
         String engine,

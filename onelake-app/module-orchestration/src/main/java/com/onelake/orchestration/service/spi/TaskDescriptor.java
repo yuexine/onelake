@@ -9,15 +9,24 @@ import java.util.UUID;
  *
  * <p>统一流水线主路径当前只生成 Spark 家族描述：
  * {@code SPARK_SQL}、{@code PYSPARK}、{@code QUALITY_GATE} 和 {@code SYNC_REF}。
+ *
+ * @param taskId PipelineTask 主键
+ * @param taskKey 流水线内稳定节点键，也是 GRAPH 模式的 Dagster step key
+ * @param taskType 节点类型
+ * @param engine 承载该节点的运行时引擎
+ * @param targetFqn 输出表全限定名
+ * @param modelId 历史兼容字段；新 Spark-only 节点为空
+ * @param syncTaskId SYNC_REF 引用的同步任务；其他节点为空
+ * @param businessConfig 去除控制面字段后的业务配置
  */
 public record TaskDescriptor(
         UUID taskId,
         String taskKey,
-        String taskType,            // 节点类型：QUALITY_GATE|SYNC_REF|SPARK_SQL|PYSPARK。
+        String taskType,
         EngineType engine,
         String targetFqn,
-        UUID modelId,               // 历史兼容字段；新 Spark-only 节点为空。
-        UUID syncTaskId,            // 可空，仅 SYNC_REF 使用。
+        UUID modelId,
+        UUID syncTaskId,
         Map<String, Object> businessConfig
 ) {
     public TaskDescriptor {

@@ -28,24 +28,33 @@ public class ResourceGroup {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /** 空表示平台级默认组，非空表示租户私有组。 */
     private UUID tenantId;
 
+    /** 稳定资源组编码，流水线通过该值引用。 */
     @Column(nullable = false, length = 64)
     private String code;
 
+    /** 控制台展示名称。 */
     @Column(nullable = false, length = 128)
     private String displayName;
 
+    /** 资源组支持的执行引擎。 */
     @Column(nullable = false, length = 32)
     private String engine;
 
+    /** ACTIVE 可用于运行契约，DISABLED 禁止新运行选择。 */
     @Column(nullable = false, length = 16)
     private String status = "ACTIVE";
 
+    /** 资源组允许的并发运行上限。 */
     private Integer maxConcurrency;
+    /** 资源组 CPU 总配额。 */
     private Integer quotaCpu;
+    /** 资源组内存总配额 GB。 */
     private Integer quotaMemoryGb;
 
+    /** 成本控制扩展策略 JSON，保持控制面可演进。 */
     @Column(columnDefinition = "jsonb", nullable = false)
     @ColumnTransformer(write = "?::jsonb")
     private String costPolicy = "{}";

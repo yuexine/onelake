@@ -66,6 +66,17 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+/**
+ * 编排运行应用服务，负责把租户内的 DAG/流水线定义转换为可观测的 Dagster 运行。
+ *
+ * <p>本服务同时保留通用 DAG 触发路径和流水线 V2 路径。流水线运行遵循
+ * “Java 编译并生成 runConfig、Dagster 执行”的边界：Java 侧持久化
+ * {@link JobRun}/{@link TaskRun}、构建运行参数并聚合状态，Dagster 侧负责实际的
+ * 图执行。运行结果通过节点回调、状态轮询和 Outbox 事件与其他模块衔接。</p>
+ *
+ * <p>所有面向用户的查询和触发入口都必须经过租户边界；涉及节点回调、取消和重跑的
+ * 写操作使用行锁与单调状态规则，防止并发回调或迟到事件覆盖已经确认的终态。</p>
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -82,7 +93,7 @@ public class OrchestrationService {
     private final JdbcTemplate jdbc;
     private final RuntimeContractService runtimeContractService;
 
-    // 流水线 V2 依赖。
+    /** 流水线 V2 的编译、节点持久化、配置构建和事件发布依赖。 */
     private final PipelineCompileService pipelineCompileService;
     private final PipelineTaskRepository pipelineTaskRepo;
     private final PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
@@ -92,21 +103,41 @@ public class OrchestrationService {
     private final PipelineLogStorage pipelineLogStorage;
     private final DataIntervalCalculator dataIntervalCalculator;
 
+    /**
+     * LEGACY 使用固定单 op 作业，GRAPH 使用按 pipeline task 展开的 Dagster graph。
+     * 默认保持 LEGACY，便于出现运行时兼容问题时快速回退。
+     */
     @Value("${onelake.orchestration.pipeline-execution-mode:LEGACY}")
     private String pipelineExecutionMode = "LEGACY";
 
+    /** Dagster 节点向内部回调接口上报状态时使用的服务根地址。 */
     @Value("${onelake.orchestration.callback-base-url:}")
     private String pipelineCallbackBaseUrl = "";
 
+    /** GRAPH 作业内允许同时运行的最大节点数，最终值至少为 1。 */
     @Value("${onelake.orchestration.max-parallel:4}")
     private int pipelineMaxParallel = 4;
 
+    /**
+     * 创建默认启用的通用 DAG 定义。
+     *
+     * @param name DAG 展示名称
+     * @param dagsterJob Dagster 作业名；为空时使用草稿作业
+     * @param definition DAG JSON 定义
+     * @param scheduleCron 可选 Cron 表达式
+     * @return 已持久化的 DAG
+     */
     @Transactional
     public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
                             String scheduleCron) {
         return createDag(name, dagsterJob, definition, scheduleCron, true);
     }
 
+    /**
+     * 创建通用 DAG 定义，并显式指定是否启用调度。
+     *
+     * @param enabled {@code null} 按启用处理
+     */
     @Transactional
     public DagDTO createDag(String name, String dagsterJob, Map<String, Object> definition,
                             String scheduleCron, Boolean enabled) {
@@ -123,6 +154,11 @@ public class OrchestrationService {
         return toDTO(dag);
     }
 
+    /**
+     * 更新租户内 DAG 定义并递增定义版本。
+     *
+     * <p>{@code dagsterJob} 为空时保留原值，{@code enabled} 为空时保留原启用状态。</p>
+     */
     @Transactional
     public DagDTO updateDag(UUID id, String name, String dagsterJob, Map<String, Object> definition,
                             String scheduleCron, Boolean enabled) {
@@ -142,11 +178,13 @@ public class OrchestrationService {
         return toDTO(dag);
     }
 
+    /** 查询租户内单个 DAG，并附带最近一次运行摘要。 */
     @Transactional
     public DagDTO getDag(UUID id) {
         return toDTOWithLastRun(findTenantDag(id));
     }
 
+    /** 查询当前租户的全部 DAG，并为每条定义刷新最近运行状态。 */
     @Transactional
     public List<DagDTO> listDags() {
         return dagRepo.findByTenantId(TenantContext.getTenantId()).stream()
@@ -154,6 +192,12 @@ public class OrchestrationService {
             .toList();
     }
 
+    /**
+     * 触发非流水线的通用 Dagster 作业。
+     *
+     * <p>先持久化本地运行记录，再启动 Dagster；启动失败时保留 FAILED 运行作为审计证据。
+     * {@code noRollbackFor} 保证业务异常不会回滚这条失败记录。</p>
+     */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerDag(UUID dagId, TriggerType trigger) {
         Dag dag = findTenantDag(dagId);
@@ -209,9 +253,10 @@ public class OrchestrationService {
     }
 
     /**
-     * CRON-only overload: the scheduler supplies the matched planned instant,
-     * while the run service derives the data interval from the persisted DAG
-     * timezone and partition grain.
+     * CRON 专用触发入口。
+     *
+     * <p>调度器传入实际命中的计划时刻，本服务再按 DAG 时区和分区粒度推导业务数据区间，
+     * 确保主调度和 catchup 使用同一套 logical date 语义。</p>
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, Instant scheduledAt) {
@@ -227,7 +272,16 @@ public class OrchestrationService {
                 .toRunContext(dag.getTimezone(), "NORMAL", null, trigger);
         return triggerPipelineRun(dagId, trigger, runContext);
     }
-
+    /**
+     * 使用完整运行上下文触发流水线，供正常调度和回填派发共同复用。
+     *
+     * <p>方法依次完成租户/运行时契约检查、流水线编译、JobRun/TaskRun 建档、runConfig
+     * 构建和 Dagster 启动。CRON 运行会在远端启动前立即刷新唯一键写入，以
+     * {@code (dag_id, logical_date)} 阻止重复触发。</p>
+     *
+     * @param context logical date、数据区间、时区和回填标识等运行上下文
+     * @return 本地 JobRun ID
+     */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, RunContext context) {
         UUID tenantId = TenantContext.getTenantId();
@@ -348,6 +402,15 @@ public class OrchestrationService {
         return run.getId();
     }
 
+    /**
+     * 对 GRAPH 模式的失败节点执行单节点或下游子图重跑。
+     *
+     * <p>本次重跑复用原 JobRun，并锁住其全部 TaskRun：累计 attempt 后重置选中子图，
+     * 校验子图外依赖，再将 base attempt 传给 Dagster。这样节点回调中的本地重试次数可与
+     * 跨 Dagster run 的累计次数保持一致。</p>
+     *
+     * @param modeRaw {@code SINGLE} 仅重跑目标；{@code DOWNSTREAM} 续跑未成功下游
+     */
     @Transactional(noRollbackFor = BizException.class)
     public TaskRerunResult rerunTask(UUID dagId, UUID runId, String taskKey, String modeRaw) {
         if (!isGraphPipelineExecutionMode()) {
@@ -832,6 +895,11 @@ public class OrchestrationService {
         publisher.publish(eventType, dag.getId().toString(), payload);
     }
 
+    /**
+     * 刷新回填子运行的 Dagster 状态。
+     *
+     * <p>回填派发器通过该入口复用正常运行的状态聚合与节点补偿逻辑。</p>
+     */
     @Transactional
     public JobRun refreshRunStatusForBackfill(UUID runId) {
         JobRun run = runRepo.findById(runId)
@@ -839,6 +907,7 @@ public class OrchestrationService {
         return refreshRunStatus(run);
     }
 
+    /** 分页查询指定 DAG 的运行，并尽力刷新每条非终态 Dagster 状态。 */
     @Transactional
     public Page<JobRunDTO> runs(UUID dagId, Pageable pageable) {
         Dag dag = findTenantDag(dagId);
@@ -846,6 +915,7 @@ public class OrchestrationService {
             .map(r -> toRunDTO(refreshRunStatus(r), dag));
     }
 
+    /** 分页查询当前租户所有 DAG 的运行，不暴露其他租户的运行记录。 */
     @Transactional
     public Page<JobRunDTO> listRuns(Pageable pageable) {
         List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
@@ -858,6 +928,7 @@ public class OrchestrationService {
             .map(r -> toRunDTO(refreshRunStatus(r), dagById.get(r.getDagId())));
     }
 
+    /** 按 logical date 升序分页查询某次回填产生的子运行。 */
     @Transactional
     public Page<JobRunDTO> listBackfillRuns(UUID dagId, UUID backfillId, Pageable pageable) {
         Dag dag = findTenantDag(dagId);
@@ -865,6 +936,7 @@ public class OrchestrationService {
                 .map(run -> toRunDTO(refreshRunStatus(run), dag));
     }
 
+    /** 查询并刷新指定回填子运行，同时校验 DAG、回填和运行三者的归属关系。 */
     @Transactional
     public JobRunDTO getBackfillRun(UUID dagId, UUID backfillId, UUID runId) {
         Dag dag = findTenantDag(dagId);
@@ -873,6 +945,7 @@ public class OrchestrationService {
         return toRunDTO(refreshRunStatus(run), dag);
     }
 
+    /** 查询当前租户可见的单条运行，并同步其最新 Dagster 状态。 */
     @Transactional
     public JobRunDTO getRun(UUID runId) {
         List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
@@ -886,6 +959,12 @@ public class OrchestrationService {
         return toRunDTO(refreshRunStatus(run), dagById.get(run.getDagId()));
     }
 
+    /**
+     * 取消运行并收口所有未终态节点。
+     *
+     * <p>Dagster terminate 是尽力而为；即使远端终止调用失败，本地运行仍进入 CANCELLED，
+     * 避免调度和回填派发继续把它当作活动运行。</p>
+     */
     @Transactional
     public JobRunDTO cancelRun(UUID runId) {
         List<Dag> dags = dagRepo.findByTenantId(TenantContext.getTenantId());
@@ -996,6 +1075,13 @@ public class OrchestrationService {
         return new TaskRunCallbackResult(true, taskRun.getStatus());
     }
 
+    /**
+     * 读取租户内节点日志，支持完整流式下载或服务端截取末尾若干行。
+     *
+     * <p>{@code logRef} 必须位于 {@code tenantId/runId/} 前缀下，且禁止绝对路径和目录穿越。</p>
+     *
+     * @param tailLines {@code null} 或 0 返回完整日志；正数返回末尾行，最大 10000
+     */
     @Transactional(readOnly = true)
     public TaskRunLogResource readTaskRunLog(UUID dagId, UUID runId, String taskKey, Integer tailLines) {
         if (!StringUtils.hasText(taskKey)) {
@@ -1077,6 +1163,7 @@ public class OrchestrationService {
             return run;
         }
         try {
+            // 远端 run 状态是聚合状态的主来源；GRAPH 模式同时用节点回调补偿观测延迟。
             DagsterClient.RunStatus status = dagster.getRunStatus(run.getDagsterRunId());
             DagStatus mapped = mapDagsterStatus(status.status());
             run.setStatus(mapped);
@@ -1717,6 +1804,14 @@ public class OrchestrationService {
 
     private record TaskRunSummary(Long rowsWritten, String artifactPath) {}
 
+    /**
+     * 节点日志下载资源。
+     *
+     * @param objectKey 对象存储内部键，不作为客户端文件路径使用
+     * @param filename 面向下载响应的文件名
+     * @param contentLength 当前返回内容的字节数
+     * @param content 日志输入流，由 HTTP 响应写出方负责关闭
+     */
     public record TaskRunLogResource(String objectKey, String filename, long contentLength, InputStream content) {}
 
     private enum RerunMode {

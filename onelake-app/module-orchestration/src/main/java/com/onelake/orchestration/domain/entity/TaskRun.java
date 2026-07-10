@@ -30,40 +30,54 @@ public class TaskRun {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /** 节点运行所属租户，内部回调必须同时校验该边界。 */
     @Column(nullable = false)
     private UUID tenantId;
 
+    /** 所属 JobRun。 */
     @Column(nullable = false)
     private UUID jobRunId;
 
+    /** 对应 PipelineTask.taskKey，也是 Dagster step key。 */
     @Column(nullable = false, length = 128)
     private String taskKey;
 
+    /** 节点运行状态。 */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private TaskRunStatus status = TaskRunStatus.QUEUED;
 
+    /** 当前累计尝试次数；节点重跑会继续递增。 */
     @Column(nullable = false)
     private int attempt = 1;
 
+    /** 自动重试上限。 */
     @Column(nullable = false)
     private int maxRetries = 0;
 
+    /** 持久化日志对象键或外部日志引用。 */
     @Column(length = 512)
     private String logRef;
 
+    /** Dagster 回调携带的 step key，必须与 taskKey 一致。 */
     @Column(length = 128)
     private String dagsterStepKey;
 
+    /** 从 JobRun 复制的数据区间左边界。 */
     private Instant dataIntervalStart;
+    /** 从 JobRun 复制的数据区间右边界。 */
     private Instant dataIntervalEnd;
 
+    /** 节点写出行数指标。 */
     private Long rowsWritten;
+    /** 节点扫描字节数指标。 */
     private Long scanBytes;
 
+    /** 节点失败原因。 */
     @Column(length = 4000)
     private String errorMsg;
 
+    /** 节点产物位置，例如 table:FQN 或对象存储 URI。 */
     @Column(length = 512)
     private String artifactPath;
 

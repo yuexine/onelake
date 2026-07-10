@@ -36,24 +36,34 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
     private static final String OP_NAME = "run_spark_task_op";
     private static final String GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
 
+    /** 声明该构建器处理 Spark 家族节点。 */
     @Override
     public EngineType engine() {
         return EngineType.SPARK_SQL;
     }
 
+    /** 构建不含显式任务定义的兼容配置。 */
     @Override
     public DagsterRunConfig build(TaskBundleContext ctx) {
         return build(ctx, List.of());
     }
 
+    /** 构建 LEGACY 固定 op 配置，不启用节点状态回调。 */
     public DagsterRunConfig build(TaskBundleContext ctx, List<PipelineTask> tasks) {
         return build(ctx, tasks, "");
     }
 
+    /** 构建 LEGACY 固定 op 配置，并把回调根地址传入 Spark 执行器。 */
     public DagsterRunConfig build(TaskBundleContext ctx, List<PipelineTask> tasks, String callbackBaseUrl) {
         return build(ctx, tasks, callbackBaseUrl, Map.of());
     }
 
+    /**
+     * 构建 LEGACY 模式 runConfig。
+     *
+     * <p>所有可执行 Spark 节点被装入固定 {@code run_spark_task_op} 的 tasks 数组；
+     * logical date 和数据区间等运行参数通过 {@code runtime_params} 注入。</p>
+     */
     public DagsterRunConfig build(TaskBundleContext ctx,
                                   List<PipelineTask> tasks,
                                   String callbackBaseUrl,
@@ -83,6 +93,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         ));
     }
 
+    /** 构建普通 GRAPH 运行配置，所有节点的累计 attempt 从 1 开始。 */
     public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
                                                 List<PipelineTask> tasks,
                                                 List<PipelineTaskEdge> pipelineEdges,
@@ -91,6 +102,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         return buildGraphRunConfig(ctx, tasks, pipelineEdges, callbackBaseUrl, maxParallel, Map.of());
     }
 
+    /** 构建 GRAPH 重跑配置，并为选中节点注入跨运行累计的 base attempt。 */
     public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
                                                 List<PipelineTask> tasks,
                                                 List<PipelineTaskEdge> pipelineEdges,
@@ -100,6 +112,13 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         return buildGraphRunConfig(ctx, tasks, pipelineEdges, callbackBaseUrl, maxParallel, baseAttempts, Map.of());
     }
 
+    /**
+     * 构建 GRAPH 模式的完整 Dagster runConfig。
+     *
+     * <p>每个 {@link PipelineTask#getTaskKey() taskKey} 直接作为 Dagster op 配置键，
+     * 因而运行时的 {@code dagster_step_key == pipeline_task.task_key}。Java 只提供节点配置、
+     * 并发上限和运行参数，依赖顺序由 Dagster 中按 pipelineId 生成的原生图执行。</p>
+     */
     public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
                                                 List<PipelineTask> tasks,
                                                 List<PipelineTaskEdge> pipelineEdges,
@@ -148,12 +167,18 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         ));
     }
 
+    /**
+     * 返回流水线专属的稳定 Dagster graph job 名；移除 UUID 连字符以满足定义命名规则。
+     */
     public static String graphJobName(java.util.UUID pipelineId) {
         return GRAPH_JOB_PREFIX + pipelineId.toString().replace("-", "");
     }
 
     /**
      * 为单个 Spark 节点构建 op 配置，供 {@code OrchestrationService} 触发时使用。
+     *
+     * <p>QUALITY_GATE 会先渲染为 PySpark 断言脚本；其他节点直接读取 config 中的
+     * script/sql。调用方传入的资源配置优先于节点内配置。</p>
      */
     public Map<String, Object> buildPerTaskOpConfig(PipelineTask task, Map<String, Object> resourceProfile) {
         Map<String, Object> opConfig = new LinkedHashMap<>();

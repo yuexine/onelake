@@ -38,9 +38,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ResourceGroupService {
 
+    /** 无数据库配置时仍可使用的内置引擎到资源组映射。 */
     private static final Map<String, Set<String>> DEFAULT_RESOURCE_GROUPS_BY_ENGINE = Map.of(
         "SPARK", Set.of("spark-default")
     );
+    /** 内置资源组的默认计算画像。 */
     private static final Map<String, Set<String>> DEFAULT_COMPUTE_PROFILES_BY_GROUP = Map.of(
         "spark-default", Set.of("spark-small", "spark-medium", "spark-large")
     );
@@ -50,6 +52,7 @@ public class ResourceGroupService {
     private final ComputeProfileRepository computeProfileRepo;
     private final AuditLogger audit;
 
+    /** 判断资源组是否属于代码内置默认契约，不访问数据库。 */
     public static boolean defaultSupportsResourceGroup(String engine, String resourceGroup) {
         if (resourceGroup == null || resourceGroup.isBlank()) {
             return false;
@@ -58,6 +61,7 @@ public class ResourceGroupService {
         return DEFAULT_RESOURCE_GROUPS_BY_ENGINE.getOrDefault(normalizedEngine, Set.of()).contains(resourceGroup);
     }
 
+    /** 判断计算画像是否属于代码内置默认契约，不访问数据库。 */
     public static boolean defaultSupportsComputeProfile(String resourceGroup, String computeProfile) {
         if (resourceGroup == null || resourceGroup.isBlank() || computeProfile == null || computeProfile.isBlank()) {
             return false;
@@ -65,6 +69,11 @@ public class ResourceGroupService {
         return DEFAULT_COMPUTE_PROFILES_BY_GROUP.getOrDefault(resourceGroup, Set.of()).contains(computeProfile);
     }
 
+    /**
+     * 返回平台默认组与租户私有组的合并视图。
+     *
+     * <p>同 code 的租户组覆盖平台组，计算画像则按 code 逐项覆盖，形成可定制默认值。
+     */
     @Transactional(readOnly = true)
     public List<ResourceGroupDTO> listResourceGroups() {
         UUID tenantId = TenantContext.getTenantId();
@@ -83,6 +92,7 @@ public class ResourceGroupService {
             .toList();
     }
 
+    /** 创建或更新当前租户资源组，并写入审计日志。 */
     @Transactional
     public ResourceGroupDTO upsertResourceGroup(ResourceGroupRequest request) {
         UUID tenantId = requireTenant();
@@ -110,6 +120,7 @@ public class ResourceGroupService {
         return toDTO(group, computeProfileRepo.findByResourceGroupIdOrderByCodeAsc(group.getId()));
     }
 
+    /** 在当前租户资源组下创建或更新计算画像，并写入审计日志。 */
     @Transactional
     public ComputeProfileDTO upsertComputeProfile(String groupCode, ComputeProfileRequest request) {
         UUID tenantId = requireTenant();
@@ -140,6 +151,7 @@ public class ResourceGroupService {
         return toDTO(profile);
     }
 
+    /** 校验运行引擎是否可以使用当前租户可见的资源组。 */
     @Transactional(readOnly = true)
     public boolean supportsResourceGroup(String engine, String resourceGroup) {
         String normalizedEngine = normalizeEngine(engine);
@@ -151,6 +163,7 @@ public class ResourceGroupService {
         return "ACTIVE".equalsIgnoreCase(item.getStatus()) && normalizedEngine.equalsIgnoreCase(item.getEngine());
     }
 
+    /** 校验计算画像在当前租户可见资源组中是否存在且处于 ACTIVE。 */
     @Transactional(readOnly = true)
     public boolean supportsComputeProfile(String resourceGroup, String computeProfile) {
         List<ResourceGroup> groups = visibleGroupsForComputeProfile(TenantContext.getTenantId(), resourceGroup);
@@ -177,6 +190,7 @@ public class ResourceGroupService {
         return groups;
     }
 
+    /** 租户同名配置优先于平台默认配置。 */
     private Optional<ResourceGroup> visibleResourceGroupByCode(UUID tenantId, String code) {
         String normalizedCode = normalizeCode(code);
         if (tenantId != null) {
@@ -213,6 +227,7 @@ public class ResourceGroupService {
             .collect(Collectors.groupingBy(ComputeProfile::getResourceGroupId, LinkedHashMap::new, Collectors.toList()));
     }
 
+    /** 合并平台和租户计算画像；同 code 的租户画像覆盖平台画像。 */
     private List<ComputeProfile> profilesForVisibleGroup(
         ResourceGroup group,
         ResourceGroup globalGroup,

@@ -12,7 +12,9 @@ import java.util.UUID;
  */
 public interface OperatorVersionRepository extends JpaRepository<OperatorVersion, UUID> {
 
+    /** 按算子和语义版本定位不可变 Manifest。 */
     Optional<OperatorVersion> findByOperatorIdAndVersion(UUID operatorId, String version);
 
+    /** 按发布时间倒序返回算子版本历史。 */
     List<OperatorVersion> findByOperatorIdOrderByCreatedAtDesc(UUID operatorId);
 }

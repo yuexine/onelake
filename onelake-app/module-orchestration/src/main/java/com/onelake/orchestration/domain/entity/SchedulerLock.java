@@ -20,16 +20,20 @@ import java.time.Instant;
 @Setter
 public class SchedulerLock {
 
+    /** 业务锁名；PipelineSchedulerService 使用固定全局键 pipeline-scheduler。 */
     @Id
     @Column(name = "lock_key", nullable = false, length = 64)
     private String lockKey;
 
+    /** 本次持有者随机令牌；释放时必须同时匹配锁名和令牌。 */
     @Column(nullable = false, length = 128)
     private String holder;
 
+    /** 当前持有者成功获得或接管锁的数据库时间。 */
     @Column(name = "acquired_at", nullable = false)
     private Instant acquiredAt;
 
+    /** 租约到期时刻；实例故障后其他副本可在此时刻之后接管。 */
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 }

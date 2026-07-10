@@ -9,20 +9,25 @@ import java.time.ZonedDateTime;
 import java.util.Locale;
 
 /**
- * Computes Airflow-style data intervals for scheduled pipeline runs.
+ * 计算调度运行的 Airflow 风格业务数据区间。
  *
- * <p>The supplied base instant is the cron hit time, i.e. the end of the
- * interval that has just become eligible to run. Consequently the logical
- * date is the previous interval start, never the actual launch time.
+ * <p>输入的 scheduledAt 是 cron 命中计划点，也是刚刚变为可运行的数据区间右边界；
+ * logicalDate 取上一周期起点，而不是实际启动时间。所有加减周期均在 DAG 时区中进行，
+ * 因此日粒度能够正确跨越 DST，月粒度能够正确处理月末。
  */
 @Component
 public class DataIntervalCalculator {
 
+    /** 从短到长扩大 cron 反向搜索窗口，兼顾常见周期性能和稀疏月度计划。 */
     private static final long[] CRON_LOOKBACK_DAYS = {2, 8, 40, 400};
 
     /**
-     * Accepts either a supported grain ({@code HOUR}, {@code DAY},
-     * {@code MONTH}) or a six-field Spring cron expression.
+     * 根据计划点计算刚结束的业务数据区间。
+     *
+     * @param cronOrGrain HOUR、DAY、MONTH，或受支持的 Spring 六字段 cron
+     * @param scheduledAt cron 命中的计划时刻
+     * @param timezone DAG 业务时区
+     * @return logicalDate、dataIntervalStart、dataIntervalEnd 三元组
      */
     public DataInterval calculate(String cronOrGrain, Instant scheduledAt, String timezone) {
         if (scheduledAt == null) {
@@ -33,6 +38,7 @@ public class DataIntervalCalculator {
         if (grain == null) {
             return calculateCron(cronOrGrain, scheduledAt.atZone(zoneId));
         }
+        // 显式粒度直接在业务时区向前移动一个自然周期，避免用固定秒数破坏 DST/月末。
         ZonedDateTime intervalEnd = scheduledAt.atZone(zoneId);
         ZonedDateTime intervalStart = previous(intervalEnd, grain);
         Instant start = intervalStart.toInstant();
@@ -40,9 +46,14 @@ public class DataIntervalCalculator {
     }
 
     /**
-     * Completes a MANUAL context that only supplied its logical date. The
-     * logical date is already the interval start, so the end is advanced in
-     * the DAG timezone to preserve DST and month-end semantics.
+     * 补齐仅提供 logicalDate 的手动运行上下文。
+     *
+     * <p>logicalDate 已是区间起点，因此在 DAG 时区中向后推进一个自然周期得到右边界。
+     *
+     * @param grain HOUR、DAY 或 MONTH
+     * @param logicalDate 已指定的业务周期起点
+     * @param timezone DAG 业务时区
+     * @return 完整业务数据区间
      */
     public DataInterval calculateFromLogicalDate(String grain, Instant logicalDate, String timezone) {
         if (logicalDate == null) {
@@ -93,6 +104,7 @@ public class DataIntervalCalculator {
     private ZonedDateTime previousCronHit(CronExpression expression,
                                           ZonedDateTime intervalEnd,
                                           String cron) {
+        // CronExpression 只提供 next()；逐级扩大向前搜索范围，再正向扫描到基准命中点。
         for (long lookbackDays : CRON_LOOKBACK_DAYS) {
             ZonedDateTime previous = scanPreviousCronHit(
                     expression,
@@ -142,7 +154,7 @@ public class DataIntervalCalculator {
         };
     }
 
-    /** Validates the hourly/daily/monthly cron subset supported by C1. */
+    /** 校验 C1 当前支持的小时/日/月 cron 子集，拒绝会产生重叠区间的小时以下计划。 */
     private void validateCronShape(String cron) {
         String[] fields = cron.trim().split("\\s+");
         if (fields.length != 6) {
@@ -171,11 +183,19 @@ public class DataIntervalCalculator {
         MONTH
     }
 
+    /**
+     * 统一业务数据区间值对象。
+     *
+     * @param logicalDate 业务周期标识，等于 dataIntervalStart
+     * @param dataIntervalStart 数据区间左边界
+     * @param dataIntervalEnd 数据区间右边界
+     */
     public record DataInterval(
             Instant logicalDate,
             Instant dataIntervalStart,
             Instant dataIntervalEnd
     ) {
+        /** 将区间绑定运行模式、时区和触发来源，生成统一 RunContext。 */
         public RunContext toRunContext(String timezone,
                                        String runMode,
                                        java.util.UUID backfillId,

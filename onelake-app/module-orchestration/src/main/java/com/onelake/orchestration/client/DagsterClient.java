@@ -16,8 +16,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Dagster GraphQL 客户端（对应《技术初始化文档》§6.5 编排模块）。
- * 调 Dagster GraphQL 触发物化（launchRun）。
+ * 编排控制面访问 Dagster GraphQL API 的轻量客户端。
+ *
+ * <p>封装作业启动、子图选择、运行状态、终止、仓库作业发现和 code location 重载。
+ * 所有 GraphQL union 响应都在此转换为明确结果或 {@link DataplaneException}，上层服务
+ * 无需感知 Dagster 的响应结构。</p>
  */
 @Component
 @RequiredArgsConstructor
@@ -115,10 +118,12 @@ public class DagsterClient {
     @Value("${onelake.dataplane.dagster.graphql-url:http://localhost:3000/graphql}")
     private String graphqlUrl;
 
+    /** 启动不携带 runConfig 和标签的 Dagster 作业。 */
     public String launch(String jobName, String repo, String location) {
         return launch(jobName, repo, location, null, null);
     }
 
+    /** 启动完整作业，并携带由 Java 控制面生成的 runConfig 与运行标签。 */
     public String launch(String jobName, String repo, String location,
                          Map<String, Object> runConfig,
                          Iterable<Map<String, String>> tags) {
@@ -126,9 +131,12 @@ public class DagsterClient {
     }
 
     /**
-     * Launch a Dagster job, optionally selecting a concrete task subgraph.
-     * GRAPH-mode reruns use this so Java only supplies config for the selected
-     * nodes while Dagster keeps their native step identities.
+     * 启动 Dagster 作业，并可选择具体节点子图。
+     *
+     * <p>GRAPH 节点重跑通过 {@code solidSelection} 只提交目标子图；runConfig 仍由 Java
+     * 提供，而 Dagster 保留选中节点原生的 step identity。</p>
+     *
+     * @return Dagster runId
      */
     public String launch(String jobName, String repo, String location,
                          Map<String, Object> runConfig,
@@ -181,6 +189,7 @@ public class DagsterClient {
         return resp.at("/data/launchRun/message").asText(resp.toString());
     }
 
+    /** 查询 Dagster 运行状态，并把秒级 Unix 时间转换为 {@link Instant}。 */
     public RunStatus getRunStatus(String runId) {
         WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
         JsonNode resp = client.post()
@@ -244,6 +253,7 @@ public class DagsterClient {
         throw new DataplaneException("dagster terminate failed: " + message);
     }
 
+    /** 查询指定 repository/code location 当前暴露的全部作业名。 */
     public List<String> listJobs(String repo, String location) {
         WebClient client = webClientBuilder.baseUrl(graphqlUrl).build();
         JsonNode resp = client.post()
@@ -332,6 +342,11 @@ public class DagsterClient {
 
     /**
      * Dagster 运行状态查询结果。
+     *
+     * @param runId Dagster run ID
+     * @param status Dagster 原始状态字符串，由上层统一映射为 DagStatus
+     * @param startedAt Dagster 报告的开始时间，可为空
+     * @param finishedAt Dagster 报告的结束时间，可为空
      */
     public record RunStatus(String runId, String status, Instant startedAt, Instant finishedAt) {}
 }

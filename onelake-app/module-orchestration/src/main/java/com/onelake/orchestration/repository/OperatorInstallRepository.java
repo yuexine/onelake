@@ -12,7 +12,9 @@ import java.util.UUID;
  */
 public interface OperatorInstallRepository extends JpaRepository<OperatorInstall, UUID> {
 
+    /** 查询租户全部已安装算子。 */
     List<OperatorInstall> findByTenantId(UUID tenantId);
 
+    /** 查询租户对确定算子的安装和固定版本信息。 */
     Optional<OperatorInstall> findByTenantIdAndOperatorId(UUID tenantId, UUID operatorId);
 }

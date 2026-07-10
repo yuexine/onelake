@@ -14,6 +14,7 @@ import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.repository.BackfillRepository;
 import com.onelake.orchestration.repository.BackfillRunRepository;
 import com.onelake.orchestration.repository.DagRepository;
+import com.onelake.orchestration.repository.JobRunRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,7 @@ class BackfillServiceTest {
     @Mock private BackfillRepository backfillRepo;
     @Mock private BackfillRunRepository backfillRunRepo;
     @Mock private DagRepository dagRepo;
+    @Mock private JobRunRepository jobRunRepo;
     @Mock private OrchestrationService orchestrationService;
 
     private BackfillService service;
@@ -60,7 +62,8 @@ class BackfillServiceTest {
     void setUp() {
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
-        service = new BackfillService(backfillRepo, backfillRunRepo, dagRepo, orchestrationService);
+        service = new BackfillService(
+                backfillRepo, backfillRunRepo, dagRepo, jobRunRepo, orchestrationService);
         lenient().when(backfillRepo.save(any(Backfill.class))).thenAnswer(invocation -> {
             Backfill backfill = invocation.getArgument(0);
             if (backfill.getId() == null) {
@@ -136,6 +139,35 @@ class BackfillServiceTest {
     }
 
     @Test
+    void createCatchupBackfillPersistsOnlyExactCronWindows() {
+        List<BackfillRun> plannedRuns = new ArrayList<>();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag()));
+        when(backfillRunRepo.saveAll(any())).thenAnswer(invocation -> {
+            Iterable<BackfillRun> runs = invocation.getArgument(0);
+            runs.forEach(plannedRuns::add);
+            return plannedRuns;
+        });
+        List<DataIntervalCalculator.DataInterval> intervals = List.of(
+                new DataIntervalCalculator.DataInterval(
+                        Instant.parse("2026-01-01T00:00:00Z"),
+                        Instant.parse("2026-01-01T00:00:00Z"),
+                        Instant.parse("2026-01-02T00:00:00Z")),
+                new DataIntervalCalculator.DataInterval(
+                        Instant.parse("2026-01-08T00:00:00Z"),
+                        Instant.parse("2026-01-08T00:00:00Z"),
+                        Instant.parse("2026-01-09T00:00:00Z")));
+
+        BackfillDTO dto = service.createCatchupBackfill(DAG_ID, intervals, "DAY", 2);
+
+        assertThat(dto.totalRuns()).isEqualTo(2);
+        assertThat(plannedRuns)
+                .extracting(BackfillRun::getLogicalDate)
+                .containsExactly(
+                        Instant.parse("2026-01-01T00:00:00Z"),
+                        Instant.parse("2026-01-08T00:00:00Z"));
+    }
+
+    @Test
     void listJobRunsValidatesTenantBackfillAndDelegatesPagedQuery() {
         Backfill backfill = backfill(BackfillStatus.RUNNING, 2);
         PageRequest pageable = PageRequest.of(0, 20);
@@ -207,6 +239,27 @@ class BackfillServiceTest {
         assertThat(TenantContext.getUserId()).isNull();
         assertThat(TenantContext.getUsername()).isNull();
         verify(orchestrationService).triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class));
+    }
+
+    @Test
+    void dispatchBackfillAlsoHonorsDagMaxActiveRuns() {
+        Backfill backfill = backfill(BackfillStatus.QUEUED, 2);
+        BackfillRun queued = backfillRun(
+                Instant.parse("2026-01-01T00:00:00Z"), BackfillRunStatus.QUEUED);
+        Dag dag = dag();
+        dag.setMaxActiveRuns(1);
+
+        when(backfillRepo.findByIdForUpdate(BACKFILL_ID)).thenReturn(Optional.of(backfill));
+        when(backfillRunRepo.findByBackfillIdForUpdate(BACKFILL_ID)).thenReturn(List.of(queued));
+        when(backfillRunRepo.countByBackfillIdAndStatus(BACKFILL_ID, BackfillRunStatus.RUNNING))
+                .thenReturn(0L);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(jobRunRepo.countByDagIdAndStatusIn(eq(DAG_ID), any())).thenReturn(1L);
+
+        assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
+
+        verify(orchestrationService, never()).triggerPipelineRun(
                 eq(DAG_ID), eq(TriggerType.BACKFILL), any(RunContext.class));
     }
 

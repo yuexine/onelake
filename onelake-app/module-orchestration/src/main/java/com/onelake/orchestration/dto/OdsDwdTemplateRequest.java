@@ -16,13 +16,21 @@ import java.util.UUID;
  *
  * <p>{@code modelId}/{@code dbtModelName} 保留为历史迁移和命名线索；
  * 统一流水线主路径不再创建外部模型任务。
+ *
+ * @param pipelineName 新流水线名称
+ * @param modelId 已校验的历史 modeling.data_model
+ * @param sourceFqn ODS 来源表，也是 SYNC_REF 目标
+ * @param targetFqn Spark DWD 输出表
+ * @param dbtModelName 历史命名线索，不作为引擎选择器
+ * @param includeQualityGate 是否追加质量门禁节点
+ * @param includeFieldGovernance 是否追加字段治理节点
  */
 public record OdsDwdTemplateRequest(
         String pipelineName,
-        UUID modelId,           // 已校验的历史 modeling.data_model。
-        String sourceFqn,       // model.source_fqn，作为 SYNC_REF 目标。
-        String targetFqn,       // Spark DWD 目标写入表。
-        String dbtModelName,    // 历史命名线索，不作为引擎选择器。
+        UUID modelId,
+        String sourceFqn,
+        String targetFqn,
+        String dbtModelName,
         boolean includeQualityGate,
         boolean includeFieldGovernance
 ) {}

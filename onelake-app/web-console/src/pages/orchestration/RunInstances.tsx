@@ -1104,7 +1104,7 @@ export default function RunInstances() {
         meta={[
           { label: backfillIdFilter ? '已派发' : dagIdFilter ? '当前流水线' : '当前页', value: backfillIdFilter ? total : counts.total },
           { label: '成功', value: backfillGroup?.succeeded ?? counts.success },
-          { label: '失败', value: backfillGroup?.failed ?? counts.failed },
+          { label: backfillIdFilter ? '失败/取消' : '失败', value: backfillGroup?.failed ?? counts.failed },
           { label: backfillIdFilter ? '批次状态' : '回填批次', value: backfillGroup?.status ?? counts.backfills },
         ]}
         actions={(

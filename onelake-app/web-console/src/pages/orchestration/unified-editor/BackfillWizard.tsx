@@ -145,7 +145,7 @@ export function BackfillWizard({ dagId, open, onCancel, onCreated }: BackfillWiz
       open={open}
       title="创建回填"
       width={620}
-      destroyOnClose
+      destroyOnHidden
       maskClosable={!submitting}
       closable={!submitting}
       onCancel={onCancel}

@@ -11,6 +11,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -80,6 +81,11 @@ public class TaskRun {
     /** 节点产物位置，例如 table:FQN 或对象存储 URI。 */
     @Column(length = 512)
     private String artifactPath;
+
+    /** 上游节点输出快照，供下游节点参数注入。 */
+    @Column(columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
+    private String outputs;
 
     private Instant startedAt;
     private Instant finishedAt;

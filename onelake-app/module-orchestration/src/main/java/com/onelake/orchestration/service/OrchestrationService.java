@@ -52,7 +52,6 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -621,7 +620,16 @@ public class OrchestrationService {
                 pipelineEdges,
                 pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                 Math.max(1, pipelineMaxParallel),
-                baseAttempts);
+                baseAttempts,
+                new RunContext(
+                        run.getLogicalDate(),
+                        run.getDataIntervalStart(),
+                        run.getDataIntervalEnd(),
+                        run.getTimezone(),
+                        run.getRunMode(),
+                        run.getBackfillId(),
+                        run.getTriggerType())
+                        .builtInParameters(run.getId()));
 
         try {
             String dagsterRunId = dagster.launch(
@@ -833,7 +841,7 @@ public class OrchestrationService {
                                                     List<PipelineTaskEdge> pipelineEdges,
                                                     RunContext runContext) {
         // GRAPH/LEGACY 只影响 Dagster 作业与 runConfig 形状，C3 仍保持 Java 生成、Dagster 执行。
-        Map<String, String> runtimeParams = pipelineRunRuntimeParams(runContext);
+        Map<String, String> runtimeParams = runContext.builtInParameters(ctx.runId());
         if (isGraphPipelineExecutionMode()) {
             return sparkBuilder.buildGraphRunConfig(
                     ctx,
@@ -875,18 +883,6 @@ public class OrchestrationService {
         return tags;
     }
 
-    private Map<String, String> pipelineRunRuntimeParams(RunContext runContext) {
-        if (runContext == null || runContext.logicalDate() == null) {
-            return Map.of();
-        }
-        Instant logicalDate = runContext.logicalDate();
-        Map<String, String> params = new LinkedHashMap<>();
-        params.put("bizdate", DateTimeFormatter.ISO_LOCAL_DATE
-                .format(logicalDate.atZone(resolveRunTimezone(runContext.timezone())).toLocalDate()));
-        params.put("logical_date", logicalDate.toString());
-        return params;
-    }
-
     private RunContext normalizeRunContext(RunContext context, Dag dag, TriggerType trigger) {
         String defaultTimezone = StringUtils.hasText(dag.getTimezone()) ? dag.getTimezone() : "Asia/Shanghai";
         RunContext normalized = (context == null ? RunContext.empty(trigger) : context)
@@ -913,15 +909,6 @@ public class OrchestrationService {
             return normalized.validateBusinessTime();
         } catch (IllegalArgumentException ex) {
             throw new BizException(40020, "运行数据日期参数非法: " + ex.getMessage(), ex);
-        }
-    }
-
-    private ZoneId resolveRunTimezone(String timezone) {
-        try {
-            return ZoneId.of(StringUtils.hasText(timezone) ? timezone : "Asia/Shanghai");
-        } catch (RuntimeException ex) {
-            log.warn("流水线运行上下文 timezone '{}' 非法，回退 Asia/Shanghai", timezone);
-            return ZoneId.of("Asia/Shanghai");
         }
     }
 

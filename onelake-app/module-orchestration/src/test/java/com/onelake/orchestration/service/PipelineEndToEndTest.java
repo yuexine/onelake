@@ -87,6 +87,7 @@ class PipelineEndToEndTest {
     @Mock private OutboxPublisher outboxPublisher;
     @Mock private RuntimeContractService runtimeContractService;
     @Mock private PipelineLogStorage pipelineLogStorage;
+    @Mock private ParamResolver paramResolver;
 
     private PipelineService pipelineService;
     private PipelineCompileService compileService;
@@ -111,7 +112,7 @@ class PipelineEndToEndTest {
                 runRepo, compileService, outboxProvider);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
-                new SparkRunConfigBuilder(), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
+                new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
 
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();

@@ -5,15 +5,34 @@ import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
+import com.onelake.orchestration.service.ParamResolver;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SparkRunConfigBuilderTest {
+
+    private final ParamResolver paramResolver = mock(ParamResolver.class);
+    private final SparkRunConfigBuilder builder = new SparkRunConfigBuilder(paramResolver);
+
+    @BeforeEach
+    void setup() {
+        reset(paramResolver);
+        when(paramResolver.resolveForTasks(any(), any(), anyCollection())).thenReturn(Map.of());
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -52,7 +71,7 @@ class SparkRunConfigBuilderTest {
                 pipelineId, tenantId, runId, compile,
                 "pipeline_" + pipelineId, "spark-default", "spark-small");
 
-        DagsterRunConfig config = new SparkRunConfigBuilder().build(
+        DagsterRunConfig config = builder.build(
                 context,
                 List.of(gate),
                 "http://localhost:8080");
@@ -109,7 +128,7 @@ class SparkRunConfigBuilderTest {
         PipelineTaskEdge pipelineEdge = edge("sync_user", "spark_dwd", EdgeLayer.PIPELINE);
         PipelineTaskEdge crossEngineEdge = edge("sync_user", "ignored", EdgeLayer.CROSS_ENGINE);
 
-        DagsterRunConfig config = new SparkRunConfigBuilder().buildGraphRunConfig(
+        DagsterRunConfig config = builder.buildGraphRunConfig(
                 context,
                 List.of(sync, spark),
                 List.of(pipelineEdge, crossEngineEdge),
@@ -126,6 +145,8 @@ class SparkRunConfigBuilderTest {
         assertThat(sparkNode).containsEntry("max_retries", 2);
         assertThat(sparkNode).containsEntry("callback_base_url", "http://localhost:8080");
         assertThat((List<String>) sparkNode.get("from_tables")).containsExactly("onelake.ods.user");
+        verify(paramResolver).resolveForTasks(
+                tenantId, pipelineId, Set.of("sync_user", "spark_dwd"));
         Map<String, Object> execution = (Map<String, Object>) config.opConfig().get("execution");
         assertThat(execution).isEqualTo(Map.of("config", Map.of("max_concurrent", 6)));
     }
@@ -154,7 +175,7 @@ class SparkRunConfigBuilderTest {
                 pipelineId, tenantId, runId, compile,
                 "pipeline_" + pipelineId, "spark-default", "spark-small");
 
-        DagsterRunConfig config = new SparkRunConfigBuilder().buildGraphRunConfig(
+        DagsterRunConfig config = builder.buildGraphRunConfig(
                 context,
                 List.of(failed, downstream),
                 List.of(
@@ -171,6 +192,47 @@ class SparkRunConfigBuilderTest {
         Map<String, Object> downstreamOp = (Map<String, Object>) ops.get("downstream");
         assertThat(((Map<String, Object>) failedOp.get("config"))).containsEntry("base_attempt", 3);
         assertThat(((Map<String, Object>) downstreamOp.get("config"))).containsEntry("base_attempt", 2);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void rendersTaskScopedParamsAndKeepsBuiltInsAuthoritative() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask task = task(pipelineId, tenantId, "daily", TaskType.SPARK_SQL, true, """
+            {"sql":"select '${region}', '${run_id}', '${missing}'"}
+            """);
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                        true, task.getTargetFqn(), null)),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+        when(paramResolver.resolveForTasks(
+                eq(tenantId), eq(pipelineId), anyCollection()))
+                .thenReturn(Map.of("daily", Map.of(
+                        "region", "eu", "run_id", "user-value")));
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context, List.of(task), List.of(), "", 1, Map.of(),
+                Map.of("run_id", runId.toString()));
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> op = (Map<String, Object>) ops.get("daily");
+        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
+        assertThat(opConfig.get("sql_or_script"))
+                .isEqualTo("select 'eu', '" + runId + "', '${missing}'");
+        assertThat((List<Map<String, String>>) opConfig.get("runtime_params"))
+                .containsExactlyInAnyOrder(
+                        Map.of("key", "region", "value", "eu"),
+                        Map.of("key", "run_id", "value", runId.toString()));
     }
 
     private PipelineTask task(UUID pipelineId, UUID tenantId, String key, TaskType type,

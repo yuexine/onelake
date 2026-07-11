@@ -5,8 +5,12 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.PipelineCompileResult.TaskCompileResult;
+import com.onelake.orchestration.service.ParamRenderer;
+import com.onelake.orchestration.service.ParamResolver;
+import com.onelake.orchestration.service.RunContext;
 import com.onelake.common.util.JsonUtil;
 import com.fasterxml.jackson.databind.JsonNode;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -29,12 +33,15 @@ import java.util.Map;
  * 会渲染成 PySpark 断言脚本，并放入同一个 Spark 节点包中执行。
  */
 @Component
+@RequiredArgsConstructor
 @Slf4j
 public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
     private static final String JOB_NAME = "onelake_pipeline_run";
     private static final String OP_NAME = "run_spark_task_op";
     private static final String GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
+
+    private final ParamResolver paramResolver;
 
     /** 声明该构建器处理 Spark 家族节点。 */
     @Override
@@ -72,11 +79,14 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(java.util.stream.Collectors.toMap(PipelineTask::getTaskKey, t -> t, (a, b) -> a));
+        Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
+                ctx, taskByKey.keySet());
         for (TaskCompileResult result : plan.tasks()) {
             if (result.taskType() == null || !isSparkRuntimeType(result.taskType())) continue;
             PipelineTask task = taskByKey.get(result.taskKey());
             if (task == null || !Boolean.TRUE.equals(task.getExecutable())) continue;
-            sparkTasks.add(buildPerTaskOpConfig(task, null));
+            sparkTasks.add(buildPerTaskOpConfig(
+                    task, null, resolveTaskParameters(task, runtimeParams, userParamsByTask)));
         }
 
         Map<String, Object> opConfig = new LinkedHashMap<>();
@@ -133,13 +143,19 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                         LinkedHashMap::new));
         // base_attempt 只在重跑子图时由服务层传入；普通触发默认 1，保持旧 GRAPH 行为不变。
         Map<String, Integer> safeBaseAttempts = baseAttempts == null ? Map.of() : baseAttempts;
+        Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
+                ctx, taskByKey.keySet());
+        Map<String, Map<String, String>> paramsByTaskKey = new LinkedHashMap<>();
         List<Map<String, Object>> nodes = new ArrayList<>();
         for (TaskCompileResult result : plan.tasks()) {
             PipelineTask task = taskByKey.get(result.taskKey());
             if (task == null) {
                 continue;
             }
-            Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(task, null));
+            Map<String, String> taskParams = resolveTaskParameters(
+                    task, runtimeParams, userParamsByTask);
+            paramsByTaskKey.put(task.getTaskKey(), taskParams);
+            Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(task, null, taskParams));
             node.put("base_attempt", Math.max(1, safeBaseAttempts.getOrDefault(task.getTaskKey(), 1)));
             node.put("max_retries", resolveMaxRetries(task));
             nodes.add(node);
@@ -157,7 +173,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             opConfig.put("tenant_id", ctx.tenantId().toString());
             opConfig.put("iceberg_catalog", "onelake");
             opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
-            opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
+            opConfig.put("runtime_params", runtimeParamEntries(
+                    paramsByTaskKey.getOrDefault(taskKey, runtimeParams == null ? Map.of() : runtimeParams)));
             ops.put(taskKey, Map.of("config", opConfig));
         }
         return new DagsterRunConfig(graphJobName(ctx.pipelineId()), Map.of(
@@ -181,6 +198,13 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
      * script/sql。调用方传入的资源配置优先于节点内配置。</p>
      */
     public Map<String, Object> buildPerTaskOpConfig(PipelineTask task, Map<String, Object> resourceProfile) {
+        return buildPerTaskOpConfig(task, resourceProfile, Map.of());
+    }
+
+    /** 为单个节点生成配置，并在输出 sql_or_script 前完成 H1 参数替换。 */
+    public Map<String, Object> buildPerTaskOpConfig(PipelineTask task,
+                                                    Map<String, Object> resourceProfile,
+                                                    Map<String, String> params) {
         Map<String, Object> opConfig = new LinkedHashMap<>();
         opConfig.put("task_key", task.getTaskKey());
         String taskType = task.getTaskType().name();
@@ -190,13 +214,14 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         // 解析 config jsonb，提取 script/sql/from_tables。
         JsonNode cfg = parseSafe(task.getConfig());
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
-            opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task));
+            opConfig.put("sql_or_script", ParamRenderer.render(QualityGateScriptRenderer.render(task), params));
             String target = QualityGateScriptRenderer.targetFqn(task, cfg);
             opConfig.put("from_tables", StringUtils.hasText(target) ? List.of(target) : List.of());
         } else {
             String sql = textOrEmpty(cfg, "sql");
             String script = textOrEmpty(cfg, "script");
-            opConfig.put("sql_or_script", StringUtils.hasText(script) ? script : sql);
+            opConfig.put("sql_or_script", ParamRenderer.render(
+                    StringUtils.hasText(script) ? script : sql, params));
             opConfig.put("from_tables", textArray(cfg.path("from_tables")));
         }
 
@@ -204,6 +229,23 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         opConfig.put("resource_profile", profile);
 
         return opConfig;
+    }
+
+    private Map<String, Map<String, String>> resolveUserParameters(
+            TaskBundleContext ctx,
+            java.util.Collection<String> taskKeys) {
+        Map<String, Map<String, String>> resolved = paramResolver.resolveForTasks(
+                ctx.tenantId(), ctx.pipelineId(), taskKeys);
+        return resolved == null ? Map.of() : resolved;
+    }
+
+    private Map<String, String> resolveTaskParameters(
+            PipelineTask task,
+            Map<String, String> builtInParams,
+            Map<String, Map<String, String>> userParamsByTask) {
+        Map<String, String> userParams = userParamsByTask.getOrDefault(
+                task.getTaskKey(), Map.of());
+        return RunContext.mergeWithBuiltIns(userParams, builtInParams);
     }
 
     private static List<Map<String, String>> runtimeParamEntries(Map<String, String> runtimeParams) {

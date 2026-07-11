@@ -3,6 +3,12 @@ package com.onelake.orchestration.service;
 import com.onelake.orchestration.domain.enums.TriggerType;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -29,6 +35,18 @@ public record RunContext(
         UUID backfillId,
         TriggerType triggerType
 ) {
+
+    /** 用户参数不得占用这些运行时保留键。 */
+    public static final Set<String> RESERVED_PARAM_KEYS = Set.of(
+            "run_id",
+            "logical_date",
+            "bizdate",
+            "data_interval_start",
+            "data_interval_end",
+            "timezone",
+            "run_mode",
+            "backfill_id",
+            "trigger_type");
 
     /** 创建不携带业务时间的兼容上下文。 */
     public static RunContext empty(TriggerType triggerType) {
@@ -84,6 +102,59 @@ public record RunContext(
     }
 
     /**
+     * 生成本次运行的内置参数。内置键是保留键，合并时始终优先于用户参数。
+     * 时间为空的兼容触发路径不会伪造 logical date/data interval 参数。
+     */
+    public Map<String, String> builtInParameters(UUID runId) {
+        Map<String, String> params = new LinkedHashMap<>();
+        put(params, "run_id", runId);
+        put(params, "logical_date", logicalDate);
+        if (logicalDate != null) {
+            params.put("bizdate", DateTimeFormatter.ISO_LOCAL_DATE.format(
+                    logicalDate.atZone(resolveTimezone(timezone)).toLocalDate()));
+        }
+        put(params, "data_interval_start", dataIntervalStart);
+        put(params, "data_interval_end", dataIntervalEnd);
+        put(params, "timezone", timezone);
+        put(params, "run_mode", runMode);
+        put(params, "backfill_id", backfillId);
+        put(params, "trigger_type", triggerType == null ? null : triggerType.name());
+        return Collections.unmodifiableMap(params);
+    }
+
+    /**
+     * 合并用户参数和当前运行内置参数。所有保留键先从用户字典移除，再写入真实内置值，
+     * 因而即使某个内置值在兼容上下文中为空，也不能由用户伪造。
+     */
+    public Map<String, String> finalParameters(UUID runId, Map<String, String> userParameters) {
+        return mergeWithBuiltIns(userParameters, builtInParameters(runId));
+    }
+
+    /** 供 runConfig 构建器把逐节点用户参数与已生成的内置参数合并。 */
+    public static Map<String, String> mergeWithBuiltIns(
+            Map<String, String> userParameters,
+            Map<String, String> builtInParameters) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        if (userParameters != null) {
+            userParameters.forEach((key, value) -> {
+                if (key != null && !key.isBlank() && value != null && !RESERVED_PARAM_KEYS.contains(key)) {
+                    merged.put(key, value);
+                }
+            });
+        }
+        if (builtInParameters != null) {
+            builtInParameters.forEach((key, value) -> {
+                if (key != null && !key.isBlank() && value != null) {
+                    merged.put(key, value);
+                }
+            });
+        }
+        return merged.isEmpty()
+                ? Map.of()
+                : Collections.unmodifiableMap(merged);
+    }
+
+    /**
      * 在持久化前校验业务时间元组完整性。
      *
      * <p>全空时间字段仍合法；只有 logicalDate 的 MANUAL 上下文也合法，并由
@@ -117,5 +188,19 @@ public record RunContext(
 
     private static boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private static void put(Map<String, String> target, String key, Object value) {
+        if (value != null) {
+            target.put(key, value.toString());
+        }
+    }
+
+    private static ZoneId resolveTimezone(String value) {
+        try {
+            return ZoneId.of(hasText(value) ? value : "Asia/Shanghai");
+        } catch (RuntimeException ignored) {
+            return ZoneId.of("Asia/Shanghai");
+        }
     }
 }

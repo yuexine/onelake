@@ -875,7 +875,7 @@ class OrchestrationServiceTest {
                 .thenReturn(List.of(failedTask, downstreamTask));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
                 .thenReturn(List.of(pipelineEdge("failed", "downstream")));
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap(), anyMap()))
                 .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
         when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-single");
@@ -905,7 +905,8 @@ class OrchestrationServiceTest {
                 eq(""),
                 eq(4),
                 argThat(baseAttempts -> baseAttempts.size() == 1
-                        && Integer.valueOf(3).equals(baseAttempts.get("failed"))));
+                        && Integer.valueOf(3).equals(baseAttempts.get("failed"))),
+                argThat(params -> RUN_ID.toString().equals(params.get("run_id"))));
     }
 
     @Test
@@ -940,7 +941,7 @@ class OrchestrationServiceTest {
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
                 .thenReturn(List.of(rootTask, leftTask, rightTask, joinTask));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(edges);
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap(), anyMap()))
                 .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
         when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-downstream");
@@ -964,7 +965,8 @@ class OrchestrationServiceTest {
                 eq(edges),
                 eq(""),
                 eq(4),
-                argThat(baseAttempts -> baseAttempts.equals(Map.of("left", 3, "join", 2))));
+                argThat(baseAttempts -> baseAttempts.equals(Map.of("left", 3, "join", 2))),
+                argThat(params -> RUN_ID.toString().equals(params.get("run_id"))));
     }
 
     @Test
@@ -993,7 +995,7 @@ class OrchestrationServiceTest {
                 .thenReturn(pipelinePlan(upstreamTask, sparkTask, gateTask));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
                 .thenReturn(List.of(upstreamTask, sparkTask, gateTask));
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap(), anyMap()))
                 .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
         when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-resume");
@@ -1014,7 +1016,8 @@ class OrchestrationServiceTest {
                 eq(edges),
                 eq(""),
                 eq(4),
-                argThat(baseAttempts -> baseAttempts.equals(Map.of("spark_sql", 3, "quality_gate", 2))));
+                argThat(baseAttempts -> baseAttempts.equals(Map.of("spark_sql", 3, "quality_gate", 2))),
+                argThat(params -> RUN_ID.toString().equals(params.get("run_id"))));
     }
 
     @Test
@@ -1098,7 +1101,7 @@ class OrchestrationServiceTest {
                 .thenReturn(List.of(failedTask, downstreamTask));
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
                 .thenReturn(List.of(pipelineEdge("failed", "downstream")));
-        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap()))
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(), anyMap(), anyMap()))
                 .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
         when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList(), anyList())).thenThrow(new RuntimeException("connection refused"));

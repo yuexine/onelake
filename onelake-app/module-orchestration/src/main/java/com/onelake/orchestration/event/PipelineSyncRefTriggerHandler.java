@@ -67,6 +67,9 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     private static final Set<String> TRIGGERABLE_STATUSES = Set.of("VALIDATED", "PUBLISHED");
     private static final String LOCK_KEY_PREFIX = "asset-trigger:";
     private static final Duration LOCK_TTL = Duration.ofMinutes(5);
+    private static final String POLICY_LATEST = "LATEST";
+    private static final String POLICY_SAME_BATCH = "SAME_BATCH";
+    private static final String POLICY_SAME_FRESHNESS_WINDOW = "SAME_FRESHNESS_WINDOW";
 
     private final DagRepository dagRepo;
     private final PipelineSubscriptionRepository subscriptionRepo;
@@ -110,13 +113,15 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                         event.getId(), tenantIdRaw);
                 return;
             }
+            Instant logicalDate = instant(payload, "logicalDate", event.getId());
             EventAsset eventAsset = new EventAsset(
                     event.getId(),
                     tenantId,
                     assetFqn,
-                    text(payload, "batchId"),
+                    firstText(payload, "batchId", "batch_id"),
                     text(payload, "runId"),
-                    instant(payload, "logicalDate", event.getId()),
+                    logicalDate,
+                    freshnessWindow(payload, logicalDate),
                     text(payload, "pipelineId"),
                     event.getEventType(),
                     event.getOccurredAt() == null ? Instant.now() : event.getOccurredAt());
@@ -186,25 +191,35 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                                 (left, right) -> left,
                                 LinkedHashMap::new));
                 Set<SourceMatch> sourceMatches = new LinkedHashSet<>();
-                if (!readyInputs.isEmpty()) {
+                boolean implicitMatch = !readyInputs.isEmpty();
+                if (implicitMatch) {
                     sourceMatches.add(new SourceMatch(SOURCE_TYPE_ASSET, eventAsset.assetFqn()));
                 }
                 List<PipelineSubscription> explicit = subscriptionsByDag.getOrDefault(
                         liveDag.getId(), List.of());
-                explicit.forEach(subscription -> sourceMatches.add(new SourceMatch(
-                        subscription.getSourceType().toUpperCase(Locale.ROOT),
-                        subscription.getSourceRef())));
-                if (!explicit.isEmpty() && readyInputs.isEmpty()) {
-                    for (PipelineSubscription subscription : explicit) {
+                if (!implicitMatch) {
+                    explicit.forEach(subscription -> {
+                        sourceMatches.add(new SourceMatch(
+                                subscription.getSourceType().toUpperCase(Locale.ROOT),
+                                subscription.getSourceRef()));
                         readyInputs.put(subscriptionTaskKey(subscription), eventAsset.assetFqn());
-                    }
+                    });
                 }
+                List<PipelineSubscription> dagSubscriptions = implicitMatch || explicit.isEmpty()
+                        ? List.of()
+                        : enabledSubscriptions(liveDag.getId(), explicit);
+                Set<String> matchedSubscriptionInputs = (implicitMatch ? List.<PipelineSubscription>of() : explicit)
+                        .stream()
+                        .map(this::subscriptionTaskKey)
+                        .collect(Collectors.toCollection(LinkedHashSet::new));
                 if (!readyInputs.isEmpty()) {
                     candidates.add(new ReadyCandidate(
                             liveDag,
                             snapshot,
                             Map.copyOf(readyInputs),
-                            Set.copyOf(sourceMatches)));
+                            Set.copyOf(sourceMatches),
+                            List.copyOf(dagSubscriptions),
+                            Set.copyOf(matchedSubscriptionInputs)));
                 }
             } catch (BizException ex) {
                 log.warn("PipelineSyncRefTriggerHandler：加载 dag {} 已发布版本失败：{}",
@@ -212,6 +227,15 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             }
         }
         return candidates;
+    }
+
+    private List<PipelineSubscription> enabledSubscriptions(
+            UUID dagId,
+            List<PipelineSubscription> matched) {
+        Map<String, PipelineSubscription> subscriptions = new LinkedHashMap<>();
+        addSubscriptions(subscriptions, subscriptionRepo.findByDagIdAndEnabledTrue(dagId));
+        addSubscriptions(subscriptions, matched);
+        return List.copyOf(subscriptions.values());
     }
 
     private List<PipelineSubscription> matchingSubscriptions(EventAsset eventAsset) {
@@ -259,22 +283,22 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                     "流水线 " + dagId + " 正由其他副本处理资产触发");
         }
         try {
+            String triggerWindow = triggerWindow(candidate, eventAsset);
             List<TriggerIdentity> identities = candidate.sourceMatches().stream()
                     .map(source -> triggerIdentity(
-                            eventAsset, candidate.snapshot().version().getId(), source))
+                            candidate.snapshot().version().getId(), source, triggerWindow))
                     .toList();
             List<TriggerIdentity> pendingIdentities = identities.stream()
-                    .filter(identity -> !triggerReceiptRepo.existsByDagIdAndTriggerKey(
-                            dagId, identity.triggerKey()))
+                    .filter(identity -> !triggerReceiptRepo.existsByDagIdAndTriggerKeyAndStatus(
+                            dagId, identity.triggerKey(), "TRIGGERED"))
                     .toList();
             if (pendingIdentities.isEmpty()) {
                 log.info("PipelineSyncRefTriggerHandler：流水线 {} 已处理当前来源与业务窗口，跳过重复事件",
                         dagId);
                 return;
             }
-            if (!markReadyAndCheckBarrier(
-                    candidate.snapshot(), candidate.readyInputs(), eventAsset)) {
-                saveReceipts(candidate, eventAsset, pendingIdentities, "READY", null);
+            BarrierDecision barrier = markReadyAndCheckBarrier(candidate, eventAsset);
+            if (!barrier.ready()) {
                 return;
             }
             UUID versionId = candidate.snapshot().version().getId();
@@ -288,9 +312,9 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                     TriggerType.EVENT,
                     runContext,
                     versionId,
-                    runTriggerKey(versionId, eventAsset));
+                    runTriggerKey(versionId, triggerWindow));
             saveReceipts(candidate, eventAsset, pendingIdentities, "TRIGGERED", runId);
-            readinessRepo.deleteByDagId(dagId);
+            clearReadiness(dagId, barrier.taskKeys());
             log.info("PipelineSyncRefTriggerHandler：资产 {} 就绪后已触发流水线 {}",
                     eventAsset.assetFqn(), dagId);
         } catch (BizException e) {
@@ -312,15 +336,17 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     }
 
     /**
-     * 记录本次已就绪 SYNC_REF，并检查其共同下游的所有同步输入是否均已到达。
+     * 记录本次已就绪输入，并按目标节点的边/订阅新鲜度策略执行 barrier 判定。
      *
-     * <p>单输入目标无需等待；多输入目标只有缺失集合为空才允许触发整条流水线。
+     * <p>LATEST 任一输入最新到达即可；SAME_BATCH / SAME_FRESHNESS_WINDOW
+     * 等待全部输入并校验相应字段一致。旧事件缺少策略字段时退化为 LATEST。
      */
-    private boolean markReadyAndCheckBarrier(PipelineSnapshotService.ExecutionSnapshot snapshot,
-                                             Map<String, String> readyInputs,
-                                             EventAsset eventAsset) {
+    private BarrierDecision markReadyAndCheckBarrier(ReadyCandidate candidate,
+                                                      EventAsset eventAsset) {
+        PipelineSnapshotService.ExecutionSnapshot snapshot = candidate.snapshot();
+        Map<String, String> readyInputs = candidate.readyInputs();
         if (readyInputs == null || readyInputs.isEmpty()) {
-            return false;
+            return BarrierDecision.waiting();
         }
         UUID versionId = snapshot.version().getId();
         UUID dagId = snapshot.version().getDagId();
@@ -350,25 +376,47 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                         AssetReadiness::getTaskKey,
                         readiness -> readiness,
                         (left, right) -> left));
-        if (!readinessByTask.keySet().containsAll(readyInputs.keySet())) {
-            return false;
+
+        List<BarrierGroup> groups = barrierGroups(candidate);
+        if (groups.isEmpty()) {
+            return BarrierDecision.ready(readyInputs.keySet());
         }
 
-        List<PipelineTask> tasks = snapshot.tasks();
-        Map<String, PipelineTask> taskByKey = tasks.stream()
+        Set<String> cleanupTaskKeys = new LinkedHashSet<>();
+        boolean waiting = false;
+        for (BarrierGroup group : groups) {
+            BarrierState state = evaluateBarrier(group, readinessByTask, eventAsset);
+            if (state == BarrierState.MISMATCH) {
+                clearReadiness(dagId, group.taskKeys());
+                log.info("PipelineSyncRefTriggerHandler：dag {} version {} 的目标节点 {} 输入新鲜度不一致，已清理 {}",
+                        dagId, versionId, group.key(), group.taskKeys());
+                waiting = true;
+            } else if (state == BarrierState.WAITING) {
+                log.info("PipelineSyncRefTriggerHandler：dag {} version {} 等待目标节点 {} 的输入就绪",
+                        dagId, versionId, group.key());
+                waiting = true;
+            } else {
+                cleanupTaskKeys.addAll(group.taskKeys());
+            }
+        }
+        return waiting ? BarrierDecision.waiting() : BarrierDecision.ready(cleanupTaskKeys);
+    }
+
+    private List<BarrierGroup> barrierGroups(ReadyCandidate candidate) {
+        PipelineSnapshotService.ExecutionSnapshot snapshot = candidate.snapshot();
+        Map<String, PipelineTask> taskByKey = snapshot.tasks().stream()
                 .collect(Collectors.toMap(PipelineTask::getTaskKey, task -> task, (a, b) -> a));
-        List<PipelineTaskEdge> allEdges = snapshot.edges();
-        List<PipelineTaskEdge> edges = allEdges.stream()
+        List<PipelineTaskEdge> edges = snapshot.edges().stream()
                 .filter(edge -> edge.getEdgeLayer() == EdgeLayer.PIPELINE)
                 .toList();
-
+        Set<String> matchedTaskInputs = candidate.readyInputs().keySet().stream()
+                .filter(taskByKey::containsKey)
+                .collect(Collectors.toSet());
         Set<String> touchedTargets = edges.stream()
-                .filter(edge -> readyInputs.containsKey(edge.getSourceKey()))
+                .filter(edge -> matchedTaskInputs.contains(edge.getSourceKey()))
                 .map(PipelineTaskEdge::getTargetKey)
                 .collect(Collectors.toSet());
-        if (touchedTargets.isEmpty()) {
-            return true;
-        }
+        List<BarrierGroup> groups = new ArrayList<>();
         for (String targetKey : touchedTargets) {
             List<PipelineTaskEdge> syncInputs = edges.stream()
                     .filter(edge -> targetKey.equals(edge.getTargetKey()))
@@ -377,39 +425,77 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                         return source != null && source.getTaskType() == TaskType.SYNC_REF;
                     })
                     .toList();
-            if (syncInputs.size() <= 1) {
-                continue;
-            }
-            List<String> missing = syncInputs.stream()
-                    .filter(edge -> !readinessMatchesWindow(
-                            readinessByTask.get(edge.getSourceKey()), edge, eventAsset))
-                    .map(PipelineTaskEdge::getSourceKey)
-                    .toList();
-            if (!missing.isEmpty()) {
-                log.info("PipelineSyncRefTriggerHandler：dag {} version {} 等待目标节点 {} 的输入就绪，缺少 {}",
-                        snapshot.version().getDagId(), versionId, targetKey, missing);
-                return false;
+            if (!syncInputs.isEmpty()) {
+                groups.add(new BarrierGroup(
+                        targetKey,
+                        syncInputs.stream()
+                                .map(PipelineTaskEdge::getSourceKey)
+                                .collect(Collectors.toCollection(LinkedHashSet::new)),
+                        syncInputs.stream()
+                                .map(PipelineTaskEdge::getFreshnessPolicy)
+                                .map(this::normalizePolicy)
+                                .collect(Collectors.toCollection(LinkedHashSet::new))));
             }
         }
-        return true;
+        if (!candidate.matchedSubscriptionInputs().isEmpty()) {
+            groups.add(new BarrierGroup(
+                    "subscriptions",
+                    candidate.subscriptions().stream()
+                            .map(this::subscriptionTaskKey)
+                            .collect(Collectors.toCollection(LinkedHashSet::new)),
+                    candidate.subscriptions().stream()
+                            .map(PipelineSubscription::getFreshnessPolicy)
+                            .map(this::normalizePolicy)
+                            .collect(Collectors.toCollection(LinkedHashSet::new))));
+        }
+        return groups;
     }
 
-    private boolean readinessMatchesWindow(AssetReadiness readiness,
-                                           PipelineTaskEdge edge,
-                                           EventAsset eventAsset) {
-        if (readiness == null) {
-            return false;
+    private BarrierState evaluateBarrier(BarrierGroup group,
+                                         Map<String, AssetReadiness> readinessByTask,
+                                         EventAsset eventAsset) {
+        boolean sameBatch = group.policies().contains(POLICY_SAME_BATCH);
+        boolean sameWindow = group.policies().contains(POLICY_SAME_FRESHNESS_WINDOW);
+        if (!sameBatch && !sameWindow) {
+            return BarrierState.READY;
         }
-        String policy = edge.getFreshnessPolicy() == null
-                ? "LATEST"
-                : edge.getFreshnessPolicy().trim().toUpperCase(Locale.ROOT);
-        return switch (policy) {
-            case "SAME_BATCH" -> eventAsset.effectiveBatchId() != null
-                    && eventAsset.effectiveBatchId().equals(readiness.getBatchId());
-            case "SAME_FRESHNESS_WINDOW" -> eventAsset.logicalDate() != null
-                    && eventAsset.logicalDate().toString().equals(readiness.getFreshnessWindow());
-            default -> true;
-        };
+        // 旧事件没有相应字段时保持 LATEST 兼容语义：当前最新到达即可触发。
+        if ((sameBatch && eventAsset.normalizedBatchId() == null)
+                || (sameWindow && eventAsset.normalizedFreshnessWindow() == null)) {
+            return BarrierState.READY;
+        }
+        List<AssetReadiness> inputs = group.taskKeys().stream()
+                .map(readinessByTask::get)
+                .toList();
+        if (inputs.stream().anyMatch(java.util.Objects::isNull)) {
+            return BarrierState.WAITING;
+        }
+        if (sameBatch && inputs.stream().anyMatch(input -> input.getBatchId() == null)) {
+            return BarrierState.READY;
+        }
+        if (sameWindow && inputs.stream().anyMatch(input -> input.getFreshnessWindow() == null)) {
+            return BarrierState.READY;
+        }
+        boolean batchMatches = !sameBatch
+                || inputs.stream().map(AssetReadiness::getBatchId).distinct().count() == 1;
+        boolean windowMatches = !sameWindow
+                || inputs.stream().map(AssetReadiness::getFreshnessWindow).distinct().count() == 1;
+        return batchMatches && windowMatches ? BarrierState.READY : BarrierState.MISMATCH;
+    }
+
+    private String normalizePolicy(String policy) {
+        if (policy == null || policy.isBlank()) {
+            return POLICY_LATEST;
+        }
+        String normalized = policy.trim().toUpperCase(Locale.ROOT);
+        return Set.of(POLICY_LATEST, POLICY_SAME_BATCH, POLICY_SAME_FRESHNESS_WINDOW)
+                .contains(normalized) ? normalized : POLICY_LATEST;
+    }
+
+    private void clearReadiness(UUID dagId, Set<String> taskKeys) {
+        if (taskKeys != null && !taskKeys.isEmpty()) {
+            readinessRepo.deleteByDagIdAndTaskKeyIn(dagId, List.copyOf(taskKeys));
+        }
     }
 
     private AssetReadiness readiness(EventAsset eventAsset,
@@ -421,10 +507,8 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         readiness.setDagId(dagId);
         readiness.setTaskKey(taskKey);
         readiness.setAssetFqn(assetFqn);
-        readiness.setBatchId(eventAsset.effectiveBatchId());
-        readiness.setFreshnessWindow(eventAsset.logicalDate() == null
-                ? null
-                : eventAsset.logicalDate().toString());
+        readiness.setBatchId(eventAsset.normalizedBatchId());
+        readiness.setFreshnessWindow(eventAsset.normalizedFreshnessWindow());
         readiness.setReadyAt(eventAsset.occurredAt());
         return readiness;
     }
@@ -441,7 +525,7 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         receipt.setEventId(eventAsset.eventId());
         receipt.setSourceType(identity.sourceType());
         receipt.setSourceRef(identity.sourceRef());
-        receipt.setBatchId(eventAsset.effectiveBatchId());
+        receipt.setBatchId(eventAsset.normalizedBatchId());
         receipt.setLogicalDate(eventAsset.logicalDate());
         receipt.setPipelineVersionId(candidate.snapshot().version().getId());
         receipt.setJobRunId(jobRunId);
@@ -460,10 +544,9 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 .toList());
     }
 
-    private TriggerIdentity triggerIdentity(EventAsset eventAsset,
-                                            UUID versionId,
-                                            SourceMatch source) {
-        String window = triggerWindow(eventAsset);
+    private TriggerIdentity triggerIdentity(UUID versionId,
+                                            SourceMatch source,
+                                            String window) {
         return new TriggerIdentity(
                 sha256(versionId + "|" + source.sourceType() + "|" + source.sourceRef()
                         + "|" + window),
@@ -472,11 +555,31 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 window);
     }
 
-    private String runTriggerKey(UUID versionId, EventAsset eventAsset) {
-        return sha256(versionId + "|EVENT|" + triggerWindow(eventAsset));
+    private String runTriggerKey(UUID versionId, String window) {
+        return sha256(versionId + "|EVENT|" + window);
     }
 
-    private String triggerWindow(EventAsset eventAsset) {
+    private String triggerWindow(ReadyCandidate candidate, EventAsset eventAsset) {
+        Set<String> policies = barrierGroups(candidate).stream()
+                .flatMap(group -> group.policies().stream())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (policies.isEmpty()) {
+            policies.add(POLICY_LATEST);
+        }
+        boolean sameBatch = policies.contains(POLICY_SAME_BATCH);
+        boolean sameWindow = policies.contains(POLICY_SAME_FRESHNESS_WINDOW);
+        if ((!sameBatch || eventAsset.normalizedBatchId() != null)
+                && (!sameWindow || eventAsset.normalizedFreshnessWindow() != null)
+                && (sameBatch || sameWindow)) {
+            List<String> parts = new ArrayList<>();
+            if (sameBatch) {
+                parts.add("batch:" + eventAsset.normalizedBatchId());
+            }
+            if (sameWindow) {
+                parts.add("freshness:" + eventAsset.normalizedFreshnessWindow());
+            }
+            return String.join("|", parts);
+        }
         if (eventAsset.logicalDate() != null) {
             return "logical:" + eventAsset.logicalDate();
         }
@@ -510,6 +613,14 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         return value.isBlank() ? text(payload, second) : value;
     }
 
+    private String freshnessWindow(JsonNode payload, Instant logicalDate) {
+        String explicit = firstText(payload, "freshnessWindow", "freshness_window");
+        if (!explicit.isBlank()) {
+            return explicit;
+        }
+        return logicalDate == null ? "" : logicalDate.toString();
+    }
+
     private String text(JsonNode payload, String field) {
         return payload.path(field).asText("").trim();
     }
@@ -533,7 +644,29 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             Dag liveDag,
             PipelineSnapshotService.ExecutionSnapshot snapshot,
             Map<String, String> readyInputs,
-            Set<SourceMatch> sourceMatches) {}
+            Set<SourceMatch> sourceMatches,
+            List<PipelineSubscription> subscriptions,
+            Set<String> matchedSubscriptionInputs) {}
+
+    /** 一个真实目标节点或显式订阅虚拟目标的多输入 barrier。 */
+    private record BarrierGroup(String key, Set<String> taskKeys, Set<String> policies) {}
+
+    private enum BarrierState {
+        READY,
+        WAITING,
+        MISMATCH
+    }
+
+    private record BarrierDecision(boolean ready, Set<String> taskKeys) {
+
+        private static BarrierDecision ready(Set<String> taskKeys) {
+            return new BarrierDecision(true, Set.copyOf(taskKeys));
+        }
+
+        private static BarrierDecision waiting() {
+            return new BarrierDecision(false, Set.of());
+        }
+    }
 
     /** 当前事件实际命中的隐式或显式订阅来源。 */
     private record SourceMatch(String sourceType, String sourceRef) {}
@@ -546,16 +679,25 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             String batchId,
             String runId,
             Instant logicalDate,
+            String freshnessWindow,
             String pipelineId,
             String eventType,
             Instant occurredAt) {
 
-        String effectiveBatchId() {
-            String value = batchId.isBlank() ? runId : batchId;
-            if (value.isBlank()) {
+        String normalizedBatchId() {
+            if (batchId.isBlank()) {
                 return null;
             }
-            return value.length() <= 128 ? value : value.substring(0, 128);
+            return batchId.length() <= 128 ? batchId : batchId.substring(0, 128);
+        }
+
+        String normalizedFreshnessWindow() {
+            if (freshnessWindow.isBlank()) {
+                return null;
+            }
+            return freshnessWindow.length() <= 64
+                    ? freshnessWindow
+                    : freshnessWindow.substring(0, 64);
         }
     }
 

@@ -17,4 +17,8 @@ public interface AssetReadinessRepository extends JpaRepository<AssetReadiness, 
     /** 一轮输入成功汇合并触发后清空 barrier，等待下一轮资产到达。 */
     @Transactional
     void deleteByDagId(UUID dagId);
+
+    /** 只清理一次目标节点 barrier 涉及的输入，避免影响同一 DAG 的其他汇合点。 */
+    @Transactional
+    void deleteByDagIdAndTaskKeyIn(UUID dagId, List<String> taskKeys);
 }

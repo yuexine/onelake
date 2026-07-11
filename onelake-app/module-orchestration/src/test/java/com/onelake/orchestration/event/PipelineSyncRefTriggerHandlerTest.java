@@ -33,7 +33,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -85,9 +88,11 @@ class PipelineSyncRefTriggerHandlerTest {
                 legacySyncRunHandler);
         lenient().when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
                 any(), any(), any())).thenReturn(List.of());
+        lenient().when(subscriptionRepo.findByDagIdAndEnabledTrue(any())).thenReturn(List.of());
         lenient().when(schedulerLockRepo.acquire(any(), any(), any())).thenReturn(1);
         lenient().when(schedulerLockRepo.release(any(), any())).thenReturn(1);
-        lenient().when(triggerReceiptRepo.existsByDagIdAndTriggerKey(any(), any()))
+        lenient().when(triggerReceiptRepo.existsByDagIdAndTriggerKeyAndStatus(
+                        any(), any(), eq("TRIGGERED")))
                 .thenReturn(false);
         lenient().when(triggerReceiptRepo.saveAllAndFlush(any())).thenAnswer(
                 invocation -> invocation.getArgument(0));
@@ -116,6 +121,13 @@ class PipelineSyncRefTriggerHandlerTest {
             readinessState.removeIf(readiness -> dagId.equals(readiness.getDagId()));
             return null;
         }).when(readinessRepo).deleteByDagId(any());
+        lenient().doAnswer(invocation -> {
+            UUID dagId = invocation.getArgument(0);
+            List<String> taskKeys = invocation.getArgument(1);
+            readinessState.removeIf(readiness -> dagId.equals(readiness.getDagId())
+                    && taskKeys.contains(readiness.getTaskKey()));
+            return null;
+        }).when(readinessRepo).deleteByDagIdAndTaskKeyIn(any(), any());
     }
 
     @AfterEach
@@ -174,6 +186,120 @@ class PipelineSyncRefTriggerHandlerTest {
     }
 
     @Test
+    void latestPolicyTriggersWhenAnyFanInInputArrives() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left", "LATEST"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right", "LATEST")));
+
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user"));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        assertThat(readinessState).isEmpty();
+    }
+
+    @Test
+    void edgePolicyTakesPrecedenceWhenEventAlsoMatchesSubscription() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        String userAsset = "iceberg.ods.user";
+        String profileAsset = "iceberg.ods.user_profile";
+        PipelineTask user = syncRefTask(tenantId, dagId, userAsset, "sync_user");
+        PipelineTask profile = syncRefTask(tenantId, dagId, profileAsset, "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left", "LATEST"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right", "LATEST")));
+        PipelineSubscription userSubscription = subscription(
+                tenantId, dagId, "ASSET", userAsset, "SAME_BATCH");
+        PipelineSubscription profileSubscription = subscription(
+                tenantId, dagId, "ASSET", profileAsset, "SAME_BATCH");
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", userAsset)).thenReturn(List.of(userSubscription));
+        lenient().when(subscriptionRepo.findByDagIdAndEnabledTrue(dagId))
+                .thenReturn(List.of(userSubscription, profileSubscription));
+
+        handler.handle(tableLoadedEvent(tenantId, userAsset, "batch-1", null, null));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        verify(subscriptionRepo, never()).findByDagIdAndEnabledTrue(dagId);
+    }
+
+    @Test
+    void sameBatchRejectsMixedInputsAndTriggersAfterSameBatchArrives() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left", "SAME_BATCH"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right", "SAME_BATCH")));
+        Set<String> receipts = statefulTriggerReceipts();
+
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user", "batch-1", null, null));
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user_profile", "batch-2", null, null));
+
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any(), anyString());
+        assertThat(readinessState).isEmpty();
+
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user_profile", "batch-1", null, null));
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user", "batch-1", null, null));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        assertThat(readinessState).isEmpty();
+        assertThat(receipts).hasSize(1);
+    }
+
+    @Test
+    void sameBatchKeepsDifferentBatchesDistinctWithinOneLogicalWindow() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask consume = sparkTask(tenantId, dagId, "spark_consume");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, consume), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_consume", "left", "LATEST"),
+                edge(tenantId, dagId, "sync_profile", "spark_consume", "right", "SAME_BATCH")));
+        Instant logicalDate = Instant.parse("2026-07-10T00:00:00Z");
+        statefulTriggerReceipts();
+
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user", "batch-1", logicalDate, null));
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user_profile", "batch-1", logicalDate, null));
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user", "batch-2", logicalDate, null));
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user_profile", "batch-2", logicalDate, null));
+
+        ArgumentCaptor<String> triggerKeys = ArgumentCaptor.forClass(String.class);
+        verify(orchestrationService, times(2)).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId),
+                triggerKeys.capture());
+        assertThat(triggerKeys.getAllValues()).doesNotHaveDuplicates();
+    }
+
+    @Test
     void doesNotMixFanInReadinessAcrossFreshnessWindows() {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();
@@ -187,14 +313,60 @@ class PipelineSyncRefTriggerHandlerTest {
                 edge(tenantId, dagId, "sync_profile", "spark_join", "right")));
         Instant firstWindow = Instant.parse("2026-07-10T00:00:00Z");
         Instant secondWindow = Instant.parse("2026-07-11T00:00:00Z");
+        Set<String> receipts = statefulTriggerReceipts();
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user", firstWindow));
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user_profile", secondWindow));
 
         verify(orchestrationService, never()).triggerPipelineRun(
                 any(), any(), any(RunContext.class), any(), anyString());
+        assertThat(readinessState).isEmpty();
 
-        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user", secondWindow));
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user_profile", firstWindow));
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user", firstWindow));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        assertThat(receipts).hasSize(1);
+    }
+
+    @Test
+    void missingBatchFallsBackToLatestInsteadOfUsingRunId() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left", "SAME_BATCH"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right", "SAME_BATCH")));
+
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user"));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        ArgumentCaptor<List<AssetReadiness>> saved = ArgumentCaptor.forClass(List.class);
+        verify(readinessRepo).saveAllAndFlush(saved.capture());
+        assertThat(saved.getValue()).extracting(AssetReadiness::getBatchId).containsOnlyNulls();
+    }
+
+    @Test
+    void missingFreshnessWindowFallsBackToLatest() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left", "SAME_FRESHNESS_WINDOW"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right", "SAME_FRESHNESS_WINDOW")));
+
+        handler.handle(tableLoadedEvent(
+                tenantId, "iceberg.ods.user", null, null, null));
 
         verify(orchestrationService).triggerPipelineRun(
                 eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
@@ -274,6 +446,37 @@ class PipelineSyncRefTriggerHandlerTest {
     }
 
     @Test
+    void sameBatchPolicyFromSubscriptionsWaitsForAllSources() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        String orders = "iceberg.ods.orders";
+        String customers = "iceberg.ods.customers";
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(
+                dag, List.of(sparkTask(tenantId, dagId, "spark_consumer")), List.of());
+        PipelineSubscription ordersSubscription = subscription(
+                tenantId, dagId, "ASSET", orders, "SAME_BATCH");
+        PipelineSubscription customersSubscription = subscription(
+                tenantId, dagId, "ASSET", customers, "SAME_BATCH");
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", orders)).thenReturn(List.of(ordersSubscription));
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", customers)).thenReturn(List.of(customersSubscription));
+        when(subscriptionRepo.findByDagIdAndEnabledTrue(dagId))
+                .thenReturn(List.of(ordersSubscription, customersSubscription));
+
+        handler.handle(tableLoadedEvent(tenantId, orders, "batch-1", null, null));
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any(), anyString());
+
+        handler.handle(tableLoadedEvent(tenantId, customers, "batch-1", null, null));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+        assertThat(readinessState).isEmpty();
+    }
+
+    @Test
     void triggersExplicitPipelineSubscriptionAndPropagatesLogicalDate() {
         UUID tenantId = UUID.randomUUID();
         UUID upstreamDagId = UUID.randomUUID();
@@ -318,7 +521,8 @@ class PipelineSyncRefTriggerHandlerTest {
                 tenantId, downstreamDagId, "PIPELINE", upstreamDagId.toString());
         when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
                 tenantId, "PIPELINE", upstreamDagId.toString())).thenReturn(List.of(subscription));
-        when(triggerReceiptRepo.existsByDagIdAndTriggerKey(eq(downstreamDagId), any()))
+        when(triggerReceiptRepo.existsByDagIdAndTriggerKeyAndStatus(
+                eq(downstreamDagId), any(), eq("TRIGGERED")))
                 .thenReturn(false, true);
 
         handler.handle(pipelineTaskLoadedEvent(
@@ -502,16 +706,32 @@ class PipelineSyncRefTriggerHandlerTest {
     private OutboxEvent tableLoadedEvent(UUID tenantId,
                                          String targetTable,
                                          Instant logicalDate) {
+        return tableLoadedEvent(tenantId, targetTable, null, logicalDate, null);
+    }
+
+    private OutboxEvent tableLoadedEvent(UUID tenantId,
+                                         String targetTable,
+                                         String batchId,
+                                         Instant logicalDate,
+                                         String freshnessWindow) {
         OutboxEvent e = new OutboxEvent();
         e.setId(UUID.randomUUID());
         try {
-            e.setPayload(new ObjectMapper().writeValueAsString(java.util.Map.of(
-                    "tenantId", tenantId.toString(),
-                    "targetTable", targetTable,
-                    "runId", UUID.randomUUID().toString(),
-                    "logicalDate", logicalDate.toString(),
-                    "status", "SUCCEEDED"
-            )));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("tenantId", tenantId.toString());
+            payload.put("targetTable", targetTable);
+            payload.put("runId", UUID.randomUUID().toString());
+            payload.put("status", "SUCCEEDED");
+            if (batchId != null) {
+                payload.put("batchId", batchId);
+            }
+            if (logicalDate != null) {
+                payload.put("logicalDate", logicalDate.toString());
+            }
+            if (freshnessWindow != null) {
+                payload.put("freshnessWindow", freshnessWindow);
+            }
+            e.setPayload(new ObjectMapper().writeValueAsString(payload));
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
@@ -547,14 +767,36 @@ class PipelineSyncRefTriggerHandlerTest {
                                               UUID dagId,
                                               String sourceType,
                                               String sourceRef) {
+        return subscription(tenantId, dagId, sourceType, sourceRef, "LATEST");
+    }
+
+    private PipelineSubscription subscription(UUID tenantId,
+                                              UUID dagId,
+                                              String sourceType,
+                                              String sourceRef,
+                                              String freshnessPolicy) {
         PipelineSubscription subscription = new PipelineSubscription();
         subscription.setId(UUID.randomUUID());
         subscription.setTenantId(tenantId);
         subscription.setDagId(dagId);
         subscription.setSourceType(sourceType);
         subscription.setSourceRef(sourceRef);
+        subscription.setFreshnessPolicy(freshnessPolicy);
         subscription.setEnabled(true);
         return subscription;
+    }
+
+    private Set<String> statefulTriggerReceipts() {
+        Set<String> receipts = new HashSet<>();
+        when(triggerReceiptRepo.existsByDagIdAndTriggerKeyAndStatus(
+                any(), any(), eq("TRIGGERED")))
+                .thenAnswer(invocation -> receipts.contains(invocation.getArgument(1)));
+        when(triggerReceiptRepo.saveAllAndFlush(any())).thenAnswer(invocation -> {
+            List<AssetTriggerReceipt> saved = invocation.getArgument(0);
+            saved.stream().map(AssetTriggerReceipt::getTriggerKey).forEach(receipts::add);
+            return saved;
+        });
+        return receipts;
     }
 
     private PipelineTask syncRefTask(UUID tenantId, UUID dagId, String targetFqn) {
@@ -583,7 +825,21 @@ class PipelineSyncRefTriggerHandlerTest {
         return t;
     }
 
-    private PipelineTaskEdge edge(UUID tenantId, UUID dagId, String sourceKey, String targetKey, String targetInput) {
+    private PipelineTaskEdge edge(UUID tenantId,
+                                  UUID dagId,
+                                  String sourceKey,
+                                  String targetKey,
+                                  String targetInput) {
+        return edge(tenantId, dagId, sourceKey, targetKey, targetInput,
+                "SAME_FRESHNESS_WINDOW");
+    }
+
+    private PipelineTaskEdge edge(UUID tenantId,
+                                  UUID dagId,
+                                  String sourceKey,
+                                  String targetKey,
+                                  String targetInput,
+                                  String freshnessPolicy) {
         PipelineTaskEdge edge = new PipelineTaskEdge();
         edge.setTenantId(tenantId);
         edge.setDagId(dagId);
@@ -595,7 +851,7 @@ class PipelineSyncRefTriggerHandlerTest {
         edge.setSourceOutput("out");
         edge.setTargetInput(targetInput);
         edge.setTriggerPolicy("ALL_SUCCEEDED");
-        edge.setFreshnessPolicy("SAME_FRESHNESS_WINDOW");
+        edge.setFreshnessPolicy(freshnessPolicy);
         return edge;
     }
 

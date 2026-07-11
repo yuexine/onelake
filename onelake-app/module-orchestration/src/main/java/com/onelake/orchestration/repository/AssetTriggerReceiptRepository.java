@@ -10,5 +10,6 @@ import java.util.UUID;
 public interface AssetTriggerReceiptRepository
         extends JpaRepository<AssetTriggerReceipt, AssetTriggerReceiptId> {
 
-    boolean existsByDagIdAndTriggerKey(UUID dagId, String triggerKey);
+    /** 只有已触发完成的回执参与消费幂等；历史 READY 行不得阻断 barrier 重建。 */
+    boolean existsByDagIdAndTriggerKeyAndStatus(UUID dagId, String triggerKey, String status);
 }

@@ -176,6 +176,22 @@ class PipelineSyncRefTriggerHandlerTest {
     }
 
     @Test
+    void skipsPublishedPipelineWithoutVersion() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        dag.setPublishedVersionId(null);
+        when(dagRepo.findByTenantId(tenantId)).thenReturn(List.of(dag));
+
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
+
+        verify(pipelineSnapshotService, never())
+                .loadExecutionSnapshot(any(UUID.class), any(UUID.class));
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
+    }
+
+    @Test
     void swallowsBizExceptionFromTriggerService() {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();

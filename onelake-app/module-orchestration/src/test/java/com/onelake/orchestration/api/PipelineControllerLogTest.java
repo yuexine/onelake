@@ -1,8 +1,11 @@
 package com.onelake.orchestration.api;
 
 import com.onelake.common.exception.GlobalExceptionHandler;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
+import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.service.OrchestrationService;
 import com.onelake.orchestration.service.PipelineService;
+import com.onelake.orchestration.service.RunContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,10 +22,13 @@ import java.util.UUID;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
@@ -93,5 +99,36 @@ class PipelineControllerLogTest {
                 .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION, containsString("attachment")))
                 .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION, containsString("spark_node.log")))
                 .andExpect(content().string("full log\n"));
+    }
+
+    @Test
+    void manualTriggerPassesDevEnvironment() throws Exception {
+        when(orchestrationService.triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.MANUAL), any(RunContext.class),
+                isNull(), eq(RunEnvironment.DEV)))
+                .thenReturn(RUN_ID);
+
+        mockMvc.perform(post("/api/v1/orchestration/pipelines/{dagId}/trigger", DAG_ID)
+                        .param("env", "DEV"))
+                .andExpect(status().isOk());
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.MANUAL), any(RunContext.class),
+                isNull(), eq(RunEnvironment.DEV));
+    }
+
+    @Test
+    void manualTriggerDefaultsToProdEnvironment() throws Exception {
+        when(orchestrationService.triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.MANUAL), any(RunContext.class),
+                isNull(), eq(RunEnvironment.PROD)))
+                .thenReturn(RUN_ID);
+
+        mockMvc.perform(post("/api/v1/orchestration/pipelines/{dagId}/trigger", DAG_ID))
+                .andExpect(status().isOk());
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(DAG_ID), eq(TriggerType.MANUAL), any(RunContext.class),
+                isNull(), eq(RunEnvironment.PROD));
     }
 }

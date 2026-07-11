@@ -4,6 +4,7 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.ScheduleCalendarDayRepository;
 import lombok.RequiredArgsConstructor;
@@ -56,7 +57,8 @@ public class CatchupPlanner {
 
         // 优先从最近已运行的业务周期继续；完全没有运行历史时，视为从 DAG 创建后恢复调度。
         Optional<JobRun> latestRun = jobRunRepo
-                .findFirstByDagIdAndLogicalDateIsNotNullOrderByLogicalDateDesc(dag.getId());
+                .findFirstByDagIdAndLogicalDateIsNotNullAndRunModeNotOrderByLogicalDateDesc(
+                        dag.getId(), RunEnvironment.DEV.name());
         Instant cursor = latestRun
                 .map(this::resumeAfter)
                 .orElse(dag.getCreatedAt());

@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
  *
  * <p>匹配规则：流水线包含 {@link TaskType#SYNC_REF} 节点，且节点 {@code target_fqn}
  * 等于事件载荷里的 {@code targetTable}。匹配后调用
- * {@link OrchestrationService#triggerPipelineRun(UUID, TriggerType)}。
+ * {@link OrchestrationService#triggerPipelineRun(UUID, TriggerType)} 的 PROD 路径。
  *
  * <p>Outbox handler 在后台线程执行，因此需要从事件载荷恢复 {@link TenantContext}。
  */
@@ -116,9 +116,17 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     private List<ReadyCandidate> publishedCandidates(UUID tenantId, String targetTable) {
         List<ReadyCandidate> candidates = new java.util.ArrayList<>();
         for (Dag liveDag : dagRepo.findByTenantId(tenantId)) {
-            if (!Boolean.TRUE.equals(liveDag.getEnabled())
-                    || !"PUBLISHED".equalsIgnoreCase(liveDag.getStatus())
-                    || liveDag.getPublishedVersionId() == null) {
+            if (!Boolean.TRUE.equals(liveDag.getEnabled())) {
+                readinessByVersion.keySet().removeIf(key -> key.dagId().equals(liveDag.getId()));
+                continue;
+            }
+            if (liveDag.getPublishedVersionId() == null) {
+                readinessByVersion.keySet().removeIf(key -> key.dagId().equals(liveDag.getId()));
+                log.info("PipelineSyncRefTriggerHandler：流水线 {} 无已发布版本，跳过 EVENT 生产触发",
+                        liveDag.getId());
+                continue;
+            }
+            if (!"PUBLISHED".equalsIgnoreCase(liveDag.getStatus())) {
                 readinessByVersion.keySet().removeIf(key -> key.dagId().equals(liveDag.getId()));
                 continue;
             }

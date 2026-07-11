@@ -50,29 +50,34 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
     Optional<JobRun> findByIdAndDagIdInForUpdate(@Param("id") UUID id,
                                                  @Param("dagIds") Collection<UUID> dagIds);
 
-    /** 查询实际启动时间最新的运行，主要用于列表摘要展示。 */
-    Optional<JobRun> findFirstByDagIdOrderByStartedAtDesc(UUID dagId);
+    /** 查询实际启动时间最新的生产运行，排除 DEV 试跑，供流水线列表摘要展示。 */
+    Optional<JobRun> findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(
+            UUID dagId, String excludedRunMode);
 
     /**
-     * 查询 DAG 最新的业务周期运行。
+     * 查询 DAG 最新的生产业务周期运行，排除调用方指定的 DEV 试跑模式。
      *
      * <p>只考虑已经写入 {@code logical_date} 的运行，供 {@code CatchupPlanner}
      * 确定历史补跑的起始游标；按业务周期而不是实际启动时间排序，避免迟到回填干扰判断。
      */
-    Optional<JobRun> findFirstByDagIdAndLogicalDateIsNotNullOrderByLogicalDateDesc(UUID dagId);
+    Optional<JobRun> findFirstByDagIdAndLogicalDateIsNotNullAndRunModeNotOrderByLogicalDateDesc(
+            UUID dagId, String excludedRunMode);
 
     /**
-     * 统计指定 DAG 处于给定状态集合的运行数量。
+     * 统计指定 DAG 处于给定状态集合的生产运行数量，排除 DEV 试跑。
      *
      * <p>C3 调度器和 M1 回填派发器共同使用该查询实施 DAG 级
      * {@code max_active_runs} 限流。
      */
-    long countByDagIdAndStatusIn(UUID dagId, Collection<DagStatus> statuses);
+    long countByDagIdAndStatusInAndRunModeNot(UUID dagId,
+                                               Collection<DagStatus> statuses,
+                                               String excludedRunMode);
 
-    /** 指定上游流水线在目标业务周期是否已有成功运行；DRY_RUN 成功记录同样命中。 */
-    boolean existsByDagIdAndLogicalDateAndStatus(UUID dagId,
-                                                  Instant logicalDate,
-                                                  DagStatus status);
+    /** 指定上游流水线在目标业务周期是否已有生产成功运行；DRY_RUN 命中，DEV 不命中。 */
+    boolean existsByDagIdAndLogicalDateAndStatusAndRunModeNot(UUID dagId,
+                                                               Instant logicalDate,
+                                                               DagStatus status,
+                                                               String excludedRunMode);
 
     /** 判断指定 CRON 计划点是否已经生成运行，供依赖等待队列做唯一键幂等收口。 */
     boolean existsByDagIdAndLogicalDateAndTriggerType(UUID dagId,
@@ -80,7 +85,7 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
                                                        TriggerType triggerType);
 
     /**
-     * 返回已经到达 DAG 重跑间隔且尚未领取的失败运行 ID。
+     * 返回已经到达 DAG 重跑间隔且尚未领取的生产失败运行 ID；DEV 试跑不自动重跑。
      *
      * <p>到期条件直接在 PostgreSQL 查询中计算，避免长间隔旧记录反复占据固定分页并
      * 饿死后续已到期候选；服务层仍会在加锁后重判策略和并发。</p>
@@ -90,6 +95,7 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
             from orchestration.job_run jr
             join orchestration.dag d on d.id = jr.dag_id
             where jr.status = 'FAILED'
+              and upper(jr.run_mode) <> 'DEV'
               and jr.retry_dispatched_at is null
               and jr.run_retry_attempt < d.run_retry_count
               and upper(d.schedule_mode) <> 'FROZEN'
@@ -99,7 +105,9 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
             """, nativeQuery = true)
     List<UUID> findRetryCandidateIds(@Param("now") Instant now, Pageable pageable);
 
-    /** 后台需要主动同步的非终态运行；包含达到上限的最后一次重跑以收口最终状态。 */
+    /**
+     * 后台需要主动同步的非终态运行；DEV 也需要收口远端状态，但不会进入下方自动重跑候选。
+     */
     @Query("""
             select jr.id
             from JobRun jr, Dag d
@@ -113,7 +121,7 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
     List<UUID> findRetryWatchRunIds(@Param("statuses") Collection<DagStatus> statuses);
 
     /**
-     * 查询需要 SLA/超时巡检的非终态运行。
+     * 查询需要 SLA/超时巡检的非终态运行；DEV 只保留 timeout 保护，不产生生产 SLA 告警。
      *
      * <p>已标记 SLA 违约且未配置 timeout 的运行不再进入候选集合；配置了 timeout 的
      * 运行会持续被检查，直至超时取消或由正常状态同步收口为终态。</p>
@@ -125,7 +133,9 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
               and jr.status in :statuses
               and jr.startedAt is not null
               and (d.timeoutMinutes is not null
-                   or (d.slaMinutes is not null and jr.slaMissed = false))
+                   or (upper(jr.runMode) <> 'DEV'
+                       and d.slaMinutes is not null
+                       and jr.slaMissed = false))
             order by jr.startedAt, jr.id
             """)
     List<UUID> findSlaMonitorCandidateIds(@Param("statuses") Collection<DagStatus> statuses);

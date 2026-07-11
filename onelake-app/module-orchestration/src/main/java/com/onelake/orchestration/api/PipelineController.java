@@ -2,6 +2,7 @@ package com.onelake.orchestration.api;
 
 import com.onelake.common.api.ApiResponse;
 import com.onelake.orchestration.domain.entity.Dag;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.OdsDwdTemplateRequest;
 import com.onelake.orchestration.dto.OdsDwdTemplateResult;
@@ -167,7 +168,8 @@ public class PipelineController {
                                                    @RequestParam(required = false) Instant logicalDate,
                                                    @RequestParam(required = false) Instant dataIntervalStart,
                                                    @RequestParam(required = false) Instant dataIntervalEnd,
-                                                   @RequestParam(required = false) UUID useVersionId) {
+                                                   @RequestParam(required = false) UUID useVersionId,
+                                                   @RequestParam(defaultValue = "PROD") RunEnvironment env) {
         TriggerType tt = TriggerType.valueOf(trigger);
         UUID runId = orchestrationService.triggerPipelineRun(
                 dagId,
@@ -180,7 +182,8 @@ public class PipelineController {
                         null,
                         null,
                         tt),
-                useVersionId);
+                useVersionId,
+                env);
         return ApiResponse.ok(Map.of("runId", runId));
     }
 

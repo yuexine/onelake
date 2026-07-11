@@ -17,6 +17,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
@@ -42,7 +43,7 @@ class PipelineRunRetryServiceTest {
         when(runRepo.findByIdForUpdate(initialFailure.getId())).thenReturn(Optional.of(initialFailure));
         when(runRepo.findByIdForUpdate(retryFailure.getId())).thenReturn(Optional.of(retryFailure));
         when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
-        when(runRepo.countByDagIdAndStatusIn(any(), any())).thenReturn(0L);
+        when(runRepo.countByDagIdAndStatusInAndRunModeNot(any(), any(), anyString())).thenReturn(0L);
         when(orchestrationService.triggerPipelineRetry(initialFailure)).thenReturn(UUID.randomUUID());
         PipelineRunRetryService service = new PipelineRunRetryService(runRepo, dagRepo, orchestrationService);
 
@@ -57,7 +58,8 @@ class PipelineRunRetryServiceTest {
         var dispatchOrder = inOrder(runRepo, dagRepo, orchestrationService);
         dispatchOrder.verify(runRepo).findByIdForUpdate(initialFailure.getId());
         dispatchOrder.verify(dagRepo).findByIdForUpdate(dagId);
-        dispatchOrder.verify(runRepo).countByDagIdAndStatusIn(any(), any());
+        dispatchOrder.verify(runRepo).countByDagIdAndStatusInAndRunModeNot(
+                any(), any(), anyString());
         dispatchOrder.verify(orchestrationService).triggerPipelineRetry(initialFailure);
     }
 

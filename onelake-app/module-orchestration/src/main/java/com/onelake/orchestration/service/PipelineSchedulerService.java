@@ -1,11 +1,13 @@
 package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
+import com.onelake.common.exception.BizException;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineDependencyWait;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
@@ -139,6 +141,14 @@ public class PipelineSchedulerService {
 
         List<Dag> publishedCandidates = new ArrayList<>();
         for (Dag liveDag : candidates) {
+            if (Boolean.TRUE.equals(liveDag.getEnabled())
+                    && "onelake_pipeline_run".equals(liveDag.getDagsterJob())
+                    && liveDag.getScheduleCron() != null
+                    && !liveDag.getScheduleCron().isBlank()
+                    && liveDag.getPublishedVersionId() == null) {
+                log.info("PipelineSchedulerService：流水线 {} 无已发布版本，跳过 CRON 生产触发",
+                        liveDag.getId());
+            }
             if (!isSchedulablePipeline(liveDag)) {
                 continue;
             }
@@ -197,7 +207,8 @@ public class PipelineSchedulerService {
                 }
 
                 int maxActiveRuns = Math.max(1, dag.getMaxActiveRuns() == null ? 1 : dag.getMaxActiveRuns());
-                long activeRuns = jobRunRepo.countByDagIdAndStatusIn(dag.getId(), ACTIVE_RUN_STATUSES);
+                long activeRuns = jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                        dag.getId(), ACTIVE_RUN_STATUSES, RunEnvironment.DEV.name());
                 if (activeRuns >= maxActiveRuns) {
                     String policy = misfirePolicyOf(dag);
                     if ("FIRE_ONCE".equals(policy)) {
@@ -334,8 +345,8 @@ public class PipelineSchedulerService {
 
                 int maxActiveRuns = Math.max(1,
                         dag.getMaxActiveRuns() == null ? 1 : dag.getMaxActiveRuns());
-                long activeRuns = jobRunRepo.countByDagIdAndStatusIn(
-                        dag.getId(), ACTIVE_RUN_STATUSES);
+                long activeRuns = jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                        dag.getId(), ACTIVE_RUN_STATUSES, RunEnvironment.DEV.name());
                 if (activeRuns >= maxActiveRuns) {
                     dependencyWaitRepo.updateBlockers(wait.getId(),
                             "activeRuns=" + activeRuns + ", maxActiveRuns=" + maxActiveRuns, tickAt);
@@ -371,7 +382,7 @@ public class PipelineSchedulerService {
 
     private Dag publishedSchedulingDag(Dag liveDag) {
         if (liveDag.getPublishedVersionId() == null) {
-            return liveDag;
+            throw new BizException(40064, "流水线无已发布版本");
         }
         return pipelineSnapshotService
                 .loadExecutionSnapshot(liveDag.getPublishedVersionId(), liveDag.getId())

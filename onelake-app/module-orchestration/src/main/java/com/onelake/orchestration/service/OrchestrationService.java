@@ -16,6 +16,7 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
@@ -257,7 +258,16 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger) {
-        return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger));
+        return triggerPipelineRun(dagId, trigger, RunEnvironment.PROD);
+    }
+
+    /** 手动触发时显式选择 DEV 草稿试跑或 PROD 发布快照运行。 */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId,
+                                   TriggerType trigger,
+                                   RunEnvironment environment) {
+        return triggerPipelineRunInternal(
+                dagId, trigger, RunContext.empty(trigger), null, null, environment);
     }
 
     /**
@@ -281,7 +291,8 @@ public class OrchestrationService {
             throw new BizException(40020, "计划时刻仅适用于 CRON 触发");
         }
         if (scheduledAt == null) {
-            return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger), useVersionId);
+            return triggerPipelineRun(
+                    dagId, trigger, RunContext.empty(trigger), useVersionId, RunEnvironment.PROD);
         }
         Dag liveDag = findTenantDag(dagId);
         UUID selectedVersionId = useVersionId != null
@@ -296,7 +307,8 @@ public class OrchestrationService {
         RunContext runContext = dataIntervalCalculator
                 .calculate(dag.getPartitionGrain(), scheduledAt, dag.getTimezone())
                 .toRunContext(dag.getTimezone(), "NORMAL", null, trigger);
-        return triggerPipelineRun(dagId, trigger, runContext, selectedVersionId);
+        return triggerPipelineRun(
+                dagId, trigger, runContext, selectedVersionId, RunEnvironment.PROD);
     }
     /**
      * 使用完整运行上下文触发流水线，供正常调度和回填派发共同复用。
@@ -310,7 +322,8 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, RunContext context) {
-        return triggerPipelineRunInternal(dagId, trigger, context, null, null);
+        return triggerPipelineRunInternal(
+                dagId, trigger, context, null, null, RunEnvironment.PROD);
     }
 
     /** 显式选择发布版本触发；useVersionId 为空时仍默认使用 dag.publishedVersionId。 */
@@ -319,7 +332,19 @@ public class OrchestrationService {
                                    TriggerType trigger,
                                    RunContext context,
                                    UUID useVersionId) {
-        return triggerPipelineRunInternal(dagId, trigger, context, null, useVersionId);
+        return triggerPipelineRunInternal(
+                dagId, trigger, context, null, useVersionId, RunEnvironment.PROD);
+    }
+
+    /** 显式选择环境；PROD 可同时固定已发布版本，DEV 禁止绑定版本。 */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId,
+                                   TriggerType trigger,
+                                   RunContext context,
+                                   UUID useVersionId,
+                                   RunEnvironment environment) {
+        return triggerPipelineRunInternal(
+                dagId, trigger, context, null, useVersionId, environment);
     }
 
     /**
@@ -353,7 +378,8 @@ public class OrchestrationService {
                     TriggerType.AUTO_RETRY,
                     context,
                     retryMetadata,
-                    sourceRun.getPipelineVersionId());
+                    sourceRun.getPipelineVersionId(),
+                    RunEnvironment.PROD);
         } catch (RuntimeException ex) {
             // 运行时契约或编译可能在 JobRun 建档前失败；仍需生成失败子运行承接次数链和审计来源。
             if (!retryMetadata.runCreated()) {
@@ -370,23 +396,37 @@ public class OrchestrationService {
                                             TriggerType trigger,
                                             RunContext context,
                                             RunRetryMetadata retryMetadata,
-                                            UUID useVersionId) {
+                                            UUID useVersionId,
+                                            RunEnvironment environment) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag liveDag = findTenantDag(dagId);
-        UUID selectedVersionId = useVersionId != null
-                ? useVersionId
-                : liveDag.getPublishedVersionId();
-        if (selectedVersionId == null && "PUBLISHED".equalsIgnoreCase(liveDag.getStatus())) {
-            throw new BizException(40064, "已发布流水线缺少不可变版本，请重新发布后再运行");
+        RunEnvironment selectedEnvironment = environment == null
+                ? RunEnvironment.PROD
+                : environment;
+        if (selectedEnvironment == RunEnvironment.DEV && trigger != TriggerType.MANUAL) {
+            throw new BizException(40020, "DEV 草稿试跑仅支持 MANUAL 触发");
+        }
+        if (selectedEnvironment == RunEnvironment.DEV && useVersionId != null) {
+            throw new BizException(40020, "DEV 草稿试跑不能绑定发布版本");
+        }
+        UUID selectedVersionId = selectedEnvironment == RunEnvironment.DEV
+                ? null
+                : (useVersionId != null ? useVersionId : liveDag.getPublishedVersionId());
+        if (selectedEnvironment == RunEnvironment.PROD && selectedVersionId == null) {
+            throw new BizException(40064, "PROD 运行要求已发布版本，请先发布流水线或改用 env=DEV 试跑");
         }
         PipelineSnapshotService.ExecutionSnapshot executionSnapshot = selectedVersionId == null
                 ? null
                 : pipelineSnapshotService.loadExecutionSnapshot(selectedVersionId, dagId);
         Dag dag = executionSnapshot == null ? liveDag : executionSnapshot.dag();
         RunContext runContext = normalizeRunContext(context, dag, trigger);
+        if (selectedEnvironment == RunEnvironment.DEV) {
+            // DEV 是独立于 M2 DRY_RUN 的环境标记：仍执行草稿，但生产统计可按 run_mode 排除。
+            runContext = runContext.withRunMode(RunEnvironment.DEV.name());
+        }
         boolean dryRun = ScheduleMode.DRY_RUN.name().equalsIgnoreCase(runContext.runMode());
         String activeJobName = activePipelineDagsterJob(dagId, selectedVersionId);
         if (!dryRun && isGraphPipelineExecutionMode()) {
@@ -1049,6 +1089,10 @@ public class OrchestrationService {
      */
     public void publishPipelineRunEvent(Dag dag, JobRun run, PipelineCompileResult plan,
                                         boolean succeeded, String errorMessage) {
+        if (isDevRun(run)) {
+            log.debug("DEV 试跑 {} 跳过生产 pipeline.run.* 事件", run.getId());
+            return;
+        }
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) {
             log.warn("OutboxPublisher 不可用，跳过 pipeline.run.* 事件，runId={}", run.getId());
@@ -1405,7 +1449,8 @@ public class OrchestrationService {
     }
 
     private DagDTO toDTOWithLastRun(Dag d) {
-        JobRun latestRun = runRepo.findFirstByDagIdOrderByStartedAtDesc(d.getId())
+        JobRun latestRun = runRepo.findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(
+                        d.getId(), RunEnvironment.DEV.name())
             .map(this::refreshRunStatus)
             .orElse(null);
         return toDTO(d, latestRun);
@@ -1918,6 +1963,10 @@ public class OrchestrationService {
      */
     private void publishPipelineRunEventsIfTerminal(JobRun run, DagStatus terminalStatus) {
         try {
+            if (isDevRun(run)) {
+                log.debug("DEV 试跑 {} 跳过生产终态及 task.loaded 事件", run.getId());
+                return;
+            }
             Dag dag = dagRepo.findById(run.getDagId()).orElse(null);
             if (dag == null) return;
             // 只处理 V2 流水线作业。
@@ -1949,6 +1998,11 @@ public class OrchestrationService {
             return "cancelled";
         }
         return "Dagster run reported failure";
+    }
+
+    private boolean isDevRun(JobRun run) {
+        return run != null
+                && RunEnvironment.DEV.name().equalsIgnoreCase(run.getRunMode());
     }
 
     private void publishPipelineTaskLoadedEvent(Dag dag, JobRun run, TaskRun tr, boolean runSucceeded) {

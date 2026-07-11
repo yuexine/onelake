@@ -14,6 +14,7 @@ import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
@@ -638,10 +639,11 @@ class OrchestrationServiceTest {
     }
 
     @Test
-    void listDagsIncludesLatestRunMetadata() {
+    void listDagsIncludesLatestProdRunMetadata() {
         Dag dag = dag();
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
-        when(runRepo.findFirstByDagIdOrderByStartedAtDesc(DAG_ID)).thenReturn(Optional.of(jobRun(DAG_ID)));
+        when(runRepo.findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(DAG_ID, "DEV"))
+                .thenReturn(Optional.of(jobRun(DAG_ID)));
 
         List<DagDTO> dags = service.listDags();
 
@@ -652,6 +654,7 @@ class OrchestrationServiceTest {
         assertThat(dags.get(0).lastRun().dagName()).isEqualTo("old_pipeline");
         assertThat(dags.get(0).triggerable()).isTrue();
         assertThat(dags.get(0).triggerBlockedReason()).isNull();
+        verify(runRepo).findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(DAG_ID, "DEV");
     }
 
     @Test
@@ -758,7 +761,8 @@ class OrchestrationServiceTest {
         when(dagster.launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-legacy");
 
-        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+        UUID runId = service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV);
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
@@ -791,7 +795,8 @@ class OrchestrationServiceTest {
         when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-graph");
 
-        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+        UUID runId = service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV);
 
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
@@ -831,7 +836,8 @@ class OrchestrationServiceTest {
         when(runtimeContractService.launchBlockedReason(eq(GRAPH_JOB), anyMap()))
                 .thenReturn(Optional.of("Dagster repository 未暴露作业: " + GRAPH_JOB));
 
-        assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining(GRAPH_JOB);
 

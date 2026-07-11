@@ -67,7 +67,7 @@ public class JobRun {
     @Column(nullable = false, length = 64)
     private String timezone = "Asia/Shanghai";
 
-    /** M2 运行策略；默认值与 V16 迁移保持一致。 */
+    /** M2 运行策略及环境标记：NORMAL、DRY_RUN 或 DEV；DEV 不计入生产运行口径。 */
     @Column(nullable = false, length = 16)
     private String runMode = "NORMAL";
 

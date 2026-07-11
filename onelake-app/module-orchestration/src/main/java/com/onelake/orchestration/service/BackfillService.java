@@ -9,6 +9,7 @@ import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.enums.BackfillRunStatus;
 import com.onelake.orchestration.domain.enums.BackfillStatus;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.BackfillDTO;
 import com.onelake.orchestration.dto.BackfillRunDTO;
@@ -556,8 +557,10 @@ public class BackfillService {
                 .map(Dag::getMaxActiveRuns)
                 .map(value -> Math.max(1, value))
                 .orElse(fallbackLimit);
-        long activeRuns = jobRunRepo.countByDagIdAndStatusIn(
-                backfill.getDagId(), List.of(DagStatus.QUEUED, DagStatus.RUNNING));
+        long activeRuns = jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                backfill.getDagId(),
+                List.of(DagStatus.QUEUED, DagStatus.RUNNING),
+                RunEnvironment.DEV.name());
         int available = Math.max(0, dagLimit - Math.toIntExact(Math.min(activeRuns, Integer.MAX_VALUE)));
         if (available == 0) {
             log.info("回填批次 {} 因 dag max_active_runs 限流，activeRuns={} limit={}",

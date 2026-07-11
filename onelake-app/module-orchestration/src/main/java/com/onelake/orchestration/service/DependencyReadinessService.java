@@ -3,6 +3,7 @@ package com.onelake.orchestration.service;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineDependency;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
@@ -73,8 +74,9 @@ public class DependencyReadinessService {
                 continue;
             }
 
-            boolean succeeded = jobRunRepo.existsByDagIdAndLogicalDateAndStatus(
-                    upstreamDag.getId(), requiredLogicalDate, DagStatus.SUCCEEDED);
+            boolean succeeded = jobRunRepo.existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                    upstreamDag.getId(), requiredLogicalDate, DagStatus.SUCCEEDED,
+                    RunEnvironment.DEV.name());
             DagStatus upstreamStatus = succeeded ? DagStatus.SUCCEEDED : null;
             if (!upstreamMode.satisfiesDependency(upstreamStatus)) {
                 blockers.add(blocker(dependency, requiredLogicalDate, "WAITING_UPSTREAM"));

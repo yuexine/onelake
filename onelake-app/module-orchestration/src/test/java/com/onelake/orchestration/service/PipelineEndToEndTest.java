@@ -13,6 +13,7 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
@@ -464,7 +465,8 @@ class PipelineEndToEndTest {
         sync.setSyncTaskId(UUID.randomUUID());  // 让结构校验通过。
         tasks.put("sync_only", sync);
 
-        assertThatThrownBy(() -> orchestrationService.triggerPipelineRun(dagId, TriggerType.MANUAL))
+        assertThatThrownBy(() -> orchestrationService.triggerPipelineRun(
+                dagId, TriggerType.MANUAL, RunEnvironment.DEV))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("可执行任务");
     }

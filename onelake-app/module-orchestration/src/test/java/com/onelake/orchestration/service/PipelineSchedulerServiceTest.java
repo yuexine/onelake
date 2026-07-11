@@ -172,7 +172,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
         verifyNoInteractions(orchestrationService);
-        verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        verify(jobRunRepo, never()).countByDagIdAndStatusInAndRunModeNot(
+                any(), any(), anyString());
         assertThat(TenantContext.getTenantId()).isNull();
     }
 
@@ -185,7 +186,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
         verifyNoInteractions(orchestrationService);
-        verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        verify(jobRunRepo, never()).countByDagIdAndStatusInAndRunModeNot(
+                any(), any(), anyString());
         assertThat(ScheduleMode.from(dag.getScheduleMode()).satisfiesDependency(DagStatus.SUCCEEDED))
                 .isFalse();
         assertThat(TenantContext.getTenantId()).isNull();
@@ -208,7 +210,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
         verifyNoInteractions(orchestrationService);
-        verify(jobRunRepo, never()).countByDagIdAndStatusIn(any(), any());
+        verify(jobRunRepo, never()).countByDagIdAndStatusInAndRunModeNot(
+                any(), any(), anyString());
         verifyNoInteractions(catchupPlanner, backfillDispatcher);
         verify(dependencyWaitRepo).enqueue(
                 dag.getTenantId(),
@@ -346,7 +349,8 @@ class PipelineSchedulerServiceTest {
         Dag dag = scheduledPipeline();
         dag.setMaxActiveRuns(1);
         stubLockedTick(List.of(dag));
-        when(jobRunRepo.countByDagIdAndStatusIn(eq(dag.getId()), any())).thenReturn(1L);
+        when(jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                eq(dag.getId()), any(), eq("DEV"))).thenReturn(1L);
 
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
@@ -366,7 +370,8 @@ class PipelineSchedulerServiceTest {
         dag.setMaxActiveRuns(1);
         dag.setMisfirePolicy("SKIP");
         stubLockedTick(List.of(dag));
-        when(jobRunRepo.countByDagIdAndStatusIn(eq(dag.getId()), any())).thenReturn(1L);
+        when(jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                eq(dag.getId()), any(), eq("DEV"))).thenReturn(1L);
 
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
@@ -493,6 +498,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
         verifyNoInteractions(orchestrationService);
+        verify(pipelineSnapshotService, never())
+                .loadExecutionSnapshot(any(UUID.class), any(UUID.class));
     }
 
     private void stubLockedTick(List<Dag> dags) {

@@ -256,7 +256,8 @@ class BackfillServiceTest {
         when(backfillRunRepo.countByBackfillIdAndStatus(BACKFILL_ID, BackfillRunStatus.RUNNING))
                 .thenReturn(0L);
         when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(jobRunRepo.countByDagIdAndStatusIn(eq(DAG_ID), any())).thenReturn(1L);
+        when(jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                eq(DAG_ID), any(), eq("DEV"))).thenReturn(1L);
 
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
 
@@ -345,7 +346,8 @@ class BackfillServiceTest {
         when(orchestrationService.refreshRunStatusForBackfill(retryRunId)).thenReturn(retryRun);
         when(backfillRunRepo.countByBackfillIdAndStatus(BACKFILL_ID, BackfillRunStatus.RUNNING))
                 .thenReturn(1L);
-        when(jobRunRepo.countByDagIdAndStatusIn(eq(DAG_ID), any())).thenReturn(1L);
+        when(jobRunRepo.countByDagIdAndStatusInAndRunModeNot(
+                eq(DAG_ID), any(), eq("DEV"))).thenReturn(1L);
 
         assertThat(service.dispatchBackfill(BACKFILL_ID)).isZero();
         assertThat(backfillRun.getStatus()).isEqualTo(BackfillRunStatus.RUNNING);

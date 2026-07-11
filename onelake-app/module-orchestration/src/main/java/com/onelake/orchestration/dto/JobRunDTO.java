@@ -16,7 +16,7 @@ import java.util.UUID;
  * @param dagsterRunId Dagster run ID；远端启动前可为空
  * @param triggerType MANUAL、CRON、BACKFILL 或 AUTO_RETRY
  * @param status 本地聚合运行状态
- * @param runMode NORMAL 或 DRY_RUN
+ * @param runMode NORMAL、DRY_RUN 或 DEV（草稿试跑）
  * @param timezone 计算 logical date 和数据区间使用的时区
  * @param logicalDate 调度周期的业务标识时刻
  * @param dataIntervalStart 数据区间左边界

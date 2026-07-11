@@ -35,7 +35,10 @@ function LastRunSummary({ run }: { run?: JobRun }) {
   }
   return (
     <Space direction="vertical" size={4}>
-      <StatusBadge status={run.status} />
+      <Space size={4} wrap>
+        <StatusBadge status={run.status} />
+        {run.runMode === 'DEV' && <Tag color="purple" style={{ margin: 0 }}>试跑</Tag>}
+      </Space>
       <span style={{ fontSize: 12, color: 'var(--ol-ink-2)' }}>
         {formatDate(run.startedAt)}
       </span>

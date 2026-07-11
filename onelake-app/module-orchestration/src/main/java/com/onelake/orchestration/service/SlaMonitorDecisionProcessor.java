@@ -5,6 +5,7 @@ import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import lombok.RequiredArgsConstructor;
@@ -47,7 +48,9 @@ public class SlaMonitorDecisionProcessor {
         }
 
         long elapsedMinutes = Math.max(0L, Duration.between(run.getStartedAt(), now).toMinutes());
-        if (!Boolean.TRUE.equals(run.getSlaMissed())
+        boolean devRun = RunEnvironment.DEV.name().equalsIgnoreCase(run.getRunMode());
+        if (!devRun
+                && !Boolean.TRUE.equals(run.getSlaMissed())
                 && exceeded(run.getStartedAt(), now, dag.getSlaMinutes())) {
             run.setSlaMissed(true);
             run.setUpdatedAt(now);
@@ -58,7 +61,12 @@ public class SlaMonitorDecisionProcessor {
         if (exceeded(run.getStartedAt(), now, dag.getTimeoutMinutes())) {
             // 复用 M1：Dagster terminate 尽力而为，本地 JobRun/TaskRun 以 CANCELLED 收口。
             orchestrationService.cancelRun(runId);
-            publish(DomainEvents.PIPELINE_RUN_TIMEOUT, dag, run, elapsedMinutes);
+            if (devRun) {
+                log.info("DEV 试跑已超时取消，不发布生产 timeout 事件：pipelineId={} runId={}",
+                        dag.getId(), run.getId());
+            } else {
+                publish(DomainEvents.PIPELINE_RUN_TIMEOUT, dag, run, elapsedMinutes);
+            }
         }
     }
 

@@ -12,6 +12,7 @@ import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
@@ -53,6 +54,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -140,7 +142,8 @@ class OrchestrationPipelineTriggerTest {
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-abc");
 
-        UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+        UUID runId = service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV);
 
         assertThat(runId).isNotNull();
 
@@ -153,6 +156,8 @@ class OrchestrationPipelineTriggerTest {
         assertThat(saved.getLogicalDate()).isNull();
         assertThat(saved.getDataIntervalStart()).isNull();
         assertThat(saved.getDataIntervalEnd()).isNull();
+        assertThat(saved.getPipelineVersionId()).isNull();
+        assertThat(saved.getRunMode()).isEqualTo("DEV");
 
         // 每个有效节点都会创建 TaskRun，保证 UI 能观察整张图。
         // Dagster runConfig 仍然只包含真正可执行的引擎节点。
@@ -195,6 +200,7 @@ class OrchestrationPipelineTriggerTest {
         ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
         verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
         assertThat(runCaptor.getValue().getPipelineVersionId()).isEqualTo(versionId);
+        assertThat(runCaptor.getValue().getRunMode()).isEqualTo("NORMAL");
         ArgumentCaptor<List<PipelineTask>> taskCaptor = ArgumentCaptor.forClass(List.class);
         verify(sparkBuilder).build(any(), taskCaptor.capture(), anyString(),
                 any(RunContext.class), any(), anyList());
@@ -203,6 +209,35 @@ class OrchestrationPipelineTriggerTest {
         assertThat(taskCaptor.getValue().get(0).getConfig()).contains("published");
         verify(compileService, never()).compile(DAG_ID);
         verify(taskRepo, never()).findByDagIdOrderByCreatedAtAsc(DAG_ID);
+    }
+
+    @Test
+    void devRunUsesEditedDraftEvenWhenPublishedVersionExists() {
+        UUID versionId = UUID.randomUUID();
+        Dag liveDag = pipelineDag();
+        liveDag.setPublishedVersionId(versionId);
+        PipelineTask draftTask = task("draft_task", true);
+        draftTask.setConfig("{\"sql\":\"SELECT 'draft'\"}");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(liveDag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("draft_task"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(draftTask));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-dev-draft");
+
+        service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        JobRun savedRun = runCaptor.getValue();
+        assertThat(savedRun.getPipelineVersionId()).isNull();
+        assertThat(savedRun.getRunMode()).isEqualTo("DEV");
+        ArgumentCaptor<List<PipelineTask>> taskCaptor = ArgumentCaptor.forClass(List.class);
+        verify(sparkBuilder).build(any(), taskCaptor.capture(), anyString(),
+                any(RunContext.class), any(), anyList());
+        assertThat(taskCaptor.getValue()).extracting(PipelineTask::getTaskKey)
+                .containsExactly("draft_task");
+        assertThat(taskCaptor.getValue().get(0).getConfig()).contains("draft");
+        verify(snapshotService, never()).loadExecutionSnapshot(any(UUID.class), any(UUID.class));
     }
 
     @Test
@@ -237,7 +272,7 @@ class OrchestrationPipelineTriggerTest {
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-topology");
 
-        service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+        service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV);
 
         ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
         verify(taskRunRepo, org.mockito.Mockito.atLeast(4)).save(taskRunCaptor.capture());
@@ -254,14 +289,17 @@ class OrchestrationPipelineTriggerTest {
 
     @Test
     void dryRunCreatesSuccessfulTopologyWithoutLaunchingOrPublishingLoadedData() {
-        Dag dag = pipelineDag();
-        dag.setScheduleMode("DRY_RUN");
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan("extract", "transform"));
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        snapshotDag.setScheduleMode("DRY_RUN");
         PipelineTask extract = task("extract", true);
         PipelineTask transform = task("transform", true);
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(extract, transform));
-        when(edgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge("extract", "transform")));
+        stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(extract, transform),
+                List.of(edge("extract", "transform")),
+                validPlan("extract", "transform"));
         when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
 
         UUID runId = service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
@@ -274,7 +312,7 @@ class OrchestrationPipelineTriggerTest {
         assertThat(savedRun.getStatus()).isEqualTo(DagStatus.SUCCEEDED);
         assertThat(savedRun.getFinishedAt()).isNotNull();
         assertThat(savedRun.getDagsterRunId()).isNull();
-        assertThat(ScheduleMode.from(dag.getScheduleMode()).satisfiesDependency(savedRun.getStatus()))
+        assertThat(ScheduleMode.from(snapshotDag.getScheduleMode()).satisfiesDependency(savedRun.getStatus()))
                 .isTrue();
 
         ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
@@ -300,11 +338,14 @@ class OrchestrationPipelineTriggerTest {
 
     @Test
     void automaticRetryCreatesNewRunWithSourceAndIndependentAttempt() {
-        Dag dag = pipelineDag();
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan("retry_task"));
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
-                .thenReturn(List.of(task("retry_task", true)));
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        UUID versionId = stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(task("retry_task", true)),
+                List.of(),
+                validPlan("retry_task"));
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-auto-retry");
         JobRun source = new JobRun();
@@ -315,6 +356,7 @@ class OrchestrationPipelineTriggerTest {
         source.setRunMode("NORMAL");
         source.setRunRetryAttempt(0);
         source.setTimezone("UTC");
+        source.setPipelineVersionId(versionId);
 
         service.triggerPipelineRetry(source);
 
@@ -329,8 +371,10 @@ class OrchestrationPipelineTriggerTest {
 
     @Test
     void automaticRetryPreflightFailureStillCreatesAuditableFailedChild() {
-        Dag dag = pipelineDag();
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        UUID versionId = stubPublishedExecution(
+                liveDag, snapshotDag, List.of(), List.of(), validPlan());
         when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.of("Dagster job missing"));
         JobRun source = new JobRun();
@@ -341,6 +385,7 @@ class OrchestrationPipelineTriggerTest {
         source.setRunMode("NORMAL");
         source.setRunRetryAttempt(0);
         source.setTimezone("UTC");
+        source.setPipelineVersionId(versionId);
 
         assertThatThrownBy(() -> service.triggerPipelineRetry(source))
                 .isInstanceOf(BizException.class)
@@ -360,11 +405,14 @@ class OrchestrationPipelineTriggerTest {
 
     @Test
     void automaticRetryRunConfigFailureClosesCreatedChildAsFailed() {
-        Dag dag = pipelineDag();
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan("retry_task"));
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
-                .thenReturn(List.of(task("retry_task", true)));
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        UUID versionId = stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(task("retry_task", true)),
+                List.of(),
+                validPlan("retry_task"));
         when(sparkBuilder.build(any(), anyList(), anyString(), any(RunContext.class), any(), anyList()))
                 .thenThrow(new RuntimeException("invalid run config"));
         when(taskRunRepo.findByJobRunId(any())).thenReturn(List.of());
@@ -374,6 +422,7 @@ class OrchestrationPipelineTriggerTest {
         source.setStatus(DagStatus.FAILED);
         source.setRunMode("NORMAL");
         source.setRunRetryAttempt(0);
+        source.setPipelineVersionId(versionId);
 
         assertThatThrownBy(() -> service.triggerPipelineRetry(source))
                 .isInstanceOf(BizException.class)
@@ -390,13 +439,17 @@ class OrchestrationPipelineTriggerTest {
 
     @Test
     void cronTriggerCalculatesAndPersistsTheBusinessInterval() {
-        Dag dag = pipelineDag();
-        dag.setTimezone("UTC");
-        dag.setPartitionGrain("DAY");
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        snapshotDag.setTimezone("UTC");
+        snapshotDag.setPartitionGrain("DAY");
         Instant scheduledAt = Instant.parse("2026-05-03T02:00:00Z");
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan("spark_daily"));
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task("spark_daily", true)));
+        UUID versionId = stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(task("spark_daily", true)),
+                List.of(),
+                validPlan("spark_daily"));
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-cron");
 
@@ -408,6 +461,7 @@ class OrchestrationPipelineTriggerTest {
         assertThat(savedRun.getLogicalDate()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
         assertThat(savedRun.getDataIntervalStart()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
         assertThat(savedRun.getDataIntervalEnd()).isEqualTo(scheduledAt);
+        assertThat(savedRun.getPipelineVersionId()).isEqualTo(versionId);
     }
 
     @Test
@@ -453,7 +507,7 @@ class OrchestrationPipelineTriggerTest {
     }
 
     @Test
-    void publishedPipelineWithoutVersionCannotUseDevExecutionPath() {
+    void prodPipelineWithoutVersionCannotFallBackToDevExecutionPath() {
         Dag dag = pipelineDag();
         dag.setStatus("PUBLISHED");
         dag.setPublishedVersionId(null);
@@ -461,7 +515,7 @@ class OrchestrationPipelineTriggerTest {
 
         assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
                 .isInstanceOf(BizException.class)
-                .hasMessageContaining("重新发布");
+                .hasMessageContaining("env=DEV");
 
         verify(compileService, never()).compile(DAG_ID);
         verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
@@ -483,7 +537,9 @@ class OrchestrationPipelineTriggerTest {
         service.triggerPipelineRun(
                 DAG_ID,
                 TriggerType.MANUAL,
-                new RunContext(logicalDate, null, null, null, null, null, TriggerType.MANUAL));
+                new RunContext(logicalDate, null, null, null, null, null, TriggerType.MANUAL),
+                null,
+                RunEnvironment.DEV);
 
         ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
         verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
@@ -509,7 +565,9 @@ class OrchestrationPipelineTriggerTest {
                         "UTC",
                         "NORMAL",
                         null,
-                        TriggerType.MANUAL)))
+                        TriggerType.MANUAL),
+                null,
+                RunEnvironment.DEV))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("logicalDate 必须等于 dataIntervalStart");
         verify(runRepo, never()).save(any(JobRun.class));
@@ -518,15 +576,19 @@ class OrchestrationPipelineTriggerTest {
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
     void triggerPipelineRunPersistsLogicalDateAndInjectsBizdateRuntimeParam() {
-        Dag dag = pipelineDag();
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
         UUID backfillId = UUID.randomUUID();
         Instant logicalDate = Instant.parse("2026-01-02T00:00:00Z");
         Instant intervalEnd = Instant.parse("2026-01-03T00:00:00Z");
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan("spark_bizdate"));
         PipelineTask task = task("spark_bizdate", true);
         task.setConfig("{\"sql\":\"insert overwrite table dwd.orders partition(dt='${bizdate}') select 1\"}");
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
+        UUID versionId = stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(task),
+                List.of(),
+                validPlan("spark_bizdate"));
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenReturn("dagster-run-backfill");
 
@@ -549,6 +611,7 @@ class OrchestrationPipelineTriggerTest {
         assertThat(savedRun.getDataIntervalStart()).isEqualTo(logicalDate);
         assertThat(savedRun.getDataIntervalEnd()).isEqualTo(intervalEnd);
         assertThat(savedRun.getBackfillId()).isEqualTo(backfillId);
+        assertThat(savedRun.getPipelineVersionId()).isEqualTo(versionId);
 
         ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
         verify(taskRunRepo, org.mockito.Mockito.atLeastOnce()).save(taskRunCaptor.capture());
@@ -574,7 +637,8 @@ class OrchestrationPipelineTriggerTest {
         when(compileService.compile(DAG_ID)).thenReturn(new PipelineCompileResult(
                 DAG_ID, "pipeline_" + DAG_ID, TENANT_ID, List.of(bad), false, List.of()));
 
-        assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("编译未通过");
 
@@ -589,18 +653,22 @@ class OrchestrationPipelineTriggerTest {
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
                 .thenReturn(List.of(task("spark_only", false)));
 
-        assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("可执行任务");
     }
 
     @Test
-    void publishesFailedEventWhenDagsterLaunchFails() {
-        Dag dag = pipelineDag();
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
-        when(compileService.compile(DAG_ID)).thenReturn(validPlan());
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
-                .thenReturn(List.of(task("t1", true)));
+    void prodLaunchFailurePublishesFailedEvent() {
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        stubPublishedExecution(
+                liveDag,
+                snapshotDag,
+                List.of(task("t1", true)),
+                List.of(),
+                validPlan());
         when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
                 .thenThrow(new RuntimeException("dagster unavailable"));
         when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
@@ -615,6 +683,61 @@ class OrchestrationPipelineTriggerTest {
         verify(outboxPublisher).publish(typeCaptor.capture(), anyString(), payloadCaptor.capture());
         assertThat(typeCaptor.getValue()).isEqualTo("pipeline.run.failed");
         assertThat(payloadCaptor.getValue().get("errorMsg")).asString().contains("dagster unavailable");
+    }
+
+    @Test
+    void devLaunchFailureDoesNotPublishProductionEvent() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan());
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(task("t1", true)));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenThrow(new RuntimeException("dagster unavailable"));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
+                .isInstanceOf(BizException.class);
+
+        verifyNoInteractions(outboxPublisher);
+    }
+
+    @Test
+    void terminalDevRunDoesNotPublishProductionRunOrTaskEvents() {
+        Dag dag = pipelineDag();
+        JobRun run = new JobRun();
+        run.setId(UUID.randomUUID());
+        run.setDagId(DAG_ID);
+        run.setDagsterRunId("dagster-dev-success");
+        run.setTriggerType(TriggerType.MANUAL);
+        run.setRunMode(RunEnvironment.DEV.name());
+        run.setStatus(DagStatus.RUNNING);
+        run.setStartedAt(Instant.parse("2026-06-25T01:00:00Z"));
+
+        TaskRun taskRun = new TaskRun();
+        taskRun.setId(UUID.randomUUID());
+        taskRun.setTenantId(TENANT_ID);
+        taskRun.setJobRunId(run.getId());
+        taskRun.setTaskKey("t1");
+        taskRun.setStatus(TaskRunStatus.SUCCEEDED);
+        taskRun.setStartedAt(run.getStartedAt());
+        taskRun.setFinishedAt(Instant.parse("2026-06-25T01:01:00Z"));
+
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(any(), any()))
+                .thenReturn(new PageImpl<>(List.of(run), PageRequest.of(0, 10), 1));
+        when(dagster.getRunStatus("dagster-dev-success"))
+                .thenReturn(new DagsterClient.RunStatus(
+                        "dagster-dev-success",
+                        "SUCCESS",
+                        run.getStartedAt(),
+                        taskRun.getFinishedAt()));
+        when(taskRunRepo.findByJobRunId(run.getId())).thenReturn(List.of(taskRun));
+
+        service.listRuns(PageRequest.of(0, 10));
+
+        assertThat(run.getStatus()).isEqualTo(DagStatus.SUCCEEDED);
+        verifyNoInteractions(outboxPublisher);
     }
 
     @Test
@@ -834,6 +957,29 @@ class OrchestrationPipelineTriggerTest {
         d.setResourceGroup("spark-default");
         d.setComputeProfile("spark-small");
         return d;
+    }
+
+    private UUID stubPublishedExecution(Dag liveDag,
+                                        Dag snapshotDag,
+                                        List<PipelineTask> tasks,
+                                        List<PipelineTaskEdge> edges,
+                                        PipelineCompileResult plan) {
+        UUID versionId = UUID.randomUUID();
+        liveDag.setStatus("PUBLISHED");
+        liveDag.setPublishedVersionId(versionId);
+        snapshotDag.setStatus("PUBLISHED");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(liveDag));
+        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, snapshotDag, tasks, edges, List.of()));
+        org.mockito.Mockito.lenient().when(
+                compileService.compile(eq(DAG_ID), eq(TENANT_ID), anyList(), anyList()))
+                .thenReturn(plan);
+        return versionId;
     }
 
     private PipelineCompileResult validPlan() {

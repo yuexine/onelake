@@ -22,7 +22,7 @@ import java.util.UUID;
  * @param dataIntervalStart 数据区间左边界
  * @param dataIntervalEnd 数据区间右边界
  * @param timezone 创建运行时冻结的业务时区
- * @param runMode NORMAL 或 DRY_RUN 等运行模式
+ * @param runMode NORMAL、DRY_RUN 或 DEV 等运行模式
  * @param backfillId 来源回填批次；非回填运行为空
  * @param triggerType 运行触发来源
  */

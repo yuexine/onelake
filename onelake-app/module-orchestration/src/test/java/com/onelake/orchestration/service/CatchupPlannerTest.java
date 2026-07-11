@@ -35,7 +35,8 @@ class CatchupPlannerTest {
         latest.setLogicalDate(Instant.parse("2026-01-01T02:00:00Z"));
         latest.setDataIntervalStart(latest.getLogicalDate());
         latest.setDataIntervalEnd(Instant.parse("2026-01-02T02:00:00Z"));
-        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullOrderByLogicalDateDesc(dag.getId()))
+        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullAndRunModeNotOrderByLogicalDateDesc(
+                dag.getId(), "DEV"))
                 .thenReturn(Optional.of(latest));
 
         CatchupPlanner.CatchupPlan plan = planner.plan(
@@ -70,7 +71,8 @@ class CatchupPlannerTest {
         Dag dag = dailyDag();
         dag.setCatchup(true);
         dag.setCreatedAt(Instant.parse("2026-01-01T02:00:00Z"));
-        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullOrderByLogicalDateDesc(dag.getId()))
+        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullAndRunModeNotOrderByLogicalDateDesc(
+                dag.getId(), "DEV"))
                 .thenReturn(Optional.empty());
 
         CatchupPlanner.CatchupPlan plan = planner.plan(
@@ -98,7 +100,8 @@ class CatchupPlannerTest {
         holiday.setCalendarId(calendarId);
         holiday.setDay(java.time.LocalDate.of(2026, 1, 3));
         holiday.setDayType("HOLIDAY");
-        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullOrderByLogicalDateDesc(dag.getId()))
+        when(jobRunRepo.findFirstByDagIdAndLogicalDateIsNotNullAndRunModeNotOrderByLogicalDateDesc(
+                dag.getId(), "DEV"))
                 .thenReturn(Optional.of(latest));
         when(calendarDayRepo.findById(new ScheduleCalendarDayId(calendarId, holiday.getDay())))
                 .thenReturn(Optional.of(holiday));

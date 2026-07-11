@@ -6,6 +6,7 @@ import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.SchedulerLockRepository;
@@ -99,6 +100,22 @@ class SlaMonitorServiceTest {
         verify(outboxPublisher).publish(
                 eq(DomainEvents.PIPELINE_RUN_SLA_MISSED), eq(dag.getId().toString()), payload.capture());
         assertRequiredPayload(payload.getValue(), dag, run, 6L);
+    }
+
+    @Test
+    void devTimeoutCancelsRunWithoutProductionSlaOrTimeoutEvents() {
+        Dag dag = dag(1, 5);
+        JobRun run = activeRun(dag, NOW.minusSeconds(6 * 60L), false);
+        run.setRunMode(RunEnvironment.DEV.name());
+        stubRun(dag, run);
+
+        processor.process(run.getId(), NOW);
+
+        verify(orchestrationService).refreshRunStatusForAutomation(run.getId());
+        verify(orchestrationService).cancelRun(run.getId());
+        verify(jobRunRepo, never()).save(run);
+        verifyNoInteractions(outboxPublisher);
+        assertThat(run.getSlaMissed()).isFalse();
     }
 
     @Test

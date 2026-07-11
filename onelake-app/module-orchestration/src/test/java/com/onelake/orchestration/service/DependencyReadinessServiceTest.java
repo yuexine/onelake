@@ -50,8 +50,8 @@ class DependencyReadinessServiceTest {
         PipelineDependency dependency = dependency(downstream, upstream, "SAME_CYCLE", null, 0);
         Instant logicalDate = Instant.parse("2026-07-10T00:00:00Z");
         stubDependency(downstream, upstream, dependency);
-        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatus(
-                upstream.getId(), logicalDate, DagStatus.SUCCEEDED)).thenReturn(true);
+        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                upstream.getId(), logicalDate, DagStatus.SUCCEEDED, "DEV")).thenReturn(true);
 
         DependencyReadinessService.ReadinessResult result = service().evaluate(downstream, logicalDate);
 
@@ -76,8 +76,8 @@ class DependencyReadinessServiceTest {
                     assertThat(blocker.requiredLogicalDate()).isEqualTo(logicalDate);
                     assertThat(blocker.reason()).isEqualTo("UPSTREAM_FROZEN");
                 });
-        verify(jobRunRepo, never()).existsByDagIdAndLogicalDateAndStatus(
-                upstream.getId(), logicalDate, DagStatus.SUCCEEDED);
+        verify(jobRunRepo, never()).existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                upstream.getId(), logicalDate, DagStatus.SUCCEEDED, "DEV");
     }
 
     @Test
@@ -88,15 +88,15 @@ class DependencyReadinessServiceTest {
         Instant downstreamLogicalDate = Instant.parse("2026-07-10T16:00:00Z");
         Instant requiredUpstreamDate = Instant.parse("2026-07-09T16:00:00Z");
         stubDependency(downstream, upstream, dependency);
-        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatus(
-                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED)).thenReturn(true);
+        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED, "DEV")).thenReturn(true);
 
         DependencyReadinessService.ReadinessResult result = service()
                 .evaluate(downstream, downstreamLogicalDate);
 
         assertThat(result.ready()).isTrue();
-        verify(jobRunRepo).existsByDagIdAndLogicalDateAndStatus(
-                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED);
+        verify(jobRunRepo).existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED, "DEV");
     }
 
     @Test
@@ -107,8 +107,8 @@ class DependencyReadinessServiceTest {
         Instant downstreamLogicalDate = Instant.parse("2026-07-10T10:00:00Z");
         Instant requiredUpstreamDate = Instant.parse("2026-07-10T09:00:00Z");
         stubDependency(downstream, upstream, dependency);
-        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatus(
-                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED)).thenReturn(false);
+        when(jobRunRepo.existsByDagIdAndLogicalDateAndStatusAndRunModeNot(
+                upstream.getId(), requiredUpstreamDate, DagStatus.SUCCEEDED, "DEV")).thenReturn(false);
 
         DependencyReadinessService.ReadinessResult result = service()
                 .evaluate(downstream, downstreamLogicalDate);

@@ -91,6 +91,13 @@ function isRunTerminal(status?: string) {
   return ['SUCCEEDED', 'SUCCESS', 'FAILED', 'CANCELLED'].includes((status || '').toUpperCase());
 }
 
+function RunModeIndicator({ runMode, showNormal = true }: { runMode?: string; showNormal?: boolean }) {
+  const normalized = (runMode || 'NORMAL').toUpperCase();
+  if (normalized === 'DEV') return <Tag color="purple" style={{ margin: 0 }}>试跑</Tag>;
+  if (normalized === 'DRY_RUN') return <Tag color="blue" style={{ margin: 0 }}>空跑</Tag>;
+  return showNormal ? <span>正常</span> : null;
+}
+
 function isBackfillTerminal(status?: string) {
   return ['SUCCEEDED', 'FAILED', 'PARTIAL', 'CANCELLED'].includes((status || '').toUpperCase());
 }
@@ -1010,7 +1017,11 @@ export default function RunInstances() {
         meta={detailRun ? [
             { label: '状态', value: detailRun.status },
             { label: '触发方式', value: detailRun.triggerType },
-            ...(detailRun.runMode === 'DRY_RUN' ? [{ label: '运行模式', value: '空跑' }] : []),
+            ...(detailRun.runMode === 'DEV'
+              ? [{ label: '运行模式', value: '试跑（DEV）' }]
+              : detailRun.runMode === 'DRY_RUN'
+                ? [{ label: '运行模式', value: '空跑' }]
+                : []),
             ...((detailRun.runRetryAttempt ?? 0) > 0
               ? [{ label: '自动重跑', value: `第 ${detailRun.runRetryAttempt} 次` }]
               : []),
@@ -1092,7 +1103,7 @@ export default function RunInstances() {
                 <Descriptions.Item label="触发方式">{detailRun.triggerType}</Descriptions.Item>
                 <Descriptions.Item label="状态"><StatusBadge status={detailRun.status} /></Descriptions.Item>
                 <Descriptions.Item label="运行模式">
-                  {detailRun.runMode === 'DRY_RUN' ? <Tag color="blue">空跑</Tag> : '正常'}
+                  <RunModeIndicator runMode={detailRun.runMode} />
                 </Descriptions.Item>
                 {detailRun.slaMissed && (
                   <Descriptions.Item label="SLA"><Tag color="red">已违约</Tag></Descriptions.Item>
@@ -1294,7 +1305,7 @@ export default function RunInstances() {
             { title: '状态', dataIndex: 'status', width: 150, render: (s: string, run: JobRun) => (
               <Space size={4} wrap>
                 <StatusBadge status={s} />
-                {run.runMode === 'DRY_RUN' && <Tag color="blue" style={{ margin: 0 }}>空跑</Tag>}
+                <RunModeIndicator runMode={run.runMode} showNormal={false} />
                 {run.slaMissed && <Tag color="red" style={{ margin: 0 }}>SLA</Tag>}
               </Space>
             ) },

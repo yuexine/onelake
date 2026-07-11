@@ -4,6 +4,7 @@ import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
+import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
@@ -121,7 +122,8 @@ public class PipelineRunRetryService {
 
         int maxActiveRuns = Math.max(1,
                 dag.getMaxActiveRuns() == null ? 1 : dag.getMaxActiveRuns());
-        if (runRepo.countByDagIdAndStatusIn(dag.getId(), ACTIVE_RUN_STATUSES) >= maxActiveRuns) {
+        if (runRepo.countByDagIdAndStatusInAndRunModeNot(
+                dag.getId(), ACTIVE_RUN_STATUSES, RunEnvironment.DEV.name()) >= maxActiveRuns) {
             return false;
         }
 

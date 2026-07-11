@@ -33,18 +33,18 @@
 | Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, Superset, JupyterHub, Spark, Flink, Kafka/Zookeeper, and etcd. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
 | Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. |
 | Frontend | React 18, Vite 5, TypeScript, Ant Design 5, Pro Components, React Router, React Query, Zustand, X6, Monaco, ECharts under `onelake-app/web-console`. |
-| Product Scope | Modular control-plane implementation with broad frontend prototype coverage. Some pages are real API backed, some are hybrid/fallback, and some remain prototype-only; see `docs/FRONTEND_VERIFICATION.md`. |
+| Product Scope | Modular control-plane implementation with broad frontend coverage. Orchestration V2 status is tracked in `docs/数据开发与编排模块V2升级计划.md` and the M1–M4 detailed plans. |
 | Runtime Logs | Use root `.run-logs/` for long-running local process logs. Existing frontend log path: `.run-logs/web-console-vite.log`. |
 
 ## 3. Must-Read Context
 
 | Scenario | Read First |
 | --- | --- |
-| Project map | `docs/PROJECT_STRUCTURE.md`, `docs/IMPLEMENTATION_STATUS.md` |
+| Project map | This file's directory map plus the active module-specific plans under `docs/`. |
 | Technical initialization | `docs/技术初始化文档.md` |
 | Full local deployment | `docs/本地开发环境完整部署指南.md` |
 | Product and function scope | `docs/详细功能清单产品详细设计.md` |
-| Frontend prototype and interaction | `docs/数据平台 · 原型设计与交互说明文档.md`, `docs/FRONTEND_VERIFICATION.md` |
+| Frontend prototype and interaction | `docs/数据平台 · 原型设计与交互说明文档.md` plus the matching module plan. |
 | Backend boot/config | `onelake-app/pom.xml`, `onelake-app/bootstrap/src/main/resources/application.yml`, `onelake-app/Makefile` |
 | Data plane | `onelake-app/docker-compose.yml`, `onelake-app/scripts/`, `onelake-app/trino/`, `onelake-app/apisix/`, `docs/本地开发环境完整部署指南.md` |
 | Frontend app | `onelake-app/web-console/package.json`, `onelake-app/web-console/vite.config.ts`, `onelake-app/web-console/src/App.tsx`, `onelake-app/web-console/src/routes.tsx` |
@@ -56,10 +56,7 @@ document unless the task genuinely needs broad product context.
 
 ```text
 docs/
-  PROJECT_STRUCTURE.md                  # Current codebase map and module index
-  IMPLEMENTATION_STATUS.md              # Current code-aligned implementation status
   本地开发环境完整部署指南.md
-  FRONTEND_VERIFICATION.md              # Frontend prototype verification
   技术初始化文档.md
   数据平台 · 原型设计与交互说明文档.md
   详细功能清单产品详细设计.md
@@ -226,10 +223,7 @@ verification that did run.
 
 ## 10. Documentation Sync
 
-- Update `docs/PROJECT_STRUCTURE.md` when moving or adding structural modules.
-- Update `docs/IMPLEMENTATION_STATUS.md` when capability status changes.
-- Update `docs/FRONTEND_VERIFICATION.md` after material frontend prototype
-  coverage or navigation changes.
+- Update the matching active module plan when capability status, routes, or verification coverage changes.
 - Keep this `RTK.md` focused on runtime and development guidance. Avoid copying
   long implementation inventories that already live in docs.
 

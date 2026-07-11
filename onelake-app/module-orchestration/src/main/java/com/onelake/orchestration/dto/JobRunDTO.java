@@ -29,6 +29,8 @@ import java.util.UUID;
  * @param slaMissed 是否已超过 SLA 阈值
  * @param retrySourceRunId DAG 自动重跑来源；普通运行为空
  * @param runRetryAttempt DAG 自动重跑次数，首次运行为 0
+ * @param pipelineVersionId 运行绑定的不可变流水线版本 ID；DEV 实时运行可为空
+ * @param pipelineVersion 运行绑定的 DAG 内可读版本号；DEV 实时运行可为空
  */
 public record JobRunDTO(
     UUID id,
@@ -50,5 +52,7 @@ public record JobRunDTO(
     String triggeredByName,
     Boolean slaMissed,
     UUID retrySourceRunId,
-    Integer runRetryAttempt
+    Integer runRetryAttempt,
+    UUID pipelineVersionId,
+    Integer pipelineVersion
 ) {}

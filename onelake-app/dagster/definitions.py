@@ -856,12 +856,16 @@ def _make_native_task_op(task_key, upstream_count):
     return pipeline_task
 
 
-def _pipeline_graph_job_name(pipeline_id):
-    return _NATIVE_GRAPH_JOB_PREFIX + str(pipeline_id).replace("-", "")
+def _pipeline_graph_job_name(pipeline_id, version_id=None):
+    name = _NATIVE_GRAPH_JOB_PREFIX + str(pipeline_id).replace("-", "")
+    if version_id:
+        name += "_v_" + str(version_id).replace("-", "")
+    return name
 
 
 def _build_native_pipeline_job(definition, upstream_slots=None):
     pipeline_id = definition.get("pipeline_id")
+    version_id = definition.get("version_id")
     task_keys = definition.get("task_keys") or []
     if not pipeline_id or not task_keys or len(task_keys) != len(set(task_keys)):
         return None
@@ -877,7 +881,7 @@ def _build_native_pipeline_job(definition, upstream_slots=None):
         key: _make_native_task_op(key, max(len(upstreams[key]), slots.get(key, 0)))
         for key in task_keys
     }
-    job_name = _pipeline_graph_job_name(pipeline_id)
+    job_name = _pipeline_graph_job_name(pipeline_id, version_id)
 
     @graph(name=job_name)
     def pipeline_graph():

@@ -81,6 +81,19 @@ public class ParamResolver {
                 tenantId, dagId, taskKeys, runContext, builtInParameters, true);
     }
 
+    /** 使用发布快照冻结的 GLOBAL/PIPELINE/TASK 参数，不再读取实时参数表。 */
+    public Map<String, Map<String, String>> resolveForTasks(
+            UUID tenantId,
+            UUID dagId,
+            Collection<String> taskKeys,
+            List<PipelineParam> frozenParams,
+            RunContext runContext,
+            Map<String, String> builtInParameters) {
+        Objects.requireNonNull(frozenParams, "frozenParams must not be null");
+        return resolveForTasksFromParams(
+                tenantId, dagId, taskKeys, runContext, builtInParameters, true, frozenParams);
+    }
+
     private Map<String, Map<String, String>> resolveForTasksInternal(
             UUID tenantId,
             UUID dagId,
@@ -91,16 +104,30 @@ public class ParamResolver {
         Objects.requireNonNull(tenantId, "tenantId must not be null");
         Objects.requireNonNull(dagId, "dagId must not be null");
 
-        LinkedHashSet<String> requestedKeys = new LinkedHashSet<>();
-        if (taskKeys != null) {
-            taskKeys.stream().filter(StringUtils::hasText).forEach(requestedKeys::add);
-        }
+        LinkedHashSet<String> requestedKeys = requestedKeys(taskKeys);
         if (requestedKeys.isEmpty()) {
             return Map.of();
         }
 
         List<PipelineParam> allParams = paramRepository.findForResolution(
                 tenantId, dagId, requestedKeys);
+        return resolveForTasksFromParams(
+                tenantId, dagId, requestedKeys, runContext, builtInParameters,
+                evaluateExpressions, allParams);
+    }
+
+    private Map<String, Map<String, String>> resolveForTasksFromParams(
+            UUID tenantId,
+            UUID dagId,
+            Collection<String> taskKeys,
+            RunContext runContext,
+            Map<String, String> builtInParameters,
+            boolean evaluateExpressions,
+            List<PipelineParam> allParams) {
+        Objects.requireNonNull(tenantId, "tenantId must not be null");
+        Objects.requireNonNull(dagId, "dagId must not be null");
+        LinkedHashSet<String> requestedKeys = requestedKeys(taskKeys);
+        if (requestedKeys.isEmpty()) return Map.of();
         List<PipelineParam> safeParams = allParams == null ? List.of() : allParams;
 
         Map<String, ResolvedParam> base = new LinkedHashMap<>();
@@ -119,6 +146,14 @@ public class ParamResolver {
                     resolved, runContext, builtInParameters, evaluateExpressions));
         }
         return Collections.unmodifiableMap(resolvedByTask);
+    }
+
+    private LinkedHashSet<String> requestedKeys(Collection<String> taskKeys) {
+        LinkedHashSet<String> requestedKeys = new LinkedHashSet<>();
+        if (taskKeys != null) {
+            taskKeys.stream().filter(StringUtils::hasText).forEach(requestedKeys::add);
+        }
+        return requestedKeys;
     }
 
     private void merge(Map<String, String> target, List<PipelineParam> params) {

@@ -118,6 +118,7 @@ public class PipelineSchedulingService {
         if (updated != 1) {
             throw new BizException(40400, "Pipeline 不存在");
         }
+        dagRepo.markPublishedDagChanged(dagId, tenantId);
         return DagSchedulingDTO.of(requireDag(dagId, tenantId));
     }
 

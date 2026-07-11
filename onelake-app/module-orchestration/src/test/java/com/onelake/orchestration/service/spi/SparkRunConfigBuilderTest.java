@@ -34,6 +34,16 @@ class SparkRunConfigBuilderTest {
     private final ParamResolver paramResolver = mock(ParamResolver.class);
     private final SparkRunConfigBuilder builder = new SparkRunConfigBuilder(paramResolver);
 
+    @Test
+    void graphJobNameIncludesImmutableVersionWhenPresent() {
+        UUID pipelineId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID versionId = UUID.fromString("00000000-0000-0000-0000-000000000099");
+
+        assertThat(SparkRunConfigBuilder.graphJobName(pipelineId, versionId))
+                .isEqualTo("onelake_pipeline_graph_00000000000000000000000000000001"
+                        + "_v_00000000000000000000000000000099");
+    }
+
     @BeforeEach
     void setup() {
         reset(paramResolver);

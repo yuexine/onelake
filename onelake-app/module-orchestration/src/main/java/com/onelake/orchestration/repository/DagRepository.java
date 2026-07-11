@@ -71,6 +71,27 @@ public interface DagRepository extends JpaRepository<Dag, UUID> {
                                @Param("scheduleStart") Instant scheduleStart,
                                @Param("scheduleEnd") Instant scheduleEnd);
 
+    /** 调度/参数等 DEV 配置被编辑后标记已发布流水线存在未发布变更。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update Dag d
+               set d.hasUnpublishedChanges = true
+             where d.id = :id
+               and d.tenantId = :tenantId
+               and upper(d.status) = 'PUBLISHED'
+            """)
+    int markPublishedDagChanged(@Param("id") UUID id, @Param("tenantId") UUID tenantId);
+
+    /** 租户 GLOBAL 参数变化会影响该租户所有快照，因此批量标记已发布流水线。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update Dag d
+               set d.hasUnpublishedChanges = true
+             where d.tenantId = :tenantId
+               and upper(d.status) = 'PUBLISHED'
+            """)
+    int markTenantPublishedDagsChanged(@Param("tenantId") UUID tenantId);
+
     /**
      * 查询启用中的调度候选。
      *

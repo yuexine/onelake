@@ -194,6 +194,7 @@ class PipelineParamServiceTest {
         replacementOrder.verify(tenantRepo).findByIdForUpdate(TENANT_ID);
         replacementOrder.verify(paramRepo).findByTenantIdAndScope(TENANT_ID, "GLOBAL");
         verify(paramRepo).deleteAllInBatch(List.of(existing));
+        verify(dagRepo).markTenantPublishedDagsChanged(TENANT_ID);
     }
 
     private void assertRejectedValue(String value, String type, int code) {

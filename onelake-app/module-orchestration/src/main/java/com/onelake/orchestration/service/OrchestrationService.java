@@ -41,6 +41,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -98,6 +99,7 @@ public class OrchestrationService {
 
     /** 流水线 V2 的编译、节点持久化、配置构建和事件发布依赖。 */
     private final PipelineCompileService pipelineCompileService;
+    private final PipelineSnapshotService pipelineSnapshotService;
     private final PipelineTaskRepository pipelineTaskRepo;
     private final PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
     private final TaskRunRepository taskRunRepo;
@@ -175,6 +177,9 @@ public class OrchestrationService {
         dag.setScheduleCron(scheduleCron);
         if (enabled != null) {
             dag.setEnabled(enabled);
+        }
+        if ("PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
+            dag.setHasUnpublishedChanges(true);
         }
         dag.setVersion(dag.getVersion() == null ? 1 : dag.getVersion() + 1);
         dagRepo.save(dag);
@@ -263,17 +268,35 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, Instant scheduledAt) {
+        return triggerPipelineRun(dagId, trigger, scheduledAt, null);
+    }
+
+    /** CRON 触发时可显式固定调度器已经评估过的发布版本，避免判定与执行之间切换快照。 */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId,
+                                   TriggerType trigger,
+                                   Instant scheduledAt,
+                                   UUID useVersionId) {
         if (trigger != TriggerType.CRON) {
             throw new BizException(40020, "计划时刻仅适用于 CRON 触发");
         }
         if (scheduledAt == null) {
-            return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger));
+            return triggerPipelineRun(dagId, trigger, RunContext.empty(trigger), useVersionId);
         }
-        Dag dag = findTenantDag(dagId);
+        Dag liveDag = findTenantDag(dagId);
+        UUID selectedVersionId = useVersionId != null
+                ? useVersionId
+                : liveDag.getPublishedVersionId();
+        Dag dag = liveDag;
+        if (selectedVersionId != null) {
+            dag = pipelineSnapshotService
+                    .loadExecutionSnapshot(selectedVersionId, dagId)
+                    .dag();
+        }
         RunContext runContext = dataIntervalCalculator
                 .calculate(dag.getPartitionGrain(), scheduledAt, dag.getTimezone())
                 .toRunContext(dag.getTimezone(), "NORMAL", null, trigger);
-        return triggerPipelineRun(dagId, trigger, runContext);
+        return triggerPipelineRun(dagId, trigger, runContext, selectedVersionId);
     }
     /**
      * 使用完整运行上下文触发流水线，供正常调度和回填派发共同复用。
@@ -287,7 +310,16 @@ public class OrchestrationService {
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId, TriggerType trigger, RunContext context) {
-        return triggerPipelineRunInternal(dagId, trigger, context, null);
+        return triggerPipelineRunInternal(dagId, trigger, context, null, null);
+    }
+
+    /** 显式选择发布版本触发；useVersionId 为空时仍默认使用 dag.publishedVersionId。 */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId,
+                                   TriggerType trigger,
+                                   RunContext context,
+                                   UUID useVersionId) {
+        return triggerPipelineRunInternal(dagId, trigger, context, null, useVersionId);
     }
 
     /**
@@ -320,7 +352,8 @@ public class OrchestrationService {
                     sourceRun.getDagId(),
                     TriggerType.AUTO_RETRY,
                     context,
-                    retryMetadata);
+                    retryMetadata,
+                    sourceRun.getPipelineVersionId());
         } catch (RuntimeException ex) {
             // 运行时契约或编译可能在 JobRun 建档前失败；仍需生成失败子运行承接次数链和审计来源。
             if (!retryMetadata.runCreated()) {
@@ -336,16 +369,28 @@ public class OrchestrationService {
     private UUID triggerPipelineRunInternal(UUID dagId,
                                             TriggerType trigger,
                                             RunContext context,
-                                            RunRetryMetadata retryMetadata) {
+                                            RunRetryMetadata retryMetadata,
+                                            UUID useVersionId) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
-        Dag dag = findTenantDag(dagId);
+        Dag liveDag = findTenantDag(dagId);
+        UUID selectedVersionId = useVersionId != null
+                ? useVersionId
+                : liveDag.getPublishedVersionId();
+        if (selectedVersionId == null && "PUBLISHED".equalsIgnoreCase(liveDag.getStatus())) {
+            throw new BizException(40064, "已发布流水线缺少不可变版本，请重新发布后再运行");
+        }
+        PipelineSnapshotService.ExecutionSnapshot executionSnapshot = selectedVersionId == null
+                ? null
+                : pipelineSnapshotService.loadExecutionSnapshot(selectedVersionId, dagId);
+        Dag dag = executionSnapshot == null ? liveDag : executionSnapshot.dag();
         RunContext runContext = normalizeRunContext(context, dag, trigger);
         boolean dryRun = ScheduleMode.DRY_RUN.name().equalsIgnoreCase(runContext.runMode());
-        String activeJobName = activePipelineDagsterJob(dagId);
+        String activeJobName = activePipelineDagsterJob(dagId, selectedVersionId);
         if (!dryRun && isGraphPipelineExecutionMode()) {
+            pipelineSnapshotService.activateForDagster(selectedVersionId);
             dagster.reloadRepositoryLocation("onelake-loc");
         }
         if (!dryRun) {
@@ -353,7 +398,19 @@ public class OrchestrationService {
         }
 
         // 1. 编译流水线。
-        PipelineCompileResult plan = pipelineCompileService.compile(dagId);
+        List<PipelineTask> tasks;
+        List<PipelineTaskEdge> pipelineEdges;
+        PipelineCompileResult plan;
+        if (executionSnapshot == null) {
+            plan = pipelineCompileService.compile(dagId);
+            // DEV 路径保持原有顺序：先编译并回写 executable/config，再读取运行输入。
+            tasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
+            pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
+        } else {
+            tasks = new ArrayList<>(executionSnapshot.tasks());
+            pipelineEdges = new ArrayList<>(executionSnapshot.edges());
+            plan = pipelineCompileService.compile(dagId, tenantId, tasks, pipelineEdges);
+        }
         if (!plan.allValidated()) {
             throw new BizException(40060, "Pipeline 编译未通过，无法触发: "
                     + String.join("; ",
@@ -364,7 +421,6 @@ public class OrchestrationService {
                     + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
         // 2. 就绪检查：至少需要一个真实执行节点；SYNC_REF/QUALITY_GATE 等观测节点仍会生成 task_run 供 UI 展示。
-        List<PipelineTask> tasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
         long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
         if (executableCount == 0) {
             throw new BizException(40061, "流水线没有可执行任务（可能是 Spark 任务尚未就绪，P-Spark 阶段后启用）");
@@ -382,6 +438,7 @@ public class OrchestrationService {
         run.setDataIntervalStart(runContext.dataIntervalStart());
         run.setDataIntervalEnd(runContext.dataIntervalEnd());
         run.setBackfillId(runContext.backfillId());
+        run.setPipelineVersionId(selectedVersionId);
         run.setTimezone(runContext.timezone());
         run.setRunMode(runContext.runMode());
         run.setDagsterJob(activeJobName);
@@ -402,7 +459,6 @@ public class OrchestrationService {
 
         // 4. 为每个有效节点创建 TaskRun。初始状态由数据流 DAG 推导，避免所有节点被扁平化为 QUEUED。
         List<PipelineTask> observable = observableTasks(plan, tasks);
-        List<PipelineTaskEdge> pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
         Map<String, TaskRunStatus> initialStatuses = initialTaskRunStatuses(observable, pipelineEdges);
         for (PipelineTask t : observable) {
             TaskRun tr = new TaskRun();
@@ -447,7 +503,9 @@ public class OrchestrationService {
                     dagId, tenantId, run.getId(), plan,
                     plan.pipelineTag(),
                     dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
-                    dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
+                    dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile(),
+                    executionSnapshot == null ? null : executionSnapshot.params(),
+                    selectedVersionId
             );
             DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runContext);
             List<Map<String, String>> tags = pipelineRunTags(dagId, tenantId, run, trigger, tasks);
@@ -486,13 +544,15 @@ public class OrchestrationService {
         Instant failedAt = Instant.now();
         JobRun rejected = new JobRun();
         rejected.setDagId(sourceRun.getDagId());
-        rejected.setDagsterJob(activePipelineDagsterJob(sourceRun.getDagId()));
+        rejected.setDagsterJob(activePipelineDagsterJob(
+                sourceRun.getDagId(), sourceRun.getPipelineVersionId()));
         rejected.setTriggerType(TriggerType.AUTO_RETRY);
         rejected.setStatus(DagStatus.FAILED);
         rejected.setLogicalDate(sourceRun.getLogicalDate());
         rejected.setDataIntervalStart(sourceRun.getDataIntervalStart());
         rejected.setDataIntervalEnd(sourceRun.getDataIntervalEnd());
         rejected.setBackfillId(sourceRun.getBackfillId());
+        rejected.setPipelineVersionId(sourceRun.getPipelineVersionId());
         rejected.setTimezone(sourceRun.getTimezone());
         rejected.setRunMode(StringUtils.hasText(sourceRun.getRunMode()) ? sourceRun.getRunMode() : "NORMAL");
         rejected.setPriority(sourceRun.getPriority());
@@ -527,12 +587,17 @@ public class OrchestrationService {
             throw new BizException(40021, "taskKey 不能为空");
         }
         RerunMode mode = RerunMode.parse(modeRaw);
-        Dag dag = findTenantDag(dagId);
-        String graphJobName = activePipelineDagsterJob(dagId);
+        Dag liveDag = findTenantDag(dagId);
+        JobRun run = runRepo.findByIdAndDagIdIn(runId, Set.of(liveDag.getId()))
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        String graphJobName = activePipelineDagsterJob(dagId, run.getPipelineVersionId());
+        PipelineSnapshotService.ExecutionSnapshot executionSnapshot = run.getPipelineVersionId() == null
+                ? null
+                : pipelineSnapshotService.loadExecutionSnapshot(run.getPipelineVersionId(), dagId);
+        Dag dag = executionSnapshot == null ? liveDag : executionSnapshot.dag();
+        pipelineSnapshotService.activateForDagster(run.getPipelineVersionId());
         dagster.reloadRepositoryLocation("onelake-loc");
         validatePipelineRuntimeContract(dag, graphJobName);
-        JobRun run = runRepo.findByIdAndDagIdIn(runId, Set.of(dag.getId()))
-                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
 
         // 重跑会重置一批节点状态，必须与节点回调和 GRAPH 终态补偿串行化，避免旧回调覆盖新状态。
         List<TaskRun> lockedTaskRuns = new ArrayList<>(taskRunRepo.findByJobRunIdForUpdate(runId));
@@ -544,7 +609,9 @@ public class OrchestrationService {
                 && !dag.getTenantId().equals(target.getTenantId()))) {
             throw new BizException(40400, "task_run 不存在: " + taskKey);
         }
-        List<PipelineTaskEdge> pipelineEdges = pipelineTaskEdgeRepo.findByDagId(dagId);
+        List<PipelineTaskEdge> pipelineEdges = executionSnapshot == null
+                ? pipelineTaskEdgeRepo.findByDagId(dagId)
+                : new ArrayList<>(executionSnapshot.edges());
         if (pipelineEdges == null) {
             pipelineEdges = List.of();
         }
@@ -562,7 +629,16 @@ public class OrchestrationService {
                     });
         }
 
-        PipelineCompileResult plan = pipelineCompileService.compile(dagId);
+        List<PipelineTask> allTasks;
+        PipelineCompileResult plan;
+        if (executionSnapshot == null) {
+            plan = pipelineCompileService.compile(dagId);
+            allTasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
+        } else {
+            allTasks = new ArrayList<>(executionSnapshot.tasks());
+            plan = pipelineCompileService.compile(
+                    dagId, dag.getTenantId(), allTasks, pipelineEdges);
+        }
         if (!plan.allValidated()) {
             throw new BizException(40060, "Pipeline 编译未通过，无法重跑: "
                     + String.join("; ",
@@ -572,7 +648,6 @@ public class OrchestrationService {
                             .toList())
                     + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
-        List<PipelineTask> allTasks = pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
         List<PipelineTask> observable = observableTasks(plan, allTasks);
         Map<String, PipelineTask> observableByKey = observable.stream()
                 .collect(Collectors.toMap(PipelineTask::getTaskKey, Function.identity(), (a, b) -> a,
@@ -615,7 +690,9 @@ public class OrchestrationService {
                 dagId, dag.getTenantId(), run.getId(), plan,
                 plan.pipelineTag(),
                 dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
-                dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
+                dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile(),
+                executionSnapshot == null ? null : executionSnapshot.params(),
+                run.getPipelineVersionId()
         );
         RunContext rerunContext = new RunContext(
                 run.getLogicalDate(),
@@ -936,9 +1013,9 @@ public class OrchestrationService {
         );
     }
 
-    private String activePipelineDagsterJob(UUID dagId) {
+    private String activePipelineDagsterJob(UUID dagId, UUID versionId) {
         return isGraphPipelineExecutionMode()
-                ? SparkRunConfigBuilder.graphJobName(dagId)
+                ? SparkRunConfigBuilder.graphJobName(dagId, versionId)
                 : PIPELINE_JOB_NAME;
     }
 
@@ -1026,8 +1103,9 @@ public class OrchestrationService {
     @Transactional
     public Page<JobRunDTO> runs(UUID dagId, Pageable pageable) {
         Dag dag = findTenantDag(dagId);
-        return runRepo.findByDagIdOrderByStartedAtDesc(dagId, pageable)
-            .map(r -> toRunDTO(refreshRunStatus(r), dag));
+        return toRunDTOPage(
+                runRepo.findByDagIdOrderByStartedAtDesc(dagId, pageable),
+                ignored -> dag);
     }
 
     /** 分页查询当前租户所有 DAG 的运行，不暴露其他租户的运行记录。 */
@@ -1039,16 +1117,18 @@ public class OrchestrationService {
         }
         Map<UUID, Dag> dagById = dags.stream()
             .collect(Collectors.toMap(Dag::getId, Function.identity()));
-        return runRepo.findByDagIdInOrderByStartedAtDesc(dagById.keySet(), pageable)
-            .map(r -> toRunDTO(refreshRunStatus(r), dagById.get(r.getDagId())));
+        return toRunDTOPage(
+                runRepo.findByDagIdInOrderByStartedAtDesc(dagById.keySet(), pageable),
+                run -> dagById.get(run.getDagId()));
     }
 
     /** 按 logical date 升序分页查询某次回填产生的子运行。 */
     @Transactional
     public Page<JobRunDTO> listBackfillRuns(UUID dagId, UUID backfillId, Pageable pageable) {
         Dag dag = findTenantDag(dagId);
-        return runRepo.findByDagIdAndBackfillIdOrderByLogicalDateAsc(dagId, backfillId, pageable)
-                .map(run -> toRunDTO(refreshRunStatus(run), dag));
+        return toRunDTOPage(
+                runRepo.findByDagIdAndBackfillIdOrderByLogicalDateAsc(dagId, backfillId, pageable),
+                ignored -> dag);
     }
 
     /** 查询并刷新指定回填子运行，同时校验 DAG、回填和运行三者的归属关系。 */
@@ -1539,7 +1619,11 @@ public class OrchestrationService {
         Map<String, TaskRun> runByTaskKey = taskRuns.stream()
                 .collect(Collectors.toMap(TaskRun::getTaskKey, Function.identity(), (a, b) -> a,
                         LinkedHashMap::new));
-        List<PipelineTaskEdge> allEdges = pipelineTaskEdgeRepo.findByDagId(run.getDagId());
+        List<PipelineTaskEdge> allEdges = run.getPipelineVersionId() == null
+                ? pipelineTaskEdgeRepo.findByDagId(run.getDagId())
+                : pipelineSnapshotService
+                        .loadExecutionSnapshot(run.getPipelineVersionId(), run.getDagId())
+                        .edges();
         if (allEdges == null) {
             allEdges = List.of();
         }
@@ -2074,7 +2158,33 @@ public class OrchestrationService {
         return "未知用户";
     }
 
+    private Page<JobRunDTO> toRunDTOPage(Page<JobRun> page, Function<JobRun, Dag> dagResolver) {
+        List<JobRun> refreshed = page.getContent().stream()
+                .map(this::refreshRunStatus)
+                .toList();
+        Set<UUID> versionIds = refreshed.stream()
+                .map(JobRun::getPipelineVersionId)
+                .filter(java.util.Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<UUID, Integer> versionNumbers = pipelineSnapshotService.versionNumbers(versionIds);
+        List<JobRunDTO> content = refreshed.stream()
+                .map(run -> toRunDTO(run, dagResolver.apply(run),
+                        run.getPipelineVersionId() == null
+                                ? null
+                                : versionNumbers.get(run.getPipelineVersionId())))
+                .toList();
+        return new PageImpl<>(content, page.getPageable(), page.getTotalElements());
+    }
+
     private JobRunDTO toRunDTO(JobRun r, Dag dag) {
+        Map<UUID, Integer> versionNumbers = pipelineSnapshotService.versionNumbers(
+                r.getPipelineVersionId() == null ? Set.of() : Set.of(r.getPipelineVersionId()));
+        return toRunDTO(r, dag, r.getPipelineVersionId() == null
+                ? null
+                : versionNumbers.get(r.getPipelineVersionId()));
+    }
+
+    private JobRunDTO toRunDTO(JobRun r, Dag dag, Integer pipelineVersion) {
         return new JobRunDTO(r.getId(), r.getDagId(),
             dag == null ? null : dag.getName(),
             StringUtils.hasText(r.getDagsterJob()) ? r.getDagsterJob() : (dag == null ? null : dag.getDagsterJob()),
@@ -2086,7 +2196,8 @@ public class OrchestrationService {
                     : (dag == null || !StringUtils.hasText(dag.getTimezone()) ? "Asia/Shanghai" : dag.getTimezone()),
             r.getLogicalDate(), r.getDataIntervalStart(), r.getDataIntervalEnd(), r.getBackfillId(),
             r.getStartedAt(), r.getFinishedAt(), r.getTriggeredBy(), displayTriggerActor(r),
-            r.getSlaMissed(), r.getRetrySourceRunId(), r.getRunRetryAttempt());
+            r.getSlaMissed(), r.getRetrySourceRunId(), r.getRunRetryAttempt(),
+            r.getPipelineVersionId(), pipelineVersion);
     }
 
     private record TriggerReadiness(boolean triggerable, String reason) {}

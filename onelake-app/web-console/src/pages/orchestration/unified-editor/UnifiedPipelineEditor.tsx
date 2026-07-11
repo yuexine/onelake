@@ -49,6 +49,9 @@ import {
   ReloadOutlined,
   SaveOutlined,
   SettingOutlined,
+  CloudUploadOutlined,
+  HistoryOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { PageHeader } from '../../../components';
 import { usePipelineEditor } from './usePipelineEditor';
@@ -61,6 +64,7 @@ import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskR
 import { BackfillWizard } from './BackfillWizard';
 import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
 import { PipelineParamDrawer } from './PipelineParamDrawer';
+import { PipelineVersionDrawer } from './PipelineVersionDrawer';
 
 const { Text } = Typography;
 
@@ -431,6 +435,8 @@ export default function UnifiedPipelineEditor() {
   const [backfillOpen, setBackfillOpen] = useState(false);
   const [schedulingOpen, setSchedulingOpen] = useState(false);
   const [paramDrawerOpen, setParamDrawerOpen] = useState(false);
+  const [versionDrawerOpen, setVersionDrawerOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
 
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
     setCreateMeta(meta);
@@ -584,6 +590,31 @@ export default function UnifiedPipelineEditor() {
       setCreatingPipeline(false);
     }
   }, [message, navigate, pipelineForm]);
+
+  const confirmPublish = useCallback(() => {
+    if (!editor.pipeline) return;
+    modal.confirm({
+      title: editor.pipeline.publishedVersionId ? '重新发布流水线？' : '发布流水线？',
+      content: '发布后将生成不可变生产快照；后续编辑只修改草稿，运行仍使用最近发布版本。',
+      okText: editor.pipeline.publishedVersionId ? '生成新版本' : '发布',
+      cancelText: '取消',
+      onOk: async () => {
+        setPublishing(true);
+        try {
+          const published = await editor.publish();
+          if (!published) return;
+          const versions = await PipelineAPI.listVersions(dagId!);
+          const current = versions.find((item) => item.id === published.publishedVersionId);
+          message.success(current ? `已发布版本 ${current.version}` : '流水线已发布');
+        } catch (err) {
+          message.error(`发布失败: ${(err as Error).message}`);
+          throw err;
+        } finally {
+          setPublishing(false);
+        }
+      },
+    });
+  }, [dagId, editor, message, modal]);
 
   // Build inspector props from selected task + local draft patch
   const inspectorProps: InspectorProps | undefined = editor.selectedTask
@@ -821,6 +852,9 @@ export default function UnifiedPipelineEditor() {
           <Space>
             <Text strong>{editor.pipeline.name}</Text>
             <Tag color={statusTagColor}>{editor.pipeline.status ?? 'DRAFT'}</Tag>
+            {editor.pipeline.hasUnpublishedChanges && (
+              <Tag color="orange" icon={<WarningOutlined />}>有未发布变更</Tag>
+            )}
             <Tag>{editor.pipeline.pipelineKind ?? 'BLANK'}</Tag>
             <Text type="secondary" style={{ fontSize: 11 }}>
               {editor.tasks.length} 任务
@@ -853,6 +887,22 @@ export default function UnifiedPipelineEditor() {
             </Button>
             <Button icon={<ControlOutlined />} onClick={() => setParamDrawerOpen(true)}>
               参数管理
+            </Button>
+            <Button
+              icon={<HistoryOutlined />}
+              onClick={() => setVersionDrawerOpen(true)}
+              disabled={!editor.pipeline.publishedVersionId}
+            >
+              版本
+            </Button>
+            <Button
+              icon={<CloudUploadOutlined />}
+              onClick={confirmPublish}
+              loading={publishing}
+              disabled={editor.tasks.length === 0
+                || (editor.pipeline.status === 'PUBLISHED' && !editor.pipeline.hasUnpublishedChanges)}
+            >
+              {editor.pipeline.publishedVersionId ? '重新发布' : '发布'}
             </Button>
             <Button
               type="primary"
@@ -895,12 +945,21 @@ export default function UnifiedPipelineEditor() {
         dagId={dagId}
         open={schedulingOpen}
         onClose={() => setSchedulingOpen(false)}
+        onChanged={editor.reload}
       />
 
       <PipelineParamDrawer
         dagId={dagId}
         open={paramDrawerOpen}
         onClose={() => setParamDrawerOpen(false)}
+        onChanged={editor.reload}
+      />
+
+      <PipelineVersionDrawer
+        dagId={dagId}
+        open={versionDrawerOpen}
+        publishedVersionId={editor.pipeline.publishedVersionId}
+        onClose={() => setVersionDrawerOpen(false)}
       />
 
       {/* P6-A: live run banner */}

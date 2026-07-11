@@ -237,6 +237,8 @@ export interface JobRun {
   slaMissed?: boolean;
   retrySourceRunId?: UUID;
   runRetryAttempt?: number;
+  pipelineVersionId?: UUID;
+  pipelineVersion?: number;
 }
 
 export type BackfillGrain = 'DAY' | 'HOUR' | 'MONTH';
@@ -459,7 +461,33 @@ export interface Pipeline {
   calendarId?: UUID;
   scheduleStart?: string;
   scheduleEnd?: string;
+  publishedVersionId?: UUID;
+  hasUnpublishedChanges?: boolean;
   lastRun?: JobRun;
+}
+
+export interface PipelineVersionSummary {
+  id: UUID;
+  dagId: UUID;
+  version: number;
+  checksum: string;
+  status: string;
+  note?: string;
+  publishedBy?: UUID;
+  publishedByName?: string;
+  createdAt: string;
+}
+
+export interface PipelineVersionSnapshot {
+  dag: Record<string, unknown>;
+  tasks: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+  pipeline_params: Array<Record<string, unknown>>;
+  schedule: Record<string, unknown>;
+}
+
+export interface PipelineVersionDetail extends PipelineVersionSummary {
+  snapshot: PipelineVersionSnapshot;
 }
 
 export interface OperatorPort {

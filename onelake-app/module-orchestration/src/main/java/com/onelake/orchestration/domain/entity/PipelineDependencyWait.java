@@ -29,6 +29,9 @@ public class PipelineDependencyWait {
     @Column(nullable = false)
     private UUID dagId;
 
+    /** 创建等待点时冻结的不可变发布版本；升级前的终态审计记录可为空。 */
+    private UUID pipelineVersionId;
+
     @Column(nullable = false)
     private Instant logicalDate;
 

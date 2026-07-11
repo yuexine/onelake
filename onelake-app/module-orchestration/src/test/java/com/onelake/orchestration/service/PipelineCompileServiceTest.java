@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * {@link PipelineCompileService} 的 P1 单元测试。
@@ -80,6 +81,19 @@ class PipelineCompileServiceTest {
         assertThat(result.tasks()).extracting("taskKey")
                 .containsExactly("t_upstream", "t_downstream");
         assertThat(result.pipelineTag()).startsWith("pipeline_");
+    }
+
+    @Test
+    void compilesSnapshotCollectionsWithoutRepositoryReads() {
+        PipelineTask task = sparkSqlTask("snapshot_task", "iceberg.dwd.snapshot");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(result.tasks()).extracting("taskKey").containsExactly("snapshot_task");
+        assertThat(task.getExecutable()).isTrue();
+        verifyNoInteractions(dagRepo, taskRepo, edgeRepo);
     }
 
     @Test

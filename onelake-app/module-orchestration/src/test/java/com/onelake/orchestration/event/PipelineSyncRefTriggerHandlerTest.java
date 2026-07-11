@@ -8,23 +8,25 @@ import com.onelake.common.outbox.OutboxEvent;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
-import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
-import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.service.OrchestrationService;
+import com.onelake.orchestration.service.PipelineSnapshotService;
+import com.onelake.orchestration.service.RunContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -48,15 +50,14 @@ import static org.mockito.Mockito.when;
 class PipelineSyncRefTriggerHandlerTest {
 
     @Mock private DagRepository dagRepo;
-    @Mock private PipelineTaskRepository taskRepo;
-    @Mock private PipelineTaskEdgeRepository edgeRepo;
+    @Mock private PipelineSnapshotService pipelineSnapshotService;
     @Mock private OrchestrationService orchestrationService;
 
     private PipelineSyncRefTriggerHandler handler;
 
     @BeforeEach
     void setup() {
-        handler = new PipelineSyncRefTriggerHandler(dagRepo, taskRepo, edgeRepo, orchestrationService);
+        handler = new PipelineSyncRefTriggerHandler(dagRepo, pipelineSnapshotService, orchestrationService);
     }
 
     @AfterEach
@@ -75,14 +76,13 @@ class PipelineSyncRefTriggerHandlerTest {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();
         PipelineTask syncRef = syncRefTask(tenantId, dagId, "iceberg.ods.orders");
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(syncRef));
-        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", true);
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(syncRef), List.of());
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
 
-        verify(orchestrationService).triggerPipelineRun(dagId, TriggerType.EVENT);
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId));
         // 触发期间会设置租户上下文，触发后必须恢复为空。
         assertThat(TenantContext.getTenantId()).isNull();
     }
@@ -94,74 +94,97 @@ class PipelineSyncRefTriggerHandlerTest {
         PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
         PipelineTask profile = syncRefTask(tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
         PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(user, profile));
-        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", true);
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
-        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(user, profile, join));
-        when(edgeRepo.findByDagId(dagId)).thenReturn(List.of(
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(user, profile, join), List.of(
                 edge(tenantId, dagId, "sync_user", "spark_join", "left"),
                 edge(tenantId, dagId, "sync_profile", "spark_join", "right")));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user"));
-        verify(orchestrationService, never()).triggerPipelineRun(any(), any());
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user_profile"));
-        verify(orchestrationService).triggerPipelineRun(dagId, TriggerType.EVENT);
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId));
+    }
+
+    @Test
+    void republishRemovesIncompleteBarrierFromPreviousVersion() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        PipelineTask user = syncRefTask(tenantId, dagId, "iceberg.ods.user", "sync_user");
+        PipelineTask profile = syncRefTask(
+                tenantId, dagId, "iceberg.ods.user_profile", "sync_profile");
+        PipelineTask join = sparkTask(tenantId, dagId, "spark_join");
+        List<PipelineTaskEdge> edges = List.of(
+                edge(tenantId, dagId, "sync_user", "spark_join", "left"),
+                edge(tenantId, dagId, "sync_profile", "spark_join", "right"));
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        stubPublishedPipeline(dag, List.of(user, profile, join), edges);
+
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user"));
+        assertThat(readinessState()).hasSize(1);
+
+        stubPublishedPipeline(dag, List.of(user, profile, join), edges);
+        handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.user_profile"));
+
+        assertThat(readinessState()).hasSize(1);
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
     }
 
     @Test
     void skipsNonMatchingSyncRefTasks() {
         UUID tenantId = UUID.randomUUID();
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(
-                        syncRefTask(tenantId, UUID.randomUUID(), "iceberg.ods.orders"),
-                        syncRefTask(tenantId, UUID.randomUUID(), "iceberg.ods.users")  // 非目标表，应该跳过。
-                ));
+        UUID dagId = UUID.randomUUID();
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        stubPublishedPipeline(dag, List.of(
+                syncRefTask(tenantId, dagId, "iceberg.ods.orders"),
+                syncRefTask(tenantId, dagId, "iceberg.ods.users")), List.of());
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.nonexistent"));
 
-        verify(orchestrationService, never()).triggerPipelineRun(any(), any());
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
     }
 
     @Test
     void skipsDisabledPipeline() {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(syncRefTask(tenantId, dagId, "iceberg.ods.orders")));
-        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", false);  // 已禁用，应该跳过。
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", false);  // 已禁用，应该跳过。
+        dag.setPublishedVersionId(UUID.randomUUID());
+        when(dagRepo.findByTenantId(tenantId)).thenReturn(List.of(dag));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
 
-        verify(orchestrationService, never()).triggerPipelineRun(any(), any());
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
     }
 
     @Test
     void skipsPipelineInDraftStatus() {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(syncRefTask(tenantId, dagId, "iceberg.ods.orders")));
-        Dag dag = pipelineDag(tenantId, dagId, "DRAFT", true);  // 非 VALIDATED/PUBLISHED，应该跳过。
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", true);  // 无发布版本的生产事件必须跳过。
+        when(dagRepo.findByTenantId(tenantId)).thenReturn(List.of(dag));
 
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
 
-        verify(orchestrationService, never()).triggerPipelineRun(any(), any());
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any());
     }
 
     @Test
     void swallowsBizExceptionFromTriggerService() {
         UUID tenantId = UUID.randomUUID();
         UUID dagId = UUID.randomUUID();
-        when(taskRepo.findByTenantIdAndTaskType(tenantId, TaskType.SYNC_REF.name()))
-                .thenReturn(List.of(syncRefTask(tenantId, dagId, "iceberg.ods.orders")));
-        Dag dag = pipelineDag(tenantId, dagId, "VALIDATED", true);
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        PipelineTask syncRef = syncRefTask(tenantId, dagId, "iceberg.ods.orders");
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(dag, List.of(syncRef), List.of());
         doThrow(new BizException(40060, "compile failed"))
-                .when(orchestrationService).triggerPipelineRun(eq(dagId), any());
+                .when(orchestrationService).triggerPipelineRun(
+                        eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId));
 
         // 业务异常不应向外抛出，避免 Outbox 后台消费被单条事件打断。
         handler.handle(tableLoadedEvent(tenantId, "iceberg.ods.orders"));
@@ -176,10 +199,32 @@ class PipelineSyncRefTriggerHandlerTest {
 
         handler.handle(event);
 
-        verify(taskRepo, never()).findByTenantIdAndTaskType(any(), any());
+        verify(dagRepo, never()).findByTenantId(any());
     }
 
     // ---------- 辅助方法 ----------
+
+    private UUID stubPublishedPipeline(Dag dag,
+                                       List<PipelineTask> tasks,
+                                       List<PipelineTaskEdge> edges) {
+        UUID versionId = UUID.randomUUID();
+        dag.setPublishedVersionId(versionId);
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(dag.getId());
+        version.setTenantId(dag.getTenantId());
+        when(dagRepo.findByTenantId(dag.getTenantId())).thenReturn(List.of(dag));
+        lenient().when(pipelineSnapshotService.loadExecutionSnapshot(versionId, dag.getId()))
+                .thenReturn(new PipelineSnapshotService.ExecutionSnapshot(
+                        version, dag, tasks, edges, List.of()));
+        return versionId;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<Object, Map<String, Instant>> readinessState() {
+        return (Map<Object, Map<String, Instant>>) ReflectionTestUtils.getField(
+                handler, "readinessByVersion");
+    }
 
     private OutboxEvent tableLoadedEvent(UUID tenantId, String targetTable) {
         OutboxEvent e = new OutboxEvent();

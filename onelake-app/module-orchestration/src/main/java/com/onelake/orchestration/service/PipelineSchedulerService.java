@@ -25,6 +25,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -75,6 +76,8 @@ public class PipelineSchedulerService {
     private final DataIntervalCalculator dataIntervalCalculator;
     /** 持久化被依赖阻塞的计划点，使下一 tick 能脱离 cron 窗口继续重判。 */
     private final PipelineDependencyWaitRepository dependencyWaitRepo;
+    /** 生产调度只读取当前 published_version_id 内冻结的调度策略。 */
+    private final PipelineSnapshotService pipelineSnapshotService;
 
     /**
      * 每 60 秒触发一次，按当前时间评估已发布流水线是否到期。
@@ -134,8 +137,23 @@ public class PipelineSchedulerService {
             return;
         }
 
-        // 数值越大优先级越高；稳定排序保证同优先级候选保持仓储返回顺序。
-        List<Dag> prioritized = candidates.stream()
+        List<Dag> publishedCandidates = new ArrayList<>();
+        for (Dag liveDag : candidates) {
+            if (!isSchedulablePipeline(liveDag)) {
+                continue;
+            }
+            try {
+                TenantContext.setTenantId(liveDag.getTenantId());
+                publishedCandidates.add(publishedSchedulingDag(liveDag));
+            } catch (RuntimeException e) {
+                log.warn("PipelineSchedulerService：加载流水线 {} 已发布调度快照失败，本轮跳过：{}",
+                        liveDag.getId(), e.getMessage());
+            } finally {
+                TenantContext.clear();
+            }
+        }
+        // 数值越大优先级越高；优先级也必须来自已发布快照。
+        List<Dag> prioritized = publishedCandidates.stream()
                 .sorted(Comparator.comparingInt(PipelineSchedulerService::priorityOf).reversed())
                 .toList();
         // 固定为完整分钟边界，保证不同实例对同一 tick 计算出相同的计划时刻和幂等键。
@@ -144,16 +162,12 @@ public class PipelineSchedulerService {
         int triggered = 0;
         for (Dag dag : prioritized) {
             try {
-                if (!isSchedulablePipeline(dag)) {
-                    continue;
-                }
+                TenantContext.setTenantId(dag.getTenantId());
                 Optional<ZonedDateTime> scheduledAt = cronDueAt(dag, prevMinuteStart, nowMinuteStart);
                 if (scheduledAt.isEmpty()) {
                     continue;
                 }
 
-                // 从命中 cron 开始切换到 DAG 所属租户；finally 中无条件清理，避免线程复用串租户。
-                TenantContext.setTenantId(dag.getTenantId());
                 Instant scheduledInstant = scheduledAt.get().toInstant();
                 // C3 要求的过滤顺序：窗口 → 日历 → 冻结。后置条件不得提前创建 JobRun。
                 if (!isInsideScheduleWindow(dag, scheduledInstant)) {
@@ -214,7 +228,8 @@ public class PipelineSchedulerService {
                     orchestrationService.triggerPipelineRun(
                             dag.getId(),
                             TriggerType.CRON,
-                            scheduledInstant);
+                            scheduledInstant,
+                            dag.getPublishedVersionId());
                     triggered++;
                     log.info("PipelineSchedulerService：已按 cron 触发流水线 {} (cron={}, scheduledAt={})",
                             dag.getId(), dag.getScheduleCron(), scheduledInstant);
@@ -276,17 +291,31 @@ public class PipelineSchedulerService {
                             wait.getDagId(), wait.getLogicalDate(), wait.getWaitReason());
                     continue;
                 }
+                if (wait.getPipelineVersionId() == null) {
+                    dependencyWaitRepo.finish(
+                            wait.getId(), "CANCELLED", "等待计划点缺少发布版本", tickAt);
+                    continue;
+                }
                 Optional<Dag> dagOptional = dagRepo.findByIdAndTenantId(
                         wait.getDagId(), wait.getTenantId());
                 if (dagOptional.isEmpty()) {
                     dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "流水线已删除", tickAt);
                     continue;
                 }
-                Dag dag = dagOptional.get();
-                if (!isSchedulablePipeline(dag)) {
+                Dag liveDag = dagOptional.get();
+                if (!isSchedulablePipeline(liveDag)) {
                     dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "流水线已停止生产调度", tickAt);
                     continue;
                 }
+                if (!wait.getPipelineVersionId().equals(liveDag.getPublishedVersionId())) {
+                    dependencyWaitRepo.finish(
+                            wait.getId(), "CANCELLED", "流水线已重新发布，旧版本等待点不再执行", tickAt);
+                    continue;
+                }
+                TenantContext.setTenantId(liveDag.getTenantId());
+                Dag dag = pipelineSnapshotService
+                        .loadExecutionSnapshot(wait.getPipelineVersionId(), liveDag.getId())
+                        .dag();
                 if (dag.getScheduleEnd() != null && tickAt.isAfter(dag.getScheduleEnd())) {
                     dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "调度窗口已结束", tickAt);
                     continue;
@@ -294,8 +323,6 @@ public class PipelineSchedulerService {
                 if (ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
                     continue;
                 }
-
-                TenantContext.setTenantId(dag.getTenantId());
                 DependencyReadinessService.ReadinessResult readiness =
                         dependencyReadinessService.evaluate(dag, wait.getLogicalDate());
                 if (!readiness.ready()) {
@@ -317,7 +344,8 @@ public class PipelineSchedulerService {
 
                 try {
                     orchestrationService.triggerPipelineRun(
-                            dag.getId(), TriggerType.CRON, wait.getScheduledAt());
+                            dag.getId(), TriggerType.CRON, wait.getScheduledAt(),
+                            wait.getPipelineVersionId());
                     dependencyWaitRepo.finish(wait.getId(), "RESOLVED", "已触发运行", tickAt);
                     log.info("PipelineSchedulerService：依赖已就绪，恢复触发流水线 {} logicalDate={}",
                             dag.getId(), wait.getLogicalDate());
@@ -339,6 +367,15 @@ public class PipelineSchedulerService {
                 TenantContext.clear();
             }
         }
+    }
+
+    private Dag publishedSchedulingDag(Dag liveDag) {
+        if (liveDag.getPublishedVersionId() == null) {
+            return liveDag;
+        }
+        return pipelineSnapshotService
+                .loadExecutionSnapshot(liveDag.getPublishedVersionId(), liveDag.getId())
+                .dag();
     }
 
     /**
@@ -414,6 +451,7 @@ public class PipelineSchedulerService {
         dependencyWaitRepo.enqueue(
                 dag.getTenantId(),
                 dag.getId(),
+                dag.getPublishedVersionId(),
                 logicalDate,
                 scheduledAt,
                 reason,
@@ -429,6 +467,7 @@ public class PipelineSchedulerService {
     private boolean isSchedulablePipeline(Dag dag) {
         return Boolean.TRUE.equals(dag.getEnabled())
                 && "PUBLISHED".equalsIgnoreCase(dag.getStatus())
+                && dag.getPublishedVersionId() != null
                 && "onelake_pipeline_run".equals(dag.getDagsterJob());
     }
 

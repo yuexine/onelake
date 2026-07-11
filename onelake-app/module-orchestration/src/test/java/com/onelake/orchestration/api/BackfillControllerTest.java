@@ -153,7 +153,9 @@ class BackfillControllerTest {
                 "operator",
                 false,
                 null,
-                0);
+                0,
+                null,
+                null);
         when(backfillService.getJobRun(BACKFILL_ID, RUN_ID)).thenReturn(run);
 
         mockMvc.perform(get("/api/v1/orchestration/backfills/" + BACKFILL_ID + "/runs/" + RUN_ID))

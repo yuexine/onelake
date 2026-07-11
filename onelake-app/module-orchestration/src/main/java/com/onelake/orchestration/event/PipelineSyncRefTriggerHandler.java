@@ -14,16 +14,14 @@ import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.DagRepository;
-import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
-import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.service.OrchestrationService;
+import com.onelake.orchestration.service.PipelineSnapshotService;
+import com.onelake.orchestration.service.RunContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -49,16 +47,15 @@ import java.util.stream.Collectors;
 public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
 
     private final DagRepository dagRepo;
-    private final PipelineTaskRepository taskRepo;
-    private final PipelineTaskEdgeRepository edgeRepo;
+    private final PipelineSnapshotService pipelineSnapshotService;
     private final OrchestrationService orchestrationService;
     /** Handler 无请求级 ObjectMapper 注入需求，使用局部 JSON 解析器读取稳定事件载荷。 */
     private final ObjectMapper objectMapper = new ObjectMapper();
     /**
-     * 多 SYNC_REF 输入的进程内就绪屏障：dagId -> taskKey -> 最近就绪时间。
+     * 多 SYNC_REF 输入的进程内就绪屏障：(dagId, versionId) -> taskKey -> 最近就绪时间。
      * 持久化跨批次屏障属于后续演进，本结构用于避免单实例内过早触发。
      */
-    private final Map<UUID, Map<String, Instant>> readinessByDag = new ConcurrentHashMap<>();
+    private final Map<ReadinessKey, Map<String, Instant>> readinessByVersion = new ConcurrentHashMap<>();
 
     /** 声明本 Handler 只消费集成表落地成功事件。 */
     @Override
@@ -90,27 +87,17 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                 return;
             }
 
-            // 先按租户和节点类型缩小集合，再用 targetFqn 精确匹配事件目标表。
-            List<PipelineTask> syncRefs = taskRepo.findByTenantIdAndTaskType(
-                    tenantId, TaskType.SYNC_REF.name());
-            Map<UUID, Set<String>> pipelineReadyTasks = new HashMap<>();
-            for (PipelineTask t : syncRefs) {
-                if (targetTable.equals(t.getTargetFqn())) {
-                    pipelineReadyTasks.computeIfAbsent(t.getDagId(), ignored -> new HashSet<>())
-                            .add(t.getTaskKey());
-                }
-            }
-            if (pipelineReadyTasks.isEmpty()) {
-                log.debug("PipelineSyncRefTriggerHandler：没有流水线引用目标表 {}", targetTable);
-                return;
-            }
-
             // Outbox 在线程池中执行；触发服务依赖 TenantContext，因此必须显式恢复并还原。
             UUID previousTenant = TenantContext.getTenantId();
             try {
                 TenantContext.setTenantId(tenantId);
-                for (Map.Entry<UUID, Set<String>> entry : pipelineReadyTasks.entrySet()) {
-                    triggerPipeline(entry.getKey(), tenantId, entry.getValue(), event.getOccurredAt());
+                List<ReadyCandidate> candidates = publishedCandidates(tenantId, targetTable);
+                if (candidates.isEmpty()) {
+                    log.debug("PipelineSyncRefTriggerHandler：没有已发布流水线引用目标表 {}", targetTable);
+                    return;
+                }
+                for (ReadyCandidate candidate : candidates) {
+                    triggerPipeline(candidate, event.getOccurredAt());
                 }
             } finally {
                 if (previousTenant == null) {
@@ -126,29 +113,49 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         }
     }
 
-    private void triggerPipeline(UUID dagId, UUID tenantId, Set<String> readyTaskKeys, Instant eventOccurredAt) {
+    private List<ReadyCandidate> publishedCandidates(UUID tenantId, String targetTable) {
+        List<ReadyCandidate> candidates = new java.util.ArrayList<>();
+        for (Dag liveDag : dagRepo.findByTenantId(tenantId)) {
+            if (!Boolean.TRUE.equals(liveDag.getEnabled())
+                    || !"PUBLISHED".equalsIgnoreCase(liveDag.getStatus())
+                    || liveDag.getPublishedVersionId() == null) {
+                readinessByVersion.keySet().removeIf(key -> key.dagId().equals(liveDag.getId()));
+                continue;
+            }
+            ReadinessKey currentKey = new ReadinessKey(
+                    liveDag.getId(), liveDag.getPublishedVersionId());
+            readinessByVersion.keySet().removeIf(key -> key.dagId().equals(liveDag.getId())
+                    && !key.equals(currentKey));
+            try {
+                PipelineSnapshotService.ExecutionSnapshot snapshot = pipelineSnapshotService
+                        .loadExecutionSnapshot(liveDag.getPublishedVersionId(), liveDag.getId());
+                Set<String> readyTaskKeys = snapshot.tasks().stream()
+                        .filter(task -> task.getTaskType() == TaskType.SYNC_REF)
+                        .filter(task -> targetTable.equals(task.getTargetFqn()))
+                        .map(PipelineTask::getTaskKey)
+                        .collect(Collectors.toSet());
+                if (!readyTaskKeys.isEmpty()) {
+                    candidates.add(new ReadyCandidate(liveDag, snapshot, readyTaskKeys));
+                }
+            } catch (BizException ex) {
+                log.warn("PipelineSyncRefTriggerHandler：加载 dag {} 已发布版本失败：{}",
+                        liveDag.getId(), ex.getMessage());
+            }
+        }
+        return candidates;
+    }
+
+    private void triggerPipeline(ReadyCandidate candidate, Instant eventOccurredAt) {
+        UUID dagId = candidate.liveDag().getId();
         try {
-            Dag dag = dagRepo.findByIdAndTenantId(dagId, tenantId).orElse(null);
-            if (dag == null) {
-                log.warn("PipelineSyncRefTriggerHandler：租户 {} 下未找到 dag {}", tenantId, dagId);
+            if (!markReadyAndCheckBarrier(
+                    candidate.snapshot(), candidate.readyTaskKeys(), eventOccurredAt)) {
                 return;
             }
-            if (!Boolean.TRUE.equals(dag.getEnabled())) {
-                log.debug("PipelineSyncRefTriggerHandler：dag {} 已禁用，跳过", dagId);
-                return;
-            }
-            if (dag.getStatus() != null
-                    && !"VALIDATED".equalsIgnoreCase(dag.getStatus())
-                    && !"PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
-                log.debug("PipelineSyncRefTriggerHandler：dag {} 状态为 {}，非 VALIDATED/PUBLISHED，跳过",
-                        dagId, dag.getStatus());
-                return;
-            }
-            if (!markReadyAndCheckBarrier(dagId, readyTaskKeys, eventOccurredAt)) {
-                return;
-            }
-            orchestrationService.triggerPipelineRun(dagId, TriggerType.EVENT);
-            clearSatisfiedReadiness(dagId);
+            UUID versionId = candidate.snapshot().version().getId();
+            orchestrationService.triggerPipelineRun(
+                    dagId, TriggerType.EVENT, RunContext.empty(TriggerType.EVENT), versionId);
+            readinessByVersion.remove(new ReadinessKey(dagId, versionId));
             log.info("PipelineSyncRefTriggerHandler：表就绪后已触发流水线 {}", dagId);
         } catch (BizException e) {
             log.info("PipelineSyncRefTriggerHandler：流水线 {} 未触发，业务原因：{}",
@@ -164,24 +171,23 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
      *
      * <p>单输入目标无需等待；多输入目标只有缺失集合为空才允许触发整条流水线。
      */
-    private boolean markReadyAndCheckBarrier(UUID dagId, Set<String> readyTaskKeys, Instant eventOccurredAt) {
+    private boolean markReadyAndCheckBarrier(PipelineSnapshotService.ExecutionSnapshot snapshot,
+                                             Set<String> readyTaskKeys,
+                                             Instant eventOccurredAt) {
         if (readyTaskKeys == null || readyTaskKeys.isEmpty()) {
             return false;
         }
-        Map<String, Instant> ready = readinessByDag.computeIfAbsent(dagId, ignored -> new ConcurrentHashMap<>());
+        UUID versionId = snapshot.version().getId();
+        Map<String, Instant> ready = readinessByVersion.computeIfAbsent(
+                new ReadinessKey(snapshot.version().getDagId(), versionId),
+                ignored -> new ConcurrentHashMap<>());
         Instant readyAt = eventOccurredAt == null ? Instant.now() : eventOccurredAt;
         readyTaskKeys.forEach(taskKey -> ready.put(taskKey, readyAt));
 
-        List<PipelineTask> tasks = taskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
-        if (tasks == null) {
-            tasks = List.of();
-        }
+        List<PipelineTask> tasks = snapshot.tasks();
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(Collectors.toMap(PipelineTask::getTaskKey, task -> task, (a, b) -> a));
-        List<PipelineTaskEdge> allEdges = edgeRepo.findByDagId(dagId);
-        if (allEdges == null) {
-            allEdges = List.of();
-        }
+        List<PipelineTaskEdge> allEdges = snapshot.edges();
         List<PipelineTaskEdge> edges = allEdges.stream()
                 .filter(edge -> edge.getEdgeLayer() == EdgeLayer.PIPELINE)
                 .toList();
@@ -209,8 +215,8 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                     .filter(sourceKey -> !ready.containsKey(sourceKey))
                     .toList();
             if (!missing.isEmpty()) {
-                log.info("PipelineSyncRefTriggerHandler：dag {} 等待目标节点 {} 的输入就绪，缺少 {}",
-                        dagId, targetKey, missing);
+                log.info("PipelineSyncRefTriggerHandler：dag {} version {} 等待目标节点 {} 的输入就绪，缺少 {}",
+                        snapshot.version().getDagId(), versionId, targetKey, missing);
                 return false;
             }
         }
@@ -218,7 +224,11 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     }
 
     /** 流水线成功触发后清除本轮屏障，允许下一批输入重新汇合。 */
-    private void clearSatisfiedReadiness(UUID dagId) {
-        readinessByDag.remove(dagId);
-    }
+    private record ReadyCandidate(
+            Dag liveDag,
+            PipelineSnapshotService.ExecutionSnapshot snapshot,
+            Set<String> readyTaskKeys) {}
+
+    /** DAG 与不可变版本共同标识一次就绪屏障，便于重新发布时清理旧版本状态。 */
+    private record ReadinessKey(UUID dagId, UUID versionId) {}
 }

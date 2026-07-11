@@ -27,12 +27,13 @@ public interface PipelineDependencyWaitRepository
     @Modifying
     @Query(value = """
             INSERT INTO orchestration.pipeline_dependency_wait
-                (tenant_id, dag_id, logical_date, scheduled_at, wait_reason, status,
-                 last_blockers, expires_at, created_at, updated_at)
-            VALUES (:tenantId, :dagId, :logicalDate, :scheduledAt, :waitReason, 'WAITING',
+                (tenant_id, dag_id, pipeline_version_id, logical_date, scheduled_at,
+                 wait_reason, status, last_blockers, expires_at, created_at, updated_at)
+            VALUES (:tenantId, :dagId, :pipelineVersionId, :logicalDate, :scheduledAt, :waitReason, 'WAITING',
                     :lastBlockers, :expiresAt, now(), now())
             ON CONFLICT (dag_id, logical_date) DO UPDATE
-            SET scheduled_at = EXCLUDED.scheduled_at,
+            SET pipeline_version_id = EXCLUDED.pipeline_version_id,
+                scheduled_at = EXCLUDED.scheduled_at,
                 wait_reason = EXCLUDED.wait_reason,
                 last_blockers = EXCLUDED.last_blockers,
                 expires_at = LEAST(orchestration.pipeline_dependency_wait.expires_at,
@@ -42,6 +43,7 @@ public interface PipelineDependencyWaitRepository
             """, nativeQuery = true)
     int enqueue(@Param("tenantId") UUID tenantId,
                 @Param("dagId") UUID dagId,
+                @Param("pipelineVersionId") UUID pipelineVersionId,
                 @Param("logicalDate") Instant logicalDate,
                 @Param("scheduledAt") Instant scheduledAt,
                 @Param("waitReason") String waitReason,

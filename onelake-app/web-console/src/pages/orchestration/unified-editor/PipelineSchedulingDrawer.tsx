@@ -55,6 +55,7 @@ interface Props {
   dagId: string;
   open: boolean;
   onClose: () => void;
+  onChanged?: () => void;
 }
 
 interface SchedulingFormValues {
@@ -172,7 +173,7 @@ function createsCycle(
   return false;
 }
 
-export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
+export function PipelineSchedulingDrawer({ dagId, open, onClose, onChanged }: Props) {
   const { message } = AntApp.useApp();
   const [schedulingForm] = Form.useForm<SchedulingFormValues>();
   const [dependencyForm] = Form.useForm<DependencyFormValues>();
@@ -333,6 +334,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
       const updated = await SchedulingAPI.update(dagId, payload);
       setScheduling(updated);
       applySchedulingToForm(updated);
+      onChanged?.();
       message.success('调度配置已保存');
     } catch (error) {
       const uiError = toUiError(error);
@@ -341,7 +343,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [applySchedulingToForm, dagId, message, schedulingForm]);
+  }, [applySchedulingToForm, dagId, message, onChanged, schedulingForm]);
 
   const createDependency = useCallback(async () => {
     const values = await dependencyForm.validateFields();

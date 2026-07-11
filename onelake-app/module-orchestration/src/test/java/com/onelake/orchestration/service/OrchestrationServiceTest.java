@@ -9,6 +9,8 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineParam;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
@@ -66,6 +68,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -97,6 +100,7 @@ class OrchestrationServiceTest {
 
     // 编排运行测试共享的流水线依赖。
     @Mock private PipelineCompileService pipelineCompileService;
+    @Mock private PipelineSnapshotService pipelineSnapshotService;
     @Mock private PipelineTaskRepository pipelineTaskRepo;
     @Mock private PipelineTaskEdgeRepository pipelineTaskEdgeRepo;
     @Mock private TaskRunRepository taskRunRepo;
@@ -113,8 +117,10 @@ class OrchestrationServiceTest {
         lenient().when(runtimeContractService.triggerBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
         lenient().when(runtimeContractService.launchBlockedReason(anyString(), anyMap())).thenReturn(Optional.empty());
         lenient().when(runRepo.findByIdForUpdate(any())).thenReturn(Optional.empty());
+        lenient().when(pipelineSnapshotService.versionNumbers(any())).thenReturn(Map.of());
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
-            runtimeContractService, pipelineCompileService, pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
+            runtimeContractService, pipelineCompileService, pipelineSnapshotService,
+            pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
             sparkBuilder, outboxPublisher, pipelineLogStorage, new DataIntervalCalculator());
     }
 
@@ -163,12 +169,16 @@ class OrchestrationServiceTest {
         run.setSlaMissed(true);
         run.setRetrySourceRunId(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
         run.setRunRetryAttempt(2);
+        UUID pipelineVersionId = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        run.setPipelineVersionId(pipelineVersionId);
         PageRequest pageable = PageRequest.of(0, 20);
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
         when(runRepo.findByDagIdInOrderByStartedAtDesc(
             argThat(ids -> ids != null && ids.size() == 1 && ids.contains(DAG_ID)),
             eq(pageable)
         )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(pipelineSnapshotService.versionNumbers(Set.of(pipelineVersionId)))
+                .thenReturn(Map.of(pipelineVersionId, 4));
 
         Page<JobRunDTO> page = service.listRuns(pageable);
 
@@ -185,6 +195,8 @@ class OrchestrationServiceTest {
         assertThat(dto.slaMissed()).isTrue();
         assertThat(dto.retrySourceRunId()).isEqualTo(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
         assertThat(dto.runRetryAttempt()).isEqualTo(2);
+        assertThat(dto.pipelineVersionId()).isEqualTo(pipelineVersionId);
+        assertThat(dto.pipelineVersion()).isEqualTo(4);
     }
 
     @Test
@@ -916,6 +928,58 @@ class OrchestrationServiceTest {
                         && Integer.valueOf(3).equals(baseAttempts.get("failed"))),
                 any(RunContext.class),
                 argThat(params -> RUN_ID.toString().equals(params.get("run_id"))));
+    }
+
+    @Test
+    void rerunTaskUsesTheJobRunsBoundSnapshot() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        UUID versionId = UUID.randomUUID();
+        Dag liveDag = dag();
+        Dag snapshotDag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        run.setPipelineVersionId(versionId);
+        PipelineTask snapshotTask = pipelineTask("failed");
+        snapshotTask.setConfig("{\"sql\":\"SELECT 'published'\"}");
+        TaskRun failed = taskRun("failed", TaskRunStatus.FAILED);
+        PipelineParam frozenParam = new PipelineParam();
+        frozenParam.setScope("PIPELINE");
+        frozenParam.setParamKey("region");
+        frozenParam.setParamValue("published");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(liveDag));
+        when(runRepo.findByIdAndDagIdIn(RUN_ID, Set.of(DAG_ID))).thenReturn(Optional.of(run));
+        when(pipelineSnapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, snapshotDag, List.of(snapshotTask), List.of(), List.of(frozenParam)));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(failed));
+        when(pipelineCompileService.compile(
+                eq(DAG_ID), eq(TENANT_ID), anyList(), anyList()))
+                .thenReturn(pipelinePlan(snapshotTask));
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(),
+                anyMap(), any(RunContext.class), anyMap()))
+                .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
+        when(dagster.launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), anyList())).thenReturn("dagster-rerun-snapshot");
+
+        service.rerunTask(DAG_ID, RUN_ID, "failed", "SINGLE");
+
+        org.mockito.InOrder definitionLoad = inOrder(pipelineSnapshotService, dagster);
+        definitionLoad.verify(pipelineSnapshotService).activateForDagster(versionId);
+        definitionLoad.verify(dagster).reloadRepositoryLocation("onelake-loc");
+        verify(pipelineCompileService, never()).compile(DAG_ID);
+        verify(pipelineTaskRepo, never()).findByDagIdOrderByCreatedAtAsc(DAG_ID);
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(DAG_ID);
+        verify(sparkBuilder).buildGraphRunConfig(
+                argThat(ctx -> ctx.frozenParams() != null
+                        && ctx.frozenParams().size() == 1
+                        && "published".equals(ctx.frozenParams().get(0).getParamValue())),
+                argThat(tasks -> tasks.size() == 1
+                        && tasks.get(0).getConfig().contains("published")),
+                anyList(), anyString(), anyInt(), anyMap(), any(RunContext.class), anyMap());
     }
 
     @Test

@@ -12,6 +12,7 @@ import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.service.OrchestrationService;
+import com.onelake.orchestration.service.PipelineSnapshotService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.UUID;
 
@@ -40,6 +42,7 @@ public class InternalTaskRunCallbackController {
     private final DagRepository dagRepository;
     private final PipelineTaskRepository pipelineTaskRepository;
     private final PipelineTaskEdgeRepository pipelineTaskEdgeRepository;
+    private final PipelineSnapshotService pipelineSnapshotService;
 
     /**
      * 接收 Dagster 节点执行器的状态回调。
@@ -71,7 +74,7 @@ public class InternalTaskRunCallbackController {
      */
     @org.springframework.web.bind.annotation.GetMapping("/dagster/graph-definitions")
     public ApiResponse<List<Map<String, Object>>> graphDefinitions() {
-        List<Map<String, Object>> definitions = dagRepository.findAll().stream()
+        List<Map<String, Object>> definitions = new ArrayList<>(dagRepository.findAll().stream()
                 .map(dag -> {
                     List<String> taskKeys = pipelineTaskRepository.findByDagIdOrderByCreatedAtAsc(dag.getId()).stream()
                             .map(PipelineTask::getTaskKey).toList();
@@ -82,7 +85,25 @@ public class InternalTaskRunCallbackController {
                             .toList();
                     return Map.<String, Object>of("pipeline_id", dag.getId().toString(),
                             "task_keys", taskKeys, "edges", edges);
-                }).toList();
+                }).toList());
+        pipelineSnapshotService.listExecutionSnapshotsForDagster().forEach(snapshot -> {
+            List<String> taskKeys = snapshot.tasks().stream()
+                    .map(PipelineTask::getTaskKey)
+                    .toList();
+            List<Map<String, String>> edges = snapshot.edges().stream()
+                    .filter(edge -> edge.getEdgeLayer() == EdgeLayer.PIPELINE)
+                    .filter(edge -> taskKeys.contains(edge.getSourceKey())
+                            && taskKeys.contains(edge.getTargetKey()))
+                    .map(edge -> Map.of(
+                            "source_key", edge.getSourceKey(),
+                            "target_key", edge.getTargetKey()))
+                    .toList();
+            definitions.add(Map.of(
+                    "pipeline_id", snapshot.version().getDagId().toString(),
+                    "version_id", snapshot.version().getId().toString(),
+                    "task_keys", taskKeys,
+                    "edges", edges));
+        });
         return ApiResponse.ok(definitions);
     }
 }

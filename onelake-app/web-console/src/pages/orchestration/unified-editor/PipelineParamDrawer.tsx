@@ -14,9 +14,10 @@ interface Props {
   dagId: string;
   open: boolean;
   onClose: () => void;
+  onChanged?: () => void;
 }
 
-export function PipelineParamDrawer({ dagId, open, onClose }: Props) {
+export function PipelineParamDrawer({ dagId, open, onClose, onChanged }: Props) {
   const { message } = AntApp.useApp();
   const canManage = getAuthUser()?.roles.includes('DE') ?? false;
   const [globalParams, setGlobalParams] = useState<PipelineParam[]>([]);
@@ -94,6 +95,7 @@ export function PipelineParamDrawer({ dagId, open, onClose }: Props) {
         ...saved,
         ...current.filter((param) => param.scope === 'TASK'),
       ]);
+      onChanged?.();
       message.success('流水线参数已保存');
     } catch (error) {
       const uiError = toParamUiError(error);

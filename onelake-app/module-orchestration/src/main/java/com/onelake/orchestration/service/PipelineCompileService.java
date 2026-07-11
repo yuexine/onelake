@@ -66,6 +66,29 @@ public class PipelineCompileService {
         List<PipelineTask> tasks = taskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
         List<PipelineTaskEdge> edges = new ArrayList<>(edgeRepo.findByDagId(dagId));
 
+        PipelineCompileResult result = compile(dagId, tenantId, tasks, edges);
+
+        // 实时草稿编译才回写节点编译状态；快照编译使用同一纯集合入口但不访问数据库。
+        taskRepo.saveAll(tasks);
+        return result;
+    }
+
+    /**
+     * 只基于调用方给定的任务和边编译，不读取或写入数据库。
+     *
+     * <p>发布版本运行从不可变 snapshot 重建实体集合后调用此入口，避免运行时重新读取
+     * 已被编辑的实时 DAG 定义。</p>
+     */
+    public PipelineCompileResult compile(UUID dagId,
+                                         UUID tenantId,
+                                         List<PipelineTask> inputTasks,
+                                         List<PipelineTaskEdge> inputEdges) {
+        if (dagId == null || tenantId == null) {
+            throw new IllegalArgumentException("dagId and tenantId must not be null");
+        }
+        List<PipelineTask> tasks = inputTasks == null ? new ArrayList<>() : new ArrayList<>(inputTasks);
+        List<PipelineTaskEdge> edges = inputEdges == null ? new ArrayList<>() : new ArrayList<>(inputEdges);
+
         // 数据流边是下游输入的事实来源。Spark 节点从入边资产推导输入表，
         // 用户只需要在画布连线一次，不必在每个节点 config 中重复维护 from_tables。
         applyDataflowInputs(tasks, edges);
@@ -92,9 +115,6 @@ public class PipelineCompileService {
             graphErrors.add("Cycle detected: " + cycle.getMessage());
             ordered = tasks;
         }
-
-        // 4. 保存更新后的节点编译状态。
-        taskRepo.saveAll(tasks);
 
         boolean allValidated = graphErrors.isEmpty()
                 && resultsById.values().stream().allMatch(TaskCompileResult::valid);

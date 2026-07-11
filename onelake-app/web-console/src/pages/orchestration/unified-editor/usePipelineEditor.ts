@@ -47,6 +47,12 @@ export function usePipelineEditor(dagId: string | undefined) {
   const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const markPublishedDraftChanged = useCallback(() => {
+    setPipeline((current) => current?.status === 'PUBLISHED'
+      ? { ...current, hasUnpublishedChanges: true }
+      : current);
+  }, []);
+
   const loadAll = useCallback(async () => {
     if (!dagId) {
       setLoading(false);
@@ -90,6 +96,7 @@ export function usePipelineEditor(dagId: string | undefined) {
       try {
         const created = await PipelineAPI.createTask(dagId, payload);
         setTasks((prev) => [...prev, created]);
+        markPublishedDraftChanged();
         setSelectedTaskKey(created.taskKey);
         message.success(`任务已创建: ${created.taskKey}`);
         return created;
@@ -100,7 +107,7 @@ export function usePipelineEditor(dagId: string | undefined) {
         setSaving(false);
       }
     },
-    [dagId, message],
+    [dagId, markPublishedDraftChanged, message],
   );
 
   const updateTask = useCallback(
@@ -110,6 +117,7 @@ export function usePipelineEditor(dagId: string | undefined) {
       try {
         const updated = await PipelineAPI.updateTask(dagId, taskKey, payload);
         setTasks((prev) => prev.map((t) => (t.taskKey === taskKey ? updated : t)));
+        markPublishedDraftChanged();
         return updated;
       } catch (err) {
         message.error(`保存失败: ${(err as Error).message}`);
@@ -118,7 +126,7 @@ export function usePipelineEditor(dagId: string | undefined) {
         setSaving(false);
       }
     },
-    [dagId, message],
+    [dagId, markPublishedDraftChanged, message],
   );
 
   const deleteTask = useCallback(
@@ -131,12 +139,13 @@ export function usePipelineEditor(dagId: string | undefined) {
           prev.filter((e) => e.sourceKey !== taskKey && e.targetKey !== taskKey),
         );
         if (selectedTaskKey === taskKey) setSelectedTaskKey(undefined);
+        markPublishedDraftChanged();
         message.success(`已删除任务: ${taskKey}`);
       } catch (err) {
         message.error(`删除失败: ${(err as Error).message}`);
       }
     },
-    [dagId, message, selectedTaskKey],
+    [dagId, markPublishedDraftChanged, message, selectedTaskKey],
   );
 
   const createEdge = useCallback(
@@ -145,12 +154,13 @@ export function usePipelineEditor(dagId: string | undefined) {
       try {
         const edge = await PipelineAPI.createEdge(dagId, payload);
         setEdges((prev) => [...prev, edge]);
+        markPublishedDraftChanged();
         message.success(`已创建数据流边: ${edge.sourceKey} → ${edge.targetKey}`);
       } catch (err) {
         message.error(`连线失败: ${(err as Error).message}`);
       }
     },
-    [dagId, message],
+    [dagId, markPublishedDraftChanged, message],
   );
 
   const deleteEdge = useCallback(
@@ -161,11 +171,12 @@ export function usePipelineEditor(dagId: string | undefined) {
         setEdges((prev) =>
           prev.filter((e) => !(e.sourceKey === sourceKey && e.targetKey === targetKey)),
         );
+        markPublishedDraftChanged();
       } catch (err) {
         message.error(`删除边失败: ${(err as Error).message}`);
       }
     },
-    [dagId, message],
+    [dagId, markPublishedDraftChanged, message],
   );
 
   const moveTask = useCallback(
@@ -189,11 +200,12 @@ export function usePipelineEditor(dagId: string | undefined) {
           positionY: rounded.y,
         });
         setTasks((prev) => prev.map((item) => (item.taskKey === taskKey ? updated : item)));
+        markPublishedDraftChanged();
       } catch (err) {
         message.error(`保存节点位置失败: ${(err as Error).message}`);
       }
     },
-    [dagId, message, tasks],
+    [dagId, markPublishedDraftChanged, message, tasks],
   );
 
   const validate = useCallback(async () => {
@@ -217,6 +229,21 @@ export function usePipelineEditor(dagId: string | undefined) {
       message.error(`触发失败: ${(err as Error).message}`);
     }
   }, [dagId, message]);
+
+  const publish = useCallback(async () => {
+    if (!dagId || !pipeline) return;
+    let next = pipeline;
+    if (next.status === 'DRAFT' || !next.status) {
+      next = await PipelineAPI.updateStatus(dagId, 'VALIDATED');
+    }
+    if (next.status === 'VALIDATED' || next.status === 'PUBLISHED') {
+      next = await PipelineAPI.updateStatus(dagId, 'PUBLISHED');
+    }
+    setPipeline(next);
+    const freshTasks = await PipelineAPI.listTasks(dagId);
+    setTasks(freshTasks);
+    return next;
+  }, [dagId, pipeline]);
 
   // P6-A: poll active run's status + task_runs every 5s; stop on terminal or unmount
   useEffect(() => {
@@ -295,6 +322,7 @@ export function usePipelineEditor(dagId: string | undefined) {
     deleteEdge,
     moveTask,
     validate,
+    publish,
     trigger,
     // P6-A: live run state
     latestRun,

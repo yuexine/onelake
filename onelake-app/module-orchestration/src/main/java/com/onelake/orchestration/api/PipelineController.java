@@ -159,7 +159,8 @@ public class PipelineController {
                                                    @RequestParam(defaultValue = "MANUAL") String trigger,
                                                    @RequestParam(required = false) Instant logicalDate,
                                                    @RequestParam(required = false) Instant dataIntervalStart,
-                                                   @RequestParam(required = false) Instant dataIntervalEnd) {
+                                                   @RequestParam(required = false) Instant dataIntervalEnd,
+                                                   @RequestParam(required = false) UUID useVersionId) {
         TriggerType tt = TriggerType.valueOf(trigger);
         UUID runId = orchestrationService.triggerPipelineRun(
                 dagId,
@@ -171,7 +172,8 @@ public class PipelineController {
                         null,
                         null,
                         null,
-                        tt));
+                        tt),
+                useVersionId);
         return ApiResponse.ok(Map.of("runId", runId));
     }
 

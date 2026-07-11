@@ -71,6 +71,8 @@ import type {
   CreatePipelineDependencyRequest,
   PipelineParam,
   PipelineParamReplaceRequest,
+  PipelineVersionDetail,
+  PipelineVersionSummary,
 } from '../types';
 
 export interface PageResult<T> {
@@ -414,6 +416,10 @@ export const PipelineAPI = {
     unwrap<Pipeline>(http.get(`/orchestration/pipelines/${id}`)),
   updateStatus: (id: string, status: PipelineStatus) =>
     unwrap<Pipeline>(http.put(`/orchestration/pipelines/${id}/status`, { status })),
+  listVersions: (id: string) =>
+    unwrap<PipelineVersionSummary[]>(http.get(`/orchestration/pipelines/${id}/versions`)),
+  getVersion: (id: string, version: number) =>
+    unwrap<PipelineVersionDetail>(http.get(`/orchestration/pipelines/${id}/versions/${version}`)),
 
   // 流水线节点。
   listTasks: (id: string) =>

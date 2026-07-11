@@ -6,6 +6,7 @@ import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
@@ -14,6 +15,7 @@ import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import com.onelake.orchestration.service.OrchestrationService;
+import com.onelake.orchestration.service.PipelineSnapshotService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -58,13 +60,16 @@ class InternalTaskRunCallbackControllerTest {
     @Mock
     private PipelineTaskEdgeRepository pipelineTaskEdgeRepository;
 
+    @Mock
+    private PipelineSnapshotService pipelineSnapshotService;
+
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         InternalTaskRunCallbackController controller =
                 new InternalTaskRunCallbackController(orchestrationService, dagRepository,
-                        pipelineTaskRepository, pipelineTaskEdgeRepository);
+                        pipelineTaskRepository, pipelineTaskEdgeRepository, pipelineSnapshotService);
         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
@@ -179,5 +184,34 @@ class InternalTaskRunCallbackControllerTest {
                 .andExpect(jsonPath("$.data[0].task_keys[0]").value("sync_ref"))
                 .andExpect(jsonPath("$.data[0].edges.length()").value(1))
                 .andExpect(jsonPath("$.data[0].edges[0].source_key").value("sync_ref"));
+    }
+
+    @Test
+    void graphDefinitionsExposeImmutableVersionTopology() throws Exception {
+        UUID dagId = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        UUID versionId = UUID.fromString("55555555-5555-5555-5555-555555555555");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(dagId);
+        PipelineTask source = new PipelineTask();
+        source.setTaskKey("published_source");
+        PipelineTask target = new PipelineTask();
+        target.setTaskKey("published_target");
+        PipelineTaskEdge edge = new PipelineTaskEdge();
+        edge.setSourceKey("published_source");
+        edge.setTargetKey("published_target");
+        edge.setEdgeLayer(EdgeLayer.PIPELINE);
+        when(dagRepository.findAll()).thenReturn(List.of());
+        when(pipelineSnapshotService.listExecutionSnapshotsForDagster()).thenReturn(List.of(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, new Dag(), List.of(source, target), List.of(edge), List.of())));
+
+        mockMvc.perform(get("/api/v1/internal/orchestration/dagster/graph-definitions")
+                        .header(InternalTaskRunCallbackController.INTERNAL_TOKEN_HEADER, "secret-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].pipeline_id").value(dagId.toString()))
+                .andExpect(jsonPath("$.data[0].version_id").value(versionId.toString()))
+                .andExpect(jsonPath("$.data[0].task_keys[0]").value("published_source"))
+                .andExpect(jsonPath("$.data[0].edges[0].target_key").value("published_target"));
     }
 }

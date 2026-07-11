@@ -225,7 +225,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                     paramsByTaskKey.getOrDefault(taskKey, runtimeParams == null ? Map.of() : runtimeParams)));
             ops.put(taskKey, Map.of("config", opConfig));
         }
-        return new DagsterRunConfig(graphJobName(ctx.pipelineId()), Map.of(
+        return new DagsterRunConfig(graphJobName(ctx.pipelineId(), ctx.pipelineVersionId()), Map.of(
                 "execution", Map.of("config", Map.of(
                         "max_concurrent", Math.max(1, maxParallel))),
                 "ops", ops
@@ -236,7 +236,13 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
      * 返回流水线专属的稳定 Dagster graph job 名；移除 UUID 连字符以满足定义命名规则。
      */
     public static String graphJobName(java.util.UUID pipelineId) {
-        return GRAPH_JOB_PREFIX + pipelineId.toString().replace("-", "");
+        return graphJobName(pipelineId, null);
+    }
+
+    /** 发布版本拓扑使用独立 job 名，避免历史 snapshot 与实时草稿共用一个 Dagster graph。 */
+    public static String graphJobName(java.util.UUID pipelineId, java.util.UUID versionId) {
+        return GRAPH_JOB_PREFIX + pipelineId.toString().replace("-", "")
+                + (versionId == null ? "" : "_v_" + versionId.toString().replace("-", ""));
     }
 
     /**
@@ -293,9 +299,13 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             java.util.Collection<String> taskKeys,
             RunContext runContext,
             Map<String, String> builtInParams) {
-        Map<String, Map<String, String>> resolved = paramResolver.resolveForTasks(
-                ctx.tenantId(), ctx.pipelineId(), taskKeys, runContext,
-                builtInParams == null ? Map.of() : builtInParams);
+        Map<String, Map<String, String>> resolved = ctx.frozenParams() == null
+                ? paramResolver.resolveForTasks(
+                        ctx.tenantId(), ctx.pipelineId(), taskKeys, runContext,
+                        builtInParams == null ? Map.of() : builtInParams)
+                : paramResolver.resolveForTasks(
+                        ctx.tenantId(), ctx.pipelineId(), taskKeys, ctx.frozenParams(), runContext,
+                        builtInParams == null ? Map.of() : builtInParams);
         return resolved == null ? Map.of() : resolved;
     }
 

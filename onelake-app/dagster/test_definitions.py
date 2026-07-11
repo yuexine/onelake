@@ -421,6 +421,20 @@ def test_native_pipeline_job_exposes_per_task_steps_and_native_dependencies(monk
     assert running[-1] == "quality_gate"
 
 
+def test_native_pipeline_job_name_isolated_by_immutable_version():
+    pipeline_job = definitions._build_native_pipeline_job({
+        "pipeline_id": "00000000-0000-0000-0000-000000000001",
+        "version_id": "00000000-0000-0000-0000-000000000099",
+        "task_keys": ["versioned_task"],
+        "edges": [],
+    })
+
+    assert pipeline_job.name == (
+        "onelake_pipeline_graph_00000000000000000000000000000001"
+        "_v_00000000000000000000000000000099"
+    )
+
+
 def test_native_pipeline_jobs_reuse_same_task_op_definition_across_pipelines():
     original_ops = dict(definitions._NATIVE_TASK_OPS)
     definitions._NATIVE_TASK_OPS.clear()

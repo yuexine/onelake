@@ -17,6 +17,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -87,6 +88,20 @@ class ParamResolverTest {
                 .containsEntry("catalog", "onelake");
         verify(paramRepository).findForResolution(
                 tenantId, dagId, Set.of("pipeline_node", "task_node"));
+    }
+
+    @Test
+    void resolvesFrozenPublishedParamsWithoutReadingLiveRepository() {
+        List<PipelineParam> frozen = List.of(
+                scopedParam("GLOBAL", null, "region", "cn"),
+                scopedParam("PIPELINE", null, "region", "us"),
+                scopedParam("TASK", "transform", "region", "eu"));
+
+        Map<String, Map<String, String>> resolved = resolver.resolveForTasks(
+                tenantId, dagId, Set.of("transform"), frozen, null, Map.of());
+
+        assertThat(resolved.get("transform")).containsEntry("region", "eu");
+        verifyNoInteractions(paramRepository);
     }
 
     @Test

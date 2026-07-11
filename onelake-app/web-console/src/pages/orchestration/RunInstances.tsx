@@ -1082,6 +1082,13 @@ export default function RunInstances() {
                   </a>
                 </Descriptions.Item>
                 <Descriptions.Item label="Dagster Job">{detailRun.dagsterJob || '-'}</Descriptions.Item>
+                <Descriptions.Item label="绑定版本">
+                  {detailRun.pipelineVersion ? (
+                    <Tag color="geekblue">版本 {detailRun.pipelineVersion}</Tag>
+                  ) : (
+                    <Tag>未绑定版本</Tag>
+                  )}
+                </Descriptions.Item>
                 <Descriptions.Item label="触发方式">{detailRun.triggerType}</Descriptions.Item>
                 <Descriptions.Item label="状态"><StatusBadge status={detailRun.status} /></Descriptions.Item>
                 <Descriptions.Item label="运行模式">
@@ -1245,6 +1252,13 @@ export default function RunInstances() {
                 {r.dagsterJob && <div style={{ fontSize: 11, color: 'var(--ol-ink-3)' }}>{r.dagsterJob}</div>}
               </div>
             ) },
+            {
+              title: '版本',
+              width: 100,
+              render: (_: unknown, r: JobRun) => r.pipelineVersion ? (
+                <Tag color="geekblue" style={{ margin: 0 }}>版本 {r.pipelineVersion}</Tag>
+              ) : <Tag style={{ margin: 0 }}>未绑定</Tag>,
+            },
             {
               title: 'Backfill',
               width: 150,

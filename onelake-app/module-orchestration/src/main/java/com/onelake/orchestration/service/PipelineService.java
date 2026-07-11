@@ -8,6 +8,7 @@ import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskCompileStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
@@ -73,6 +74,7 @@ public class PipelineService {
     private final TaskRunRepository taskRunRepo;
     private final JobRunRepository runRepo;
     private final PipelineCompileService compileService;
+    private final PipelineSnapshotService snapshotService;
     private final org.springframework.beans.factory.ObjectProvider<OutboxPublisher> outboxPublisher;
 
     // ---------- 流水线（dag） ----------
@@ -123,7 +125,17 @@ public class PipelineService {
             throw new BizException(40020, "非法 pipeline status: " + targetStatusRaw);
         }
         if (target.equals(current)) {
-            return dag; // 状态未变化，直接返回。
+            if ("PUBLISHED".equals(target)
+                    && (dag.getPublishedVersionId() == null
+                        || Boolean.TRUE.equals(dag.getHasUnpublishedChanges()))) {
+                PipelineValidationResult result = validate(dagId);
+                if (!result.valid()) {
+                    throw new BizException(40070, "无法重新发布：当前草稿校验未通过");
+                }
+                PipelineVersion publishedVersion = snapshotService.publishSnapshot(dagId);
+                emitPipelinePublishedEvent(dag, publishedVersion.getId());
+            }
+            return dag;
         }
 
         // 执行状态流转约束。
@@ -144,7 +156,8 @@ public class PipelineService {
 
         // 首次进入 PUBLISHED 时发布流水线发布事件。
         if ("PUBLISHED".equals(target)) {
-            emitPipelinePublishedEvent(dag);
+            PipelineVersion publishedVersion = snapshotService.publishSnapshot(dagId);
+            emitPipelinePublishedEvent(dag, publishedVersion.getId());
         }
         log.info("流水线 {} 状态流转：{} → {} (v{})",
                 dag.getId(), current, target, dag.getVersion());
@@ -152,7 +165,7 @@ public class PipelineService {
     }
 
     /** 发布流水线版本事件，携带目标资产集合供下游目录/血缘消费者处理。 */
-    private void emitPipelinePublishedEvent(Dag dag) {
+    private void emitPipelinePublishedEvent(Dag dag, UUID versionId) {
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) {
             log.warn("OutboxPublisher 不可用，跳过 pipeline.published 事件，pipelineId={}",
@@ -163,6 +176,7 @@ public class PipelineService {
         payload.put("pipelineId", dag.getId().toString());
         payload.put("tenantId", dag.getTenantId() == null ? null : dag.getTenantId().toString());
         payload.put("version", dag.getVersion());
+        payload.put("versionId", versionId == null ? null : versionId.toString());
         payload.put("pipelineKind", dag.getPipelineKind() == null ? "BLANK" : dag.getPipelineKind());
         payload.put("publishedBy", com.onelake.common.context.TenantContext.getUserId() == null
                 ? null : com.onelake.common.context.TenantContext.getUserId().toString());
@@ -211,6 +225,7 @@ public class PipelineService {
         t.setPositionX(req.positionX());
         t.setPositionY(req.positionY());
         t = taskRepo.save(t);
+        markUnpublishedChanges(dag);
         log.info("流水线 {} 已创建节点：key={} type={}", dagId, t.getTaskKey(), t.getTaskType());
         return PipelineTaskDTO.of(t);
     }
@@ -218,7 +233,7 @@ public class PipelineService {
     /** 更新节点可编辑字段，并重置编译状态等待重新校验。 */
     @Transactional
     public PipelineTaskDTO updateTask(UUID dagId, String taskKey, PipelineTaskRequest req) {
-        getPipeline(dagId);
+        Dag dag = getPipeline(dagId);
         PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
         validateTaskRequest(req, false);
@@ -236,6 +251,7 @@ public class PipelineService {
         t.setExecutable(false);
         t.setUpdatedAt(Instant.now());
         t = taskRepo.save(t);
+        markUnpublishedChanges(dag);
         return PipelineTaskDTO.of(t);
     }
 
@@ -253,6 +269,7 @@ public class PipelineService {
         edgeRepo.findByDagId(dagId).stream()
                 .filter(e -> e.getSourceKey().equals(taskKey) || e.getTargetKey().equals(taskKey))
                 .forEach(edgeRepo::delete);
+        markUnpublishedChanges(dag);
     }
 
     // ---------- 边 ----------
@@ -269,7 +286,7 @@ public class PipelineService {
     /** 创建边并补齐端口、输入别名、触发和新鲜度默认策略。 */
     @Transactional
     public PipelineTaskEdgeDTO createEdge(UUID dagId, PipelineTaskEdgeRequest req) {
-        getPipeline(dagId);
+        Dag dag = getPipeline(dagId);
         if (!StringUtils.hasText(req.sourceKey()) || !StringUtils.hasText(req.targetKey())) {
             throw new BizException(40020, "edge sourceKey/targetKey 不能为空");
         }
@@ -295,6 +312,7 @@ public class PipelineService {
                 ? req.freshnessPolicy().trim() : defaultFreshnessPolicy(e.getTargetInput()));
         e.setAuto(Boolean.TRUE.equals(req.auto()));
         e = edgeRepo.save(e);
+        markUnpublishedChanges(dag);
         return PipelineTaskEdgeDTO.of(e);
     }
 
@@ -308,11 +326,14 @@ public class PipelineService {
     /** 删除 sourceKey -> targetKey 的确定边；不存在时幂等返回。 */
     @Transactional
     public void deleteEdge(UUID dagId, String sourceKey, String targetKey) {
-        getPipeline(dagId);
+        Dag dag = getPipeline(dagId);
         edgeRepo.findByDagId(dagId).stream()
                 .filter(e -> e.getSourceKey().equals(sourceKey) && e.getTargetKey().equals(targetKey))
                 .findFirst()
-                .ifPresent(edgeRepo::delete);
+                .ifPresent(edge -> {
+                    edgeRepo.delete(edge);
+                    markUnpublishedChanges(dag);
+                });
     }
 
     // ---------- 校验 ----------
@@ -491,6 +512,14 @@ public class PipelineService {
         UUID t = TenantContext.getTenantId();
         if (t == null) throw new BizException(40100, "Tenant context required");
         return t;
+    }
+
+    /** 已发布流水线继续编辑时只修改 DEV 草稿，并提示存在未发布变更。 */
+    private void markUnpublishedChanges(Dag dag) {
+        if (dag != null && "PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
+            // 即使标记已经为 true 也执行 UPDATE，以 DAG 行锁与 publishSnapshot 串行化。
+            dagRepo.markPublishedDagChanged(dag.getId(), dag.getTenantId());
+        }
     }
 
     /** 校验节点请求的必填字段、支持类型和 Spark-only 引擎边界。 */

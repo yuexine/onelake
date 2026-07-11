@@ -3,6 +3,7 @@ package com.onelake.orchestration.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.system.repository.TenantRepository;
+import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineParam;
 import com.onelake.orchestration.dto.ParamDTO;
 import com.onelake.orchestration.dto.ParamReplaceRequest;
@@ -69,7 +70,9 @@ public class PipelineParamService {
         if (!existing.isEmpty()) {
             paramRepo.deleteAllInBatch(existing);
         }
-        return toDtos(paramRepo.saveAllAndFlush(replacement));
+        List<ParamDTO> result = toDtos(paramRepo.saveAllAndFlush(replacement));
+        dagRepo.markTenantPublishedDagsChanged(tenantId);
+        return result;
     }
 
     /** 只替换请求指定的 PIPELINE 或单个 TASK 参数集合，避免覆盖其他编辑器的快照。 */
@@ -123,7 +126,9 @@ public class PipelineParamService {
         if (!existing.isEmpty()) {
             paramRepo.deleteAllInBatch(existing);
         }
-        return toDtos(paramRepo.saveAllAndFlush(replacement));
+        List<ParamDTO> result = toDtos(paramRepo.saveAllAndFlush(replacement));
+        dagRepo.markPublishedDagChanged(dagId, tenantId);
+        return result;
     }
 
     private List<PipelineParam> validateAndMap(List<ParamDTO> requested,
@@ -229,10 +234,10 @@ public class PipelineParamService {
                 .toList();
     }
 
-    private void requireDag(UUID dagId, UUID tenantId) {
-        if (dagId == null || dagRepo.findByIdAndTenantId(dagId, tenantId).isEmpty()) {
-            throw new BizException(40400, "Pipeline 不存在");
-        }
+    private Dag requireDag(UUID dagId, UUID tenantId) {
+        if (dagId == null) throw new BizException(40400, "Pipeline 不存在");
+        return dagRepo.findByIdAndTenantId(dagId, tenantId)
+                .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
     }
 
     private void lockDag(UUID dagId, UUID tenantId) {

@@ -5,7 +5,9 @@ import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.dto.PipelineValidationResult;
+import com.onelake.orchestration.dto.PipelineTaskRequest;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
@@ -51,6 +53,7 @@ class PipelineStatusMachineTest {
     @Mock private TaskRunRepository taskRunRepo;
     @Mock private JobRunRepository runRepo;
     @Mock private PipelineCompileService compileService;
+    @Mock private PipelineSnapshotService snapshotService;
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
 
@@ -61,7 +64,7 @@ class PipelineStatusMachineTest {
     @BeforeEach
     void setup() {
         service = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, outboxProvider);
+                runRepo, compileService, snapshotService, outboxProvider);
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -71,6 +74,11 @@ class PipelineStatusMachineTest {
             if (d.getId() == null) d.setId(UUID.randomUUID());
             return d;
         }).when(dagRepo).save(any(Dag.class));
+        lenient().when(snapshotService.publishSnapshot(any())).thenAnswer(inv -> {
+            PipelineVersion version = new PipelineVersion();
+            version.setId(UUID.randomUUID());
+            return version;
+        });
     }
 
     @AfterEach
@@ -131,6 +139,7 @@ class PipelineStatusMachineTest {
         assertThat(typeCaptor.getValue()).isEqualTo("pipeline.published");
         assertThat(payloadCaptor.getValue().get("pipelineId")).isEqualTo(dagId.toString());
         assertThat(payloadCaptor.getValue().get("version")).isEqualTo(2);
+        assertThat(payloadCaptor.getValue().get("versionId")).isNotNull();
     }
 
     @Test
@@ -142,6 +151,19 @@ class PipelineStatusMachineTest {
 
         assertThat(updated.getStatus()).isEqualTo("DRAFT");
         assertThat(updated.getVersion()).isEqualTo(1); // 未变化。
+    }
+
+    @Test
+    void publishedWithoutVersionCanBeRepublishedAfterMigration() {
+        Dag dag = dag("PUBLISHED");
+        dag.setPublishedVersionId(null);
+        dag.setHasUnpublishedChanges(false);
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(compileService.compile(dagId)).thenReturn(validCompileResult());
+
+        service.updatePipelineStatus(dagId, "PUBLISHED");
+
+        verify(snapshotService).publishSnapshot(dagId);
     }
 
     @Test
@@ -186,6 +208,30 @@ class PipelineStatusMachineTest {
                 tenantId, dagId, "transform", "TASK");
         verify(taskRepo).findByDagIdAndTaskKeyForUpdate(dagId, "transform");
         verify(taskRepo).delete(task);
+    }
+
+    @Test
+    void editingPublishedTaskAlwaysSerializesWithPublishEvenWhenAlreadyMarked() {
+        Dag dag = dag("PUBLISHED");
+        dag.setHasUnpublishedChanges(true);
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey("transform");
+        task.setTaskType(com.onelake.orchestration.domain.enums.TaskType.SPARK_SQL);
+        task.setName("transform");
+        task.setEngine("SPARK_SQL");
+        task.setConfig("{\"sql\":\"SELECT 1\"}");
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "transform")).thenReturn(Optional.of(task));
+        when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.updateTask(dagId, "transform", new PipelineTaskRequest(
+                null, null, "changed", null, null, null, null,
+                java.util.Map.of("sql", "SELECT 2"), null, null));
+
+        verify(dagRepo).markPublishedDagChanged(dagId, tenantId);
     }
 
     private Dag dag(String status) {

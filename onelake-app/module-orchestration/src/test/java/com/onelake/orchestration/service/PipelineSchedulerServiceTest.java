@@ -3,6 +3,7 @@ package com.onelake.orchestration.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineDependencyWait;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDay;
 import com.onelake.orchestration.domain.entity.ScheduleCalendarDayId;
 import com.onelake.orchestration.domain.enums.DagStatus;
@@ -58,6 +59,7 @@ class PipelineSchedulerServiceTest {
     @Mock private BackfillDispatcher backfillDispatcher;
     @Mock private DependencyReadinessService dependencyReadinessService;
     @Mock private PipelineDependencyWaitRepository dependencyWaitRepo;
+    @Mock private PipelineSnapshotService pipelineSnapshotService;
 
     private PipelineSchedulerService service;
     @BeforeEach
@@ -72,7 +74,8 @@ class PipelineSchedulerServiceTest {
                 backfillDispatcher,
                 dependencyReadinessService,
                 new DataIntervalCalculator(),
-                dependencyWaitRepo);
+                dependencyWaitRepo,
+                pipelineSnapshotService);
         lenient().when(dependencyReadinessService.evaluate(any(), any()))
                 .thenReturn(DependencyReadinessService.ReadinessResult.readyResult());
         lenient().when(dependencyWaitRepo.findByStatusOrderByCreatedAtAscIdAsc("WAITING"))
@@ -210,6 +213,7 @@ class PipelineSchedulerServiceTest {
         verify(dependencyWaitRepo).enqueue(
                 dag.getTenantId(),
                 dag.getId(),
+                dag.getPublishedVersionId(),
                 Instant.parse("2026-06-23T10:01:00Z"),
                 Instant.parse("2026-06-24T10:01:00Z"),
                 "DEPENDENCY",
@@ -230,6 +234,7 @@ class PipelineSchedulerServiceTest {
         wait.setId(UUID.randomUUID());
         wait.setTenantId(dag.getTenantId());
         wait.setDagId(dag.getId());
+        wait.setPipelineVersionId(dag.getPublishedVersionId());
         wait.setScheduledAt(scheduledAt);
         wait.setLogicalDate(logicalDate);
         wait.setCreatedAt(scheduledAt);
@@ -244,7 +249,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T00:02:45Z"));
 
         verify(dependencyReadinessService).evaluate(dag, logicalDate);
-        verify(orchestrationService).triggerPipelineRun(dag.getId(), TriggerType.CRON, scheduledAt);
+        verify(orchestrationService).triggerPipelineRun(
+                dag.getId(), TriggerType.CRON, scheduledAt, dag.getPublishedVersionId());
         verify(dependencyWaitRepo).finish(
                 wait.getId(), "RESOLVED", "已触发运行", Instant.parse("2026-06-24T00:02:45Z"));
         assertThat(TenantContext.getTenantId()).isNull();
@@ -260,6 +266,7 @@ class PipelineSchedulerServiceTest {
         wait.setId(UUID.randomUUID());
         wait.setTenantId(dag.getTenantId());
         wait.setDagId(dag.getId());
+        wait.setPipelineVersionId(dag.getPublishedVersionId());
         wait.setScheduledAt(scheduledAt);
         wait.setLogicalDate(logicalDate);
         wait.setCreatedAt(scheduledAt);
@@ -270,7 +277,8 @@ class PipelineSchedulerServiceTest {
         when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
         when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
         when(dagRepo.findByEnabledTrue()).thenReturn(List.of());
-        when(orchestrationService.triggerPipelineRun(dag.getId(), TriggerType.CRON, scheduledAt))
+        when(orchestrationService.triggerPipelineRun(
+                dag.getId(), TriggerType.CRON, scheduledAt, dag.getPublishedVersionId()))
                 .thenThrow(new DataIntegrityViolationException("uq_job_run_cron_logical"));
         when(jobRunRepo.existsByDagIdAndLogicalDateAndTriggerType(
                 dag.getId(), logicalDate, TriggerType.CRON)).thenReturn(true);
@@ -280,6 +288,32 @@ class PipelineSchedulerServiceTest {
         verify(dependencyWaitRepo).finish(
                 wait.getId(), "RESOLVED", "运行已由其他路径触发", Instant.parse("2026-06-24T00:02:45Z"));
         assertThat(TenantContext.getTenantId()).isNull();
+    }
+
+    @Test
+    void dependencyWaitIsCancelledAfterPipelineRepublish() {
+        Dag dag = scheduledPipeline();
+        PipelineDependencyWait wait = new PipelineDependencyWait();
+        wait.setId(UUID.randomUUID());
+        wait.setTenantId(dag.getTenantId());
+        wait.setDagId(dag.getId());
+        wait.setPipelineVersionId(UUID.randomUUID());
+        wait.setScheduledAt(Instant.parse("2026-06-24T00:00:00Z"));
+        wait.setLogicalDate(Instant.parse("2026-06-23T00:00:00Z"));
+        when(dependencyWaitRepo.findByStatusOrderByCreatedAtAscIdAsc("WAITING"))
+                .thenReturn(List.of(wait));
+        when(dagRepo.findByIdAndTenantId(dag.getId(), dag.getTenantId()))
+                .thenReturn(Optional.of(dag));
+        when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
+        when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
+        when(dagRepo.findByEnabledTrue()).thenReturn(List.of());
+        Instant tickAt = Instant.parse("2026-06-24T00:02:45Z");
+
+        service.tickScheduledPipelines(tickAt);
+
+        verify(dependencyWaitRepo).finish(
+                wait.getId(), "CANCELLED", "流水线已重新发布，旧版本等待点不再执行", tickAt);
+        verifyNoInteractions(orchestrationService, dependencyReadinessService);
     }
 
     @Test
@@ -320,6 +354,7 @@ class PipelineSchedulerServiceTest {
         verifyNoInteractions(catchupPlanner, backfillDispatcher);
         verify(dependencyWaitRepo).enqueue(
                 eq(dag.getTenantId()), eq(dag.getId()),
+                eq(dag.getPublishedVersionId()),
                 eq(Instant.parse("2026-06-23T10:01:00Z")),
                 eq(Instant.parse("2026-06-24T10:01:00Z")),
                 eq("MISFIRE"), anyString(), eq(Instant.parse("2026-06-25T10:01:45Z")));
@@ -336,7 +371,8 @@ class PipelineSchedulerServiceTest {
         service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
 
         verifyNoInteractions(orchestrationService);
-        verify(dependencyWaitRepo, never()).enqueue(any(), any(), any(), any(), anyString(), any(), any());
+        verify(dependencyWaitRepo, never()).enqueue(
+                any(), any(), any(), any(), any(), anyString(), any(), any());
     }
 
     @Test
@@ -351,9 +387,39 @@ class PipelineSchedulerServiceTest {
 
         InOrder order = inOrder(orchestrationService);
         order.verify(orchestrationService).triggerPipelineRun(
-                eq(high.getId()), eq(TriggerType.CRON), any(Instant.class));
+                eq(high.getId()), eq(TriggerType.CRON), any(Instant.class),
+                eq(high.getPublishedVersionId()));
         order.verify(orchestrationService).triggerPipelineRun(
-                eq(low.getId()), eq(TriggerType.CRON), any(Instant.class));
+                eq(low.getId()), eq(TriggerType.CRON), any(Instant.class),
+                eq(low.getPublishedVersionId()));
+    }
+
+    @Test
+    void publishedScheduleSnapshotWinsOverUnpublishedLiveSchedule() {
+        Dag liveDag = scheduledPipeline();
+        UUID versionId = UUID.randomUUID();
+        liveDag.setPublishedVersionId(versionId);
+        liveDag.setScheduleCron("0 0 0 1 1 *");
+        liveDag.setScheduleMode("FROZEN");
+        Dag publishedDag = scheduledPipeline();
+        publishedDag.setId(liveDag.getId());
+        publishedDag.setTenantId(liveDag.getTenantId());
+        publishedDag.setPublishedVersionId(versionId);
+        publishedDag.setScheduleCron("0 * * * * *");
+        publishedDag.setScheduleMode("NORMAL");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        stubLockedTick(List.of(liveDag));
+        when(pipelineSnapshotService.loadExecutionSnapshot(versionId, liveDag.getId()))
+                .thenReturn(new PipelineSnapshotService.ExecutionSnapshot(
+                        version, publishedDag, List.of(), List.of(), List.of()));
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
+
+        verify(orchestrationService).triggerPipelineRun(
+                liveDag.getId(), TriggerType.CRON, Instant.parse("2026-06-24T10:01:00Z"), versionId);
+        verify(dependencyReadinessService).evaluate(
+                publishedDag, Instant.parse("2026-06-23T10:01:00Z"));
     }
 
     @Test
@@ -375,7 +441,7 @@ class PipelineSchedulerServiceTest {
 
         InOrder order = inOrder(orchestrationService, backfillDispatcher);
         order.verify(orchestrationService).triggerPipelineRun(
-                dag.getId(), TriggerType.CRON, scheduledAt);
+                dag.getId(), TriggerType.CRON, scheduledAt, dag.getPublishedVersionId());
         order.verify(backfillDispatcher).dispatchCatchup(
                 dag.getId(), plan.windows(), dag.getPartitionGrain(), 2);
     }
@@ -388,7 +454,9 @@ class PipelineSchedulerServiceTest {
         when(schedulerLockRepo.acquire(anyString(), anyString(), any())).thenReturn(1);
         when(schedulerLockRepo.release(anyString(), anyString())).thenReturn(1);
         when(dagRepo.findByEnabledTrue()).thenReturn(List.of(dag));
-        when(orchestrationService.triggerPipelineRun(eq(dag.getId()), eq(TriggerType.CRON), any(Instant.class)))
+        when(orchestrationService.triggerPipelineRun(
+                eq(dag.getId()), eq(TriggerType.CRON), any(Instant.class),
+                eq(dag.getPublishedVersionId())))
                 .thenReturn(UUID.randomUUID())
                 .thenThrow(new DataIntegrityViolationException("uq_job_run_cron_logical"));
 
@@ -399,7 +467,8 @@ class PipelineSchedulerServiceTest {
 
         ArgumentCaptor<Instant> scheduledAtCaptor = ArgumentCaptor.forClass(Instant.class);
         verify(orchestrationService, times(2)).triggerPipelineRun(
-                eq(dag.getId()), eq(TriggerType.CRON), scheduledAtCaptor.capture());
+                eq(dag.getId()), eq(TriggerType.CRON), scheduledAtCaptor.capture(),
+                eq(dag.getPublishedVersionId()));
         assertThat(scheduledAtCaptor.getAllValues()).containsExactly(scheduledAt, scheduledAt);
         verify(schedulerLockRepo, times(2)).release(anyString(), anyString());
         assertThat(TenantContext.getTenantId()).isNull();
@@ -413,6 +482,17 @@ class PipelineSchedulerServiceTest {
 
         verifyNoInteractions(dagRepo, orchestrationService);
         verify(schedulerLockRepo, never()).release(anyString(), anyString());
+    }
+
+    @Test
+    void publishedPipelineWithoutVersionIsNotScheduled() {
+        Dag dag = scheduledPipeline();
+        dag.setPublishedVersionId(null);
+        stubLockedTick(List.of(dag));
+
+        service.tickScheduledPipelines(Instant.parse("2026-06-24T10:01:45Z"));
+
+        verifyNoInteractions(orchestrationService);
     }
 
     private void stubLockedTick(List<Dag> dags) {
@@ -430,6 +510,15 @@ class PipelineSchedulerServiceTest {
         dag.setStatus("PUBLISHED");
         dag.setDagsterJob("onelake_pipeline_run");
         dag.setEnabled(true);
+        UUID versionId = UUID.randomUUID();
+        dag.setPublishedVersionId(versionId);
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(dag.getId());
+        version.setTenantId(dag.getTenantId());
+        lenient().when(pipelineSnapshotService.loadExecutionSnapshot(versionId, dag.getId()))
+                .thenReturn(new PipelineSnapshotService.ExecutionSnapshot(
+                        version, dag, List.of(), List.of(), List.of()));
         return dag;
     }
 }

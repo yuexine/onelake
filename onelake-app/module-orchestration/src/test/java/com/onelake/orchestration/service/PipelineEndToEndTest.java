@@ -8,6 +8,7 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
@@ -90,6 +91,7 @@ class PipelineEndToEndTest {
     @Mock private RuntimeContractService runtimeContractService;
     @Mock private PipelineLogStorage pipelineLogStorage;
     @Mock private ParamResolver paramResolver;
+    @Mock private PipelineSnapshotService snapshotService;
 
     private PipelineService pipelineService;
     private PipelineCompileService compileService;
@@ -102,6 +104,7 @@ class PipelineEndToEndTest {
     private Dag dag;
     private final Map<String, PipelineTask> tasks = new LinkedHashMap<>();
     private final List<PipelineTaskEdge> edges = new java.util.ArrayList<>();
+    private final AtomicReference<PipelineVersion> publishedVersion = new AtomicReference<>();
     private final AtomicReference<JobRun> latestRun = new AtomicReference<>();
     private final List<TaskRun> taskRuns = new java.util.ArrayList<>();
     private final List<Map<String, Object>> outboxPayloads = new java.util.ArrayList<>();
@@ -111,9 +114,9 @@ class PipelineEndToEndTest {
     void setup() {
         compileService = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
         pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, outboxProvider);
+                runRepo, compileService, snapshotService, outboxProvider);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
-                runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
+                runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
                 new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
 
         tenantId = UUID.randomUUID();
@@ -135,6 +138,23 @@ class PipelineEndToEndTest {
         dag.setEngine("SPARK");
         dag.setResourceGroup("spark-default");
         dag.setComputeProfile("spark-small");
+        lenient().when(snapshotService.publishSnapshot(eq(dagId))).thenAnswer(inv -> {
+            PipelineVersion version = new PipelineVersion();
+            version.setId(UUID.randomUUID());
+            version.setDagId(dagId);
+            version.setTenantId(tenantId);
+            dag.setPublishedVersionId(version.getId());
+            dag.setHasUnpublishedChanges(false);
+            publishedVersion.set(version);
+            return version;
+        });
+        lenient().when(snapshotService.loadExecutionSnapshot(any(), eq(dagId))).thenAnswer(inv ->
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        publishedVersion.get(),
+                        dag,
+                        new java.util.ArrayList<>(tasks.values()),
+                        new java.util.ArrayList<>(edges),
+                        List.of()));
         lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.empty());
 
@@ -231,6 +251,7 @@ class PipelineEndToEndTest {
         taskRuns.clear();
         outboxPayloads.clear();
         outboxTypes.clear();
+        publishedVersion.set(null);
         TenantContext.clear();
     }
 

@@ -1,5 +1,6 @@
 package com.onelake.orchestration.service.spi;
 
+import com.onelake.orchestration.domain.entity.PipelineParam;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 
 import java.util.List;
@@ -26,6 +27,30 @@ public record TaskBundleContext(
         PipelineCompileResult compileResult,
         String pipelineTag,
         String resourceGroup,
-        String computeProfile
+        String computeProfile,
+        List<PipelineParam> frozenParams,
+        UUID pipelineVersionId
 ) {
+    public TaskBundleContext(UUID pipelineId,
+                             UUID tenantId,
+                             UUID runId,
+                             PipelineCompileResult compileResult,
+                             String pipelineTag,
+                             String resourceGroup,
+                             String computeProfile) {
+        this(pipelineId, tenantId, runId, compileResult, pipelineTag,
+                resourceGroup, computeProfile, null, null);
+    }
+
+    public TaskBundleContext(UUID pipelineId,
+                             UUID tenantId,
+                             UUID runId,
+                             PipelineCompileResult compileResult,
+                             String pipelineTag,
+                             String resourceGroup,
+                             String computeProfile,
+                             List<PipelineParam> frozenParams) {
+        this(pipelineId, tenantId, runId, compileResult, pipelineTag,
+                resourceGroup, computeProfile, frozenParams, null);
+    }
 }

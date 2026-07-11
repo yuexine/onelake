@@ -8,6 +8,7 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.entity.PipelineVersion;
 import com.onelake.orchestration.domain.entity.TaskRun;
 import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
@@ -78,6 +79,7 @@ class OrchestrationPipelineTriggerTest {
     @Mock private JdbcTemplate jdbc;
     @Mock private RuntimeContractService runtimeContractService;
     @Mock private PipelineCompileService compileService;
+    @Mock private PipelineSnapshotService snapshotService;
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
     @Mock private TaskRunRepository taskRunRepo;
@@ -91,7 +93,7 @@ class OrchestrationPipelineTriggerTest {
     @BeforeEach
     void setup() {
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
-                runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,
+                runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
                 sparkBuilder, outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
@@ -165,6 +167,42 @@ class OrchestrationPipelineTriggerTest {
         // C4 校验：不通过 JdbcTemplate 写 modeling.* 表。
         verify(jdbc, never()).update(anyString(), any(Object[].class));
         verify(jdbc, never()).update(anyString(), any(Object.class));
+    }
+
+    @Test
+    void publishedRunBindsVersionAndUsesSnapshotInsteadOfEditedDraft() {
+        UUID versionId = UUID.randomUUID();
+        Dag liveDag = pipelineDag();
+        liveDag.setPublishedVersionId(versionId);
+        Dag snapshotDag = pipelineDag();
+        PipelineTask snapshotTask = task("published_task", true);
+        snapshotTask.setConfig("{\"sql\":\"SELECT 'published'\"}");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(liveDag));
+        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, snapshotDag, List.of(snapshotTask), List.of(), List.of()));
+        when(compileService.compile(eq(DAG_ID), eq(TENANT_ID), anyList(), anyList()))
+                .thenReturn(validPlan("published_task"));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-published-snapshot");
+
+        service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo, org.mockito.Mockito.atLeastOnce()).save(runCaptor.capture());
+        assertThat(runCaptor.getValue().getPipelineVersionId()).isEqualTo(versionId);
+        ArgumentCaptor<List<PipelineTask>> taskCaptor = ArgumentCaptor.forClass(List.class);
+        verify(sparkBuilder).build(any(), taskCaptor.capture(), anyString(),
+                any(RunContext.class), any(), anyList());
+        assertThat(taskCaptor.getValue()).extracting(PipelineTask::getTaskKey)
+                .containsExactly("published_task");
+        assertThat(taskCaptor.getValue().get(0).getConfig()).contains("published");
+        verify(compileService, never()).compile(DAG_ID);
+        verify(taskRepo, never()).findByDagIdOrderByCreatedAtAsc(DAG_ID);
     }
 
     @Test
@@ -370,6 +408,63 @@ class OrchestrationPipelineTriggerTest {
         assertThat(savedRun.getLogicalDate()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
         assertThat(savedRun.getDataIntervalStart()).isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
         assertThat(savedRun.getDataIntervalEnd()).isEqualTo(scheduledAt);
+    }
+
+    @Test
+    void cronTriggerUsesTheSameVersionForIntervalAndExecution() {
+        UUID firstVersionId = UUID.randomUUID();
+        UUID nextVersionId = UUID.randomUUID();
+        Dag firstLiveDag = pipelineDag();
+        firstLiveDag.setStatus("PUBLISHED");
+        firstLiveDag.setPublishedVersionId(firstVersionId);
+        Dag republishedLiveDag = pipelineDag();
+        republishedLiveDag.setStatus("PUBLISHED");
+        republishedLiveDag.setPublishedVersionId(nextVersionId);
+        Dag firstSnapshotDag = pipelineDag();
+        firstSnapshotDag.setStatus("PUBLISHED");
+        firstSnapshotDag.setTimezone("UTC");
+        firstSnapshotDag.setPartitionGrain("DAY");
+        PipelineTask snapshotTask = task("spark_daily", true);
+        PipelineVersion firstVersion = new PipelineVersion();
+        firstVersion.setId(firstVersionId);
+        firstVersion.setDagId(DAG_ID);
+        firstVersion.setTenantId(TENANT_ID);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID))
+                .thenReturn(Optional.of(firstLiveDag), Optional.of(republishedLiveDag));
+        when(snapshotService.loadExecutionSnapshot(firstVersionId, DAG_ID))
+                .thenReturn(new PipelineSnapshotService.ExecutionSnapshot(
+                        firstVersion, firstSnapshotDag, List.of(snapshotTask), List.of(), List.of()));
+        when(compileService.compile(eq(DAG_ID), eq(TENANT_ID), anyList(), anyList()))
+                .thenReturn(validPlan("spark_daily"));
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-run-versioned-cron");
+        Instant scheduledAt = Instant.parse("2026-05-03T02:00:00Z");
+
+        service.triggerPipelineRun(DAG_ID, TriggerType.CRON, scheduledAt);
+
+        ArgumentCaptor<JobRun> runCaptor = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo).saveAndFlush(runCaptor.capture());
+        assertThat(runCaptor.getValue().getPipelineVersionId()).isEqualTo(firstVersionId);
+        assertThat(runCaptor.getValue().getDataIntervalStart())
+                .isEqualTo(Instant.parse("2026-05-02T02:00:00Z"));
+        verify(snapshotService, org.mockito.Mockito.times(2))
+                .loadExecutionSnapshot(firstVersionId, DAG_ID);
+        verify(snapshotService, never()).loadExecutionSnapshot(nextVersionId, DAG_ID);
+    }
+
+    @Test
+    void publishedPipelineWithoutVersionCannotUseDevExecutionPath() {
+        Dag dag = pipelineDag();
+        dag.setStatus("PUBLISHED");
+        dag.setPublishedVersionId(null);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(DAG_ID, TriggerType.MANUAL))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("重新发布");
+
+        verify(compileService, never()).compile(DAG_ID);
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
     }
 
     @Test
@@ -651,15 +746,17 @@ class OrchestrationPipelineTriggerTest {
     }
 
     @Test
-    void terminalFailedRunPropagatesUpstreamFailedToDownstreamQueuedTasks() {
+    void terminalFailedRunPropagatesUsingItsBoundSnapshotEdges() {
         Dag dag = pipelineDag();
         UUID runId = UUID.randomUUID();
+        UUID versionId = UUID.randomUUID();
         JobRun run = new JobRun();
         run.setId(runId);
         run.setDagId(DAG_ID);
         run.setDagsterRunId("dagster-run-failed");
         run.setTriggerType(TriggerType.MANUAL);
         run.setStatus(DagStatus.RUNNING);
+        run.setPipelineVersionId(versionId);
         run.setStartedAt(Instant.parse("2026-06-25T01:00:00Z"));
 
         TaskRun upstream = new TaskRun();
@@ -692,13 +789,21 @@ class OrchestrationPipelineTriggerTest {
         when(taskRunRepo.findByJobRunId(runId)).thenReturn(List.of(upstream, downstream));
         when(taskRepo.findByDagIdAndTaskKey(DAG_ID, "t_upstream")).thenReturn(Optional.of(upstreamTask));
         when(taskRepo.findByDagIdAndTaskKey(DAG_ID, "t_downstream")).thenReturn(Optional.of(downstreamTask));
-        when(edgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge("t_upstream", "t_downstream")));
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, dag, List.of(upstreamTask, downstreamTask),
+                        List.of(edge("t_upstream", "t_downstream")), List.of()));
 
         service.listRuns(PageRequest.of(0, 10));
 
         assertThat(upstream.getStatus()).isEqualTo(TaskRunStatus.FAILED);
         assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
         assertThat(downstream.getErrorMsg()).contains("t_upstream");
+        verify(edgeRepo, never()).findByDagId(DAG_ID);
     }
 
     @Test

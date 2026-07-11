@@ -63,6 +63,10 @@ public class JobRun {
     /** 本次运行绑定的不可变流水线发布版本；DEV 草稿试跑可为空。 */
     private UUID pipelineVersionId;
 
+    /** EVENT 触发的确定性幂等键；同一 DAG 和业务窗口只创建一条运行。 */
+    @Column(length = 64)
+    private String eventTriggerKey;
+
     /** 创建运行时冻结的业务时区，避免 DAG 配置变更重解释历史业务日期。 */
     @Column(nullable = false, length = 64)
     private String timezone = "Asia/Shanghai";

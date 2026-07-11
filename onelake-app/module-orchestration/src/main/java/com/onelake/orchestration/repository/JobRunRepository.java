@@ -84,6 +84,9 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
                                                        Instant logicalDate,
                                                        TriggerType triggerType);
 
+    /** 查询资产事件确定性触发键对应的既有运行，供回执失败后的重试复用。 */
+    Optional<JobRun> findByDagIdAndEventTriggerKey(UUID dagId, String eventTriggerKey);
+
     /**
      * 返回已经到达 DAG 重跑间隔且尚未领取的生产失败运行 ID；DEV 试跑不自动重跑。
      *

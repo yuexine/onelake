@@ -336,6 +336,34 @@ public class OrchestrationService {
                 dagId, trigger, context, null, useVersionId, RunEnvironment.PROD);
     }
 
+    /**
+     * 使用确定性 EVENT 触发键启动或复用发布版本运行。
+     *
+     * <p>触发键先写入 {@code job_run} 的唯一索引，再启动 Dagster；回执落库失败后重试
+     * 会返回同一 JobRun，而不会再次启动下游流水线。</p>
+     */
+    @Transactional(noRollbackFor = BizException.class)
+    public UUID triggerPipelineRun(UUID dagId,
+                                   TriggerType trigger,
+                                   RunContext context,
+                                   UUID useVersionId,
+                                   String eventTriggerKey) {
+        if (trigger != TriggerType.EVENT) {
+            throw new BizException(40020, "确定性事件触发键仅适用于 EVENT 触发");
+        }
+        if (!StringUtils.hasText(eventTriggerKey) || eventTriggerKey.trim().length() > 64) {
+            throw new BizException(40020, "EVENT 触发键不能为空且长度不能超过 64");
+        }
+        return triggerPipelineRunInternal(
+                dagId,
+                trigger,
+                context,
+                null,
+                useVersionId,
+                RunEnvironment.PROD,
+                eventTriggerKey.trim());
+    }
+
     /** 显式选择环境；PROD 可同时固定已发布版本，DEV 禁止绑定版本。 */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId,
@@ -398,11 +426,32 @@ public class OrchestrationService {
                                             RunRetryMetadata retryMetadata,
                                             UUID useVersionId,
                                             RunEnvironment environment) {
+        return triggerPipelineRunInternal(
+                dagId, trigger, context, retryMetadata, useVersionId, environment, null);
+    }
+
+    private UUID triggerPipelineRunInternal(UUID dagId,
+                                            TriggerType trigger,
+                                            RunContext context,
+                                            RunRetryMetadata retryMetadata,
+                                            UUID useVersionId,
+                                            RunEnvironment environment,
+                                            String eventTriggerKey) {
         UUID tenantId = TenantContext.getTenantId();
         if (tenantId == null) {
             throw new BizException(40100, "Tenant context required to trigger pipeline");
         }
         Dag liveDag = findTenantDag(dagId);
+        if (StringUtils.hasText(eventTriggerKey)) {
+            UUID existingRunId = runRepo.findByDagIdAndEventTriggerKey(dagId, eventTriggerKey)
+                    .map(JobRun::getId)
+                    .orElse(null);
+            if (existingRunId != null) {
+                log.info("流水线 {} EVENT 触发键 {} 已存在，复用运行 {}",
+                        dagId, eventTriggerKey, existingRunId);
+                return existingRunId;
+            }
+        }
         RunEnvironment selectedEnvironment = environment == null
                 ? RunEnvironment.PROD
                 : environment;
@@ -479,6 +528,7 @@ public class OrchestrationService {
         run.setDataIntervalEnd(runContext.dataIntervalEnd());
         run.setBackfillId(runContext.backfillId());
         run.setPipelineVersionId(selectedVersionId);
+        run.setEventTriggerKey(eventTriggerKey);
         run.setTimezone(runContext.timezone());
         run.setRunMode(runContext.runMode());
         run.setDagsterJob(activeJobName);
@@ -488,7 +538,8 @@ public class OrchestrationService {
         }
         // V14 为 CRON logical_date 建立了唯一索引。此处立即 flush，确保重复调度在
         // 启动 Dagster 前被识别，由 PipelineSchedulerService 安全地当作已触发处理。
-        if (trigger == TriggerType.CRON && runContext.logicalDate() != null) {
+        if ((trigger == TriggerType.CRON && runContext.logicalDate() != null)
+                || StringUtils.hasText(eventTriggerKey)) {
             runRepo.saveAndFlush(run);
         } else {
             runRepo.save(run);
@@ -2023,6 +2074,8 @@ public class OrchestrationService {
         payload.put("pipelineId", dag.getId().toString());
         payload.put("tenantId", tenantId.toString());
         payload.put("runId", run.getId().toString());
+        if (run.getBackfillId() != null) payload.put("batchId", run.getBackfillId().toString());
+        if (run.getLogicalDate() != null) payload.put("logicalDate", run.getLogicalDate().toString());
         payload.put("taskKey", tr.getTaskKey());
         payload.put("taskType", task == null || task.getTaskType() == null ? null : task.getTaskType().name());
         payload.put("taskName", task == null ? tr.getTaskKey() : task.getName());

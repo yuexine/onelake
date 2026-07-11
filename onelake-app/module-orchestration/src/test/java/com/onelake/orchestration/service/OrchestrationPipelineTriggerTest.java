@@ -212,6 +212,62 @@ class OrchestrationPipelineTriggerTest {
     }
 
     @Test
+    void eventRunPersistsIdempotencyKeyBeforeDagsterLaunch() {
+        Dag liveDag = pipelineDag();
+        Dag snapshotDag = pipelineDag();
+        PipelineTask task = task("event_task", true);
+        UUID versionId = stubPublishedExecution(
+                liveDag, snapshotDag, List.of(task), List.of(), validPlan("event_task"));
+        String triggerKey = "a".repeat(64);
+        Instant logicalDate = Instant.parse("2026-07-10T00:00:00Z");
+        when(dagster.launch(anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn("dagster-event-idempotent");
+
+        UUID runId = service.triggerPipelineRun(
+                DAG_ID,
+                TriggerType.EVENT,
+                new RunContext(logicalDate, null, null, null, null, null, TriggerType.EVENT),
+                versionId,
+                triggerKey);
+
+        ArgumentCaptor<JobRun> persisted = ArgumentCaptor.forClass(JobRun.class);
+        verify(runRepo).saveAndFlush(persisted.capture());
+        assertThat(persisted.getValue().getId()).isEqualTo(runId);
+        assertThat(persisted.getValue().getEventTriggerKey()).isEqualTo(triggerKey);
+        assertThat(persisted.getValue().getPipelineVersionId()).isEqualTo(versionId);
+        verify(dagster).launch(anyString(), anyString(), anyString(), any(), anyList());
+    }
+
+    @Test
+    void eventRetryReusesExistingRunWithoutLaunchingDagsterAgain() {
+        Dag liveDag = pipelineDag();
+        UUID versionId = UUID.randomUUID();
+        liveDag.setPublishedVersionId(versionId);
+        String triggerKey = "b".repeat(64);
+        JobRun existing = new JobRun();
+        existing.setId(UUID.randomUUID());
+        existing.setDagId(DAG_ID);
+        existing.setTriggerType(TriggerType.EVENT);
+        existing.setPipelineVersionId(versionId);
+        existing.setEventTriggerKey(triggerKey);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(liveDag));
+        when(runRepo.findByDagIdAndEventTriggerKey(DAG_ID, triggerKey))
+                .thenReturn(Optional.of(existing));
+
+        UUID runId = service.triggerPipelineRun(
+                DAG_ID,
+                TriggerType.EVENT,
+                RunContext.empty(TriggerType.EVENT),
+                versionId,
+                triggerKey);
+
+        assertThat(runId).isEqualTo(existing.getId());
+        verifyNoInteractions(snapshotService, compileService, dagster);
+        verify(runRepo, never()).save(any(JobRun.class));
+        verify(runRepo, never()).saveAndFlush(any(JobRun.class));
+    }
+
+    @Test
     void devRunUsesEditedDraftEvenWhenPublishedVersionExists() {
         UUID versionId = UUID.randomUUID();
         Dag liveDag = pipelineDag();

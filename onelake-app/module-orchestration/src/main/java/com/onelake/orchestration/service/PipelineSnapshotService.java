@@ -76,6 +76,8 @@ public class PipelineSnapshotService {
         SnapshotPayload payload = snapshot(dag);
         PipelineVersion version = versionRepo
                 .findFirstByDagIdAndChecksumOrderByVersionDesc(dagId, payload.checksum())
+                .filter(candidate -> dag.getPublishedVersionId() != null
+                        && dag.getPublishedVersionId().equals(candidate.getId()))
                 .orElseGet(() -> createVersion(dag, payload));
         dag.setPublishedVersionId(version.getId());
         dag.setHasUnpublishedChanges(false);
@@ -131,6 +133,16 @@ public class PipelineSnapshotService {
         PipelineVersion version = versionRepo.findById(versionId)
                 .filter(candidate -> tenantId.equals(candidate.getTenantId()))
                 .filter(candidate -> expectedDagId == null || expectedDagId.equals(candidate.getDagId()))
+                .orElseThrow(() -> new BizException(40400, "Pipeline 版本不存在"));
+        return decode(version);
+    }
+
+    /** 按 DAG 内版本号读取并重建快照，供版本回滚覆盖 DEV 草稿。 */
+    @Transactional(readOnly = true)
+    public ExecutionSnapshot loadExecutionSnapshot(UUID dagId, Integer versionNumber) {
+        Dag dag = requireTenantDag(dagId);
+        PipelineVersion version = versionRepo.findByDagIdAndVersion(dagId, versionNumber)
+                .filter(candidate -> dag.getTenantId().equals(candidate.getTenantId()))
                 .orElseThrow(() -> new BizException(40400, "Pipeline 版本不存在"));
         return decode(version);
     }

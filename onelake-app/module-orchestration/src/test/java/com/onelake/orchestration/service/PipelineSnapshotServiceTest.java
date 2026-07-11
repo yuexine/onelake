@@ -128,6 +128,32 @@ class PipelineSnapshotServiceTest {
     }
 
     @Test
+    void publishingRolledBackHistoricalContentCreatesNextLinearVersion() {
+        PipelineSnapshotService.SnapshotPayload payload = service.snapshot(DAG_ID);
+        PipelineVersion historicalMatch = version(1, payload.json());
+        historicalMatch.setChecksum(payload.checksum());
+        PipelineVersion currentPublished = version(2, "{\"different\":true}");
+        dag.setPublishedVersionId(currentPublished.getId());
+        when(dagRepo.findByIdForUpdate(DAG_ID)).thenReturn(Optional.of(dag));
+        when(versionRepo.findFirstByDagIdAndChecksumOrderByVersionDesc(DAG_ID, payload.checksum()))
+                .thenReturn(Optional.of(historicalMatch));
+        when(versionRepo.findByDagIdOrderByVersionDesc(DAG_ID))
+                .thenReturn(List.of(currentPublished, historicalMatch));
+        when(versionRepo.save(any(PipelineVersion.class))).thenAnswer(invocation -> {
+            PipelineVersion saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+
+        PipelineVersion republished = service.publishSnapshot(DAG_ID);
+
+        assertThat(republished.getVersion()).isEqualTo(3);
+        assertThat(republished.getId()).isNotEqualTo(historicalMatch.getId());
+        assertThat(dag.getPublishedVersionId()).isEqualTo(republished.getId());
+        verify(versionRepo).save(any(PipelineVersion.class));
+    }
+
+    @Test
     void editingDraftAfterPublishDoesNotChangeStoredExecutionSnapshot() {
         AtomicReference<PipelineVersion> stored = new AtomicReference<>();
         when(dagRepo.findByIdForUpdate(DAG_ID)).thenReturn(Optional.of(dag));

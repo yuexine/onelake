@@ -4,6 +4,7 @@ import com.onelake.orchestration.domain.entity.PipelineTask;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -17,6 +18,23 @@ import java.util.UUID;
  */
 @Repository
 public interface PipelineTaskRepository extends JpaRepository<PipelineTask, UUID> {
+
+    /** 回滚版本时整组删除当前 DEV 草稿节点。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("delete from PipelineTask pt where pt.dagId = :dagId")
+    int deleteDraftByDagId(@Param("dagId") UUID dagId);
+
+    /** Hibernate 插入回滚节点后，把生成主键恢复为不可变快照中的技术主键。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+            UPDATE orchestration.pipeline_task
+               SET id = :snapshotId
+             WHERE id = :generatedId
+               AND dag_id = :dagId
+            """, nativeQuery = true)
+    int restoreSnapshotId(@Param("dagId") UUID dagId,
+                          @Param("generatedId") UUID generatedId,
+                          @Param("snapshotId") UUID snapshotId);
 
     /** 按创建顺序返回流水线节点，供编辑器和无显式拓扑时保持稳定顺序。 */
     List<PipelineTask> findByDagIdOrderByCreatedAtAsc(UUID dagId);

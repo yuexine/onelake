@@ -2,6 +2,7 @@ package com.onelake.orchestration.repository;
 
 import com.onelake.orchestration.domain.entity.PipelineParam;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -13,6 +14,31 @@ import java.util.UUID;
 /** 流水线三级参数持久化接口。 */
 @Repository
 public interface PipelineParamRepository extends JpaRepository<PipelineParam, UUID> {
+
+    /** 回滚版本时只替换当前 Pipeline 的 PIPELINE/TASK 草稿参数。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            delete from PipelineParam p
+             where p.tenantId = :tenantId
+               and p.dagId = :dagId
+               and p.scope in ('PIPELINE', 'TASK')
+            """)
+    int deleteDraftByTenantIdAndDagId(@Param("tenantId") UUID tenantId,
+                                      @Param("dagId") UUID dagId);
+
+    /** Hibernate 插入回滚参数后，把生成主键恢复为不可变快照中的技术主键。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+            UPDATE orchestration.pipeline_param
+               SET id = :snapshotId
+             WHERE id = :generatedId
+               AND tenant_id = :tenantId
+               AND dag_id = :dagId
+            """, nativeQuery = true)
+    int restoreSnapshotId(@Param("tenantId") UUID tenantId,
+                          @Param("dagId") UUID dagId,
+                          @Param("generatedId") UUID generatedId,
+                          @Param("snapshotId") UUID snapshotId);
 
     /** 查询租户的全局作用域参数。 */
     List<PipelineParam> findByTenantIdAndScope(UUID tenantId, String scope);

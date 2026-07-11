@@ -66,6 +66,7 @@ import type {
   DagScheduling,
   UpdateDagSchedulingRequest,
   ScheduleCalendar,
+  ScheduleWait,
   PipelineDependency,
   CreatePipelineDependencyRequest,
   PipelineParam,
@@ -373,6 +374,8 @@ export const SchedulingAPI = {
     unwrap<DagScheduling>(http.put(`/orchestration/pipelines/${dagId}/scheduling`, payload)),
   listCalendars: () =>
     unwrap<ScheduleCalendar[]>(http.get('/orchestration/schedule-calendars')),
+  listWaits: (dagId: string) =>
+    unwrap<ScheduleWait[]>(http.get(`/orchestration/pipelines/${dagId}/schedule-waits`)),
 };
 
 export const DependencyAPI = {

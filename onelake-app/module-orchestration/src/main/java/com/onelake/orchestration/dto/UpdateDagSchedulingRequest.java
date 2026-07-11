@@ -10,6 +10,8 @@ public record UpdateDagSchedulingRequest(
         Integer maxActiveRuns,
         Integer priority,
         String scheduleMode,
+        String misfirePolicy,
+        Integer dependencyWaitTimeoutMinutes,
         Integer slaMinutes,
         Integer timeoutMinutes,
         Integer runRetryCount,

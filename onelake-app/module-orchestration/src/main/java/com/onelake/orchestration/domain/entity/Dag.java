@@ -97,6 +97,10 @@ public class Dag {
     @Column(nullable = false, length = 16)
     private String misfirePolicy = "FIRE_ONCE";
 
+    /** 依赖或并发阻塞的计划点最多等待多久；超时后保留审计记录但不再触发。 */
+    @Column(nullable = false)
+    private Integer dependencyWaitTimeoutMinutes = 1440;
+
     /** 可选的租户调度日历；命中 HOLIDAY 的计划点不触发。 */
     private UUID calendarId;
     /** 调度有效期左边界，包含该时刻。 */

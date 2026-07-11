@@ -8,6 +8,7 @@ import com.onelake.orchestration.dto.DagSchedulingDTO;
 import com.onelake.orchestration.dto.UpdateDagSchedulingRequest;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.ScheduleCalendarRepository;
+import com.onelake.orchestration.repository.PipelineDependencyWaitRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,13 +39,14 @@ class PipelineSchedulingServiceTest {
 
     @Mock private DagRepository dagRepo;
     @Mock private ScheduleCalendarRepository calendarRepo;
+    @Mock private PipelineDependencyWaitRepository scheduleWaitRepo;
 
     private PipelineSchedulingService service;
 
     @BeforeEach
     void setUp() {
         TenantContext.setTenantId(TENANT_ID);
-        service = new PipelineSchedulingService(dagRepo, calendarRepo);
+        service = new PipelineSchedulingService(dagRepo, calendarRepo, scheduleWaitRepo);
     }
 
     @AfterEach
@@ -67,7 +69,8 @@ class PipelineSchedulingServiceTest {
                 .thenReturn(Optional.of(calendar));
         when(dagRepo.updateSchedulingPolicy(
                 any(UUID.class), any(UUID.class), anyString(), anyBoolean(),
-                anyInt(), anyInt(), anyString(), any(), any(), anyInt(), anyInt(), any(UUID.class),
+                anyInt(), anyInt(), anyString(), anyString(), anyInt(), any(), any(),
+                anyInt(), anyInt(), any(UUID.class),
                 any(Instant.class), any(Instant.class)))
                 .thenReturn(1);
 
@@ -78,6 +81,8 @@ class PipelineSchedulingServiceTest {
         persisted.setMaxActiveRuns(2);
         persisted.setPriority(9);
         persisted.setScheduleMode("DRY_RUN");
+        persisted.setMisfirePolicy("SKIP");
+        persisted.setDependencyWaitTimeoutMinutes(180);
         persisted.setSlaMinutes(60);
         persisted.setTimeoutMinutes(120);
         persisted.setRunRetryCount(3);
@@ -89,12 +94,14 @@ class PipelineSchedulingServiceTest {
                 dag.getId(),
                 new UpdateDagSchedulingRequest(
                         "Asia/Shanghai", true, 2, 9, "dry_run",
-                        60, 120, 3, 30, calendarId, start, end));
+                        "skip", 180, 60, 120, 3, 30, calendarId, start, end));
 
         assertThat(result.scheduleMode()).isEqualTo("DRY_RUN");
         assertThat(result.catchup()).isTrue();
         assertThat(result.maxActiveRuns()).isEqualTo(2);
         assertThat(result.priority()).isEqualTo(9);
+        assertThat(result.misfirePolicy()).isEqualTo("SKIP");
+        assertThat(result.dependencyWaitTimeoutMinutes()).isEqualTo(180);
         assertThat(result.runRetryCount()).isEqualTo(3);
         assertThat(result.runRetryIntervalSeconds()).isEqualTo(30);
         assertThat(result.calendarId()).isEqualTo(calendarId);
@@ -102,7 +109,7 @@ class PipelineSchedulingServiceTest {
         assertThat(result.scheduleEnd()).isEqualTo(end);
         verify(dagRepo).updateSchedulingPolicy(
                 dag.getId(), TENANT_ID, "Asia/Shanghai", true, 2, 9,
-                "DRY_RUN", 60, 120, 3, 30, calendarId, start, end);
+                "DRY_RUN", "SKIP", 180, 60, 120, 3, 30, calendarId, start, end);
         verify(dagRepo, never()).save(any(Dag.class));
     }
 
@@ -116,7 +123,7 @@ class PipelineSchedulingServiceTest {
                 dag.getId(),
                 new UpdateDagSchedulingRequest(
                         "Mars/Olympus", false, 1, 5, "NORMAL",
-                        null, null, 0, 0, null, null, null)))
+                        "FIRE_ONCE", 1440, null, null, 0, 0, null, null, null)))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("timezone");
 
@@ -124,7 +131,7 @@ class PipelineSchedulingServiceTest {
                 dag.getId(),
                 new UpdateDagSchedulingRequest(
                         "UTC", false, 1, 5, "NORMAL",
-                        null, null, 0, 0, null,
+                        "FIRE_ONCE", 1440, null, null, 0, 0, null,
                         Instant.parse("2026-08-10T00:00:00Z"),
                         Instant.parse("2026-07-10T00:00:00Z"))))
                 .isInstanceOf(BizException.class)
@@ -134,7 +141,7 @@ class PipelineSchedulingServiceTest {
                 dag.getId(),
                 new UpdateDagSchedulingRequest(
                         "UTC", false, 1, 5, "NORMAL",
-                        null, null, -1, 0, null, null, null)))
+                        "FIRE_ONCE", 1440, null, null, -1, 0, null, null, null)))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("runRetryCount");
     }
@@ -152,7 +159,7 @@ class PipelineSchedulingServiceTest {
                 .thenReturn(Optional.of(dag), Optional.of(persisted));
         when(dagRepo.updateSchedulingPolicy(
                 any(UUID.class), any(UUID.class), anyString(), anyBoolean(),
-                anyInt(), anyInt(), anyString(), any(), any(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyString(), anyString(), anyInt(), any(), any(), anyInt(), anyInt(),
                 any(), any(), any()))
                 .thenReturn(1);
 
@@ -160,13 +167,13 @@ class PipelineSchedulingServiceTest {
                 dag.getId(),
                 new UpdateDagSchedulingRequest(
                         "UTC", false, 1, 5, "NORMAL",
-                        null, null, null, null, null, null, null));
+                        null, null, null, null, null, null, null, null, null));
 
         assertThat(result.runRetryCount()).isEqualTo(2);
         assertThat(result.runRetryIntervalSeconds()).isEqualTo(45);
         verify(dagRepo).updateSchedulingPolicy(
                 dag.getId(), TENANT_ID, "UTC", false, 1, 5,
-                "NORMAL", null, null, 2, 45, null, null, null);
+                "NORMAL", "FIRE_ONCE", 1440, null, null, 2, 45, null, null, null);
     }
 
     private Dag dag() {

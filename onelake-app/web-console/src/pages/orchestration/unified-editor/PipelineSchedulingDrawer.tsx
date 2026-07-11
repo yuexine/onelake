@@ -35,10 +35,12 @@ import type {
   CreatePipelineDependencyRequest,
   Dag,
   DagScheduling,
+  MisfirePolicy,
   PipelineDependency,
   PipelineDependencyOffsetGrain,
   PipelineDependencyType,
   ScheduleCalendar,
+  ScheduleWait,
   ScheduleMode,
   UpdateDagSchedulingRequest,
 } from '../../../types';
@@ -62,6 +64,8 @@ interface SchedulingFormValues {
   maxActiveRuns: number;
   priority: number;
   scheduleMode: ScheduleMode;
+  misfirePolicy: MisfirePolicy;
+  dependencyWaitTimeoutMinutes: number;
   slaMinutes?: number;
   timeoutMinutes?: number;
   runRetryCount: number;
@@ -98,6 +102,11 @@ const SCHEDULE_MODE_LABEL: Record<ScheduleMode, string> = {
   DRY_RUN: '空跑',
   FROZEN: '冻结',
 };
+
+const MISFIRE_POLICY_OPTIONS = [
+  { value: 'FIRE_ONCE', label: '有槽位后补触发一次' },
+  { value: 'SKIP', label: '直接跳过错过周期' },
+];
 
 const GRAIN_LABEL: Record<PipelineDependencyOffsetGrain, string> = {
   HOUR: '小时',
@@ -171,6 +180,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
   const [calendars, setCalendars] = useState<ScheduleCalendar[]>([]);
   const [dags, setDags] = useState<Dag[]>([]);
   const [dependencies, setDependencies] = useState<PipelineDependency[]>([]);
+  const [scheduleWaits, setScheduleWaits] = useState<ScheduleWait[]>([]);
   const [dependencyGraph, setDependencyGraph] = useState<Map<string, PipelineDependency[]>>(new Map());
   const [graphComplete, setGraphComplete] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -210,6 +220,8 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
       maxActiveRuns: value.maxActiveRuns,
       priority: value.priority,
       scheduleMode: value.scheduleMode,
+      misfirePolicy: value.misfirePolicy,
+      dependencyWaitTimeoutMinutes: value.dependencyWaitTimeoutMinutes,
       slaMinutes: value.slaMinutes,
       timeoutMinutes: value.timeoutMinutes,
       runRetryCount: value.runRetryCount,
@@ -232,13 +244,14 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
     setCalendars([]);
     setDags([]);
     setDependencies([]);
+    setScheduleWaits([]);
     setDependencyGraph(new Map());
     setGraphComplete(true);
     schedulingForm.resetFields();
     dependencyForm.resetFields();
     try {
       const [
-        [nextScheduling, nextCalendars, nextDags, nextDependencies],
+        [nextScheduling, nextCalendars, nextDags, nextDependencies, nextScheduleWaits],
         [graphResult],
       ] = await Promise.all([
         Promise.all([
@@ -246,6 +259,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
           SchedulingAPI.listCalendars(),
           OrchestrationAPI.listDags(),
           DependencyAPI.list(dagId),
+          SchedulingAPI.listWaits(dagId),
         ]),
         Promise.allSettled([DependencyAPI.listEnabled()]),
       ]);
@@ -255,6 +269,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
       setCalendars(nextCalendars);
       setDags(nextDags);
       setDependencies(nextDependencies);
+      setScheduleWaits(nextScheduleWaits);
       applySchedulingToForm(nextScheduling);
       dependencyForm.setFieldsValue({
         dependencyType: 'SAME_CYCLE',
@@ -304,6 +319,8 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
       maxActiveRuns: values.maxActiveRuns,
       priority: values.priority,
       scheduleMode: values.scheduleMode,
+      misfirePolicy: values.misfirePolicy,
+      dependencyWaitTimeoutMinutes: values.dependencyWaitTimeoutMinutes,
       slaMinutes: values.slaMinutes ?? null,
       timeoutMinutes: values.timeoutMinutes ?? null,
       runRetryCount: values.runRetryCount,
@@ -390,6 +407,8 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
         maxActiveRuns: 1,
         priority: 5,
         scheduleMode: 'NORMAL',
+        misfirePolicy: 'FIRE_ONCE',
+        dependencyWaitTimeoutMinutes: 1440,
         runRetryCount: 0,
         runRetryIntervalSeconds: 0,
       }}
@@ -423,6 +442,17 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
         </Form.Item>
         <Form.Item name="priority" label="调度优先级" rules={[{ required: true }]} tooltip="数值越大，同一调度周期内越先触发">
           <InputNumber min={0} max={100} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="misfirePolicy" label="错过周期策略" rules={[{ required: true }]}>
+          <Select options={MISFIRE_POLICY_OPTIONS} />
+        </Form.Item>
+        <Form.Item
+          name="dependencyWaitTimeoutMinutes"
+          label="计划点最长等待（分钟）"
+          tooltip="适用于上游未就绪和 FIRE_ONCE 等待；超时后保留审计记录但不再触发"
+          rules={[{ required: true }]}
+        >
+          <InputNumber min={1} max={43200} precision={0} style={{ width: '100%' }} />
         </Form.Item>
         <Form.Item name="slaMinutes" label="SLA（分钟）" tooltip="为空时不监控计划完成时限">
           <InputNumber min={1} max={525600} precision={0} placeholder="不设置" style={{ width: '100%' }} />
@@ -598,6 +628,61 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
     </Space>
   );
 
+  const waitPanel = (
+    <Table<ScheduleWait>
+      rowKey="id"
+      size="small"
+      pagination={{ pageSize: 10, hideOnSinglePage: true }}
+      dataSource={scheduleWaits}
+      columns={[
+        {
+          title: '状态',
+          dataIndex: 'status',
+          width: 110,
+          render: (status: string) => {
+            const color = status === 'RESOLVED' ? 'green'
+              : status === 'WAITING' ? 'blue'
+                : status === 'TIMED_OUT' ? 'red' : 'default';
+            return <Tag color={color}>{status}</Tag>;
+          },
+        },
+        {
+          title: '原因',
+          dataIndex: 'waitReason',
+          width: 120,
+          render: (reason: string) => reason === 'MISFIRE' ? '并发限流' : '上游依赖',
+        },
+        {
+          title: '业务日期',
+          dataIndex: 'logicalDate',
+          width: 180,
+          render: (value: string) => dayjs(value).format('YYYY-MM-DD HH:mm:ss'),
+        },
+        {
+          title: '最近原因',
+          dataIndex: 'lastBlockers',
+          ellipsis: true,
+          render: (value?: string) => value || '—',
+        },
+        {
+          title: '失效时间',
+          dataIndex: 'expiresAt',
+          width: 180,
+          render: (value: string) => dayjs(value).format('YYYY-MM-DD HH:mm:ss'),
+        },
+      ]}
+      locale={{
+        emptyText: (
+          <StateView
+            state="empty"
+            title="暂无等待计划点"
+            description="当前没有因上游依赖或最大并发限制而等待的调度周期。"
+          />
+        ),
+      }}
+    />
+  );
+
   let content;
   if (!canManage) {
     content = (
@@ -624,6 +709,7 @@ export function PipelineSchedulingDrawer({ dagId, open, onClose }: Props) {
         items={[
           { key: 'scheduling', label: '调度配置', children: schedulePanel },
           { key: 'dependencies', label: `依赖 (${dependencies.length})`, icon: <LinkOutlined />, children: dependencyPanel },
+          { key: 'waits', label: `等待记录 (${scheduleWaits.length})`, children: waitPanel },
         ]}
       />
     );

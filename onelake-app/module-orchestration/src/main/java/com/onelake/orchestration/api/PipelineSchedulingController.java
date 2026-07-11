@@ -3,6 +3,7 @@ package com.onelake.orchestration.api;
 import com.onelake.common.api.ApiResponse;
 import com.onelake.orchestration.dto.DagSchedulingDTO;
 import com.onelake.orchestration.dto.ScheduleCalendarDTO;
+import com.onelake.orchestration.dto.ScheduleWaitDTO;
 import com.onelake.orchestration.dto.UpdateDagSchedulingRequest;
 import com.onelake.orchestration.service.PipelineSchedulingService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -48,5 +49,12 @@ public class PipelineSchedulingController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<List<ScheduleCalendarDTO>> calendars() {
         return ApiResponse.ok(schedulingService.listCalendars());
+    }
+
+    @Operation(summary = "列出流水线调度等待记录")
+    @GetMapping("/pipelines/{dagId}/schedule-waits")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<List<ScheduleWaitDTO>> waits(@PathVariable UUID dagId) {
+        return ApiResponse.ok(schedulingService.listScheduleWaits(dagId));
     }
 }

@@ -35,6 +35,22 @@ public class PipelineDependencyWait {
     @Column(nullable = false)
     private Instant scheduledAt;
 
+    /** DEPENDENCY 表示上游未就绪，MISFIRE 表示 max_active_runs 暂无槽位。 */
+    @Column(nullable = false, length = 16)
+    private String waitReason = "DEPENDENCY";
+
+    /** WAITING、RESOLVED、TIMED_OUT 或 CANCELLED。 */
+    @Column(nullable = false, length = 16)
+    private String status = "WAITING";
+
+    @Column(length = 2000)
+    private String lastBlockers;
+
+    @Column(nullable = false)
+    private Instant expiresAt;
+
+    private Instant resolvedAt;
+
     @Column(nullable = false)
     private Instant createdAt = Instant.now();
 

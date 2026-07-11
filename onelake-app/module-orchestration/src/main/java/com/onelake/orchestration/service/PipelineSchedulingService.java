@@ -5,9 +5,11 @@ import com.onelake.common.exception.BizException;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.dto.DagSchedulingDTO;
 import com.onelake.orchestration.dto.ScheduleCalendarDTO;
+import com.onelake.orchestration.dto.ScheduleWaitDTO;
 import com.onelake.orchestration.dto.UpdateDagSchedulingRequest;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.ScheduleCalendarRepository;
+import com.onelake.orchestration.repository.PipelineDependencyWaitRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,9 +28,11 @@ import java.util.UUID;
 public class PipelineSchedulingService {
 
     private static final Set<String> SCHEDULE_MODES = Set.of("NORMAL", "DRY_RUN", "FROZEN");
+    private static final Set<String> MISFIRE_POLICIES = Set.of("FIRE_ONCE", "SKIP");
 
     private final DagRepository dagRepo;
     private final ScheduleCalendarRepository calendarRepo;
+    private final PipelineDependencyWaitRepository scheduleWaitRepo;
 
     /** 读取当前租户内流水线的完整生产调度策略。 */
     @Transactional(readOnly = true)
@@ -41,6 +45,18 @@ public class PipelineSchedulingService {
     public List<ScheduleCalendarDTO> listCalendars() {
         return calendarRepo.findByTenantIdOrderByNameAsc(requireTenant()).stream()
                 .map(ScheduleCalendarDTO::of)
+                .toList();
+    }
+
+    /** 查询指定流水线最近的调度等待记录，包含已解决、超时和取消终态。 */
+    @Transactional(readOnly = true)
+    public List<ScheduleWaitDTO> listScheduleWaits(UUID dagId) {
+        UUID tenantId = requireTenant();
+        requireDag(dagId, tenantId);
+        return scheduleWaitRepo
+                .findTop100ByDagIdAndTenantIdOrderByCreatedAtDesc(dagId, tenantId)
+                .stream()
+                .map(ScheduleWaitDTO::of)
                 .toList();
     }
 
@@ -57,6 +73,14 @@ public class PipelineSchedulingService {
         int maxActiveRuns = requireRange(request.maxActiveRuns(), 1, 100, "maxActiveRuns");
         int priority = requireRange(request.priority(), 0, 100, "priority");
         String scheduleMode = normalizeMode(request.scheduleMode());
+        String misfirePolicy = request.misfirePolicy() == null
+                ? normalizeMisfirePolicy(dag.getMisfirePolicy())
+                : normalizeMisfirePolicy(request.misfirePolicy());
+        int dependencyWaitTimeoutMinutes = request.dependencyWaitTimeoutMinutes() == null
+                ? Math.max(1, dag.getDependencyWaitTimeoutMinutes() == null
+                        ? 1440 : dag.getDependencyWaitTimeoutMinutes())
+                : requireRange(request.dependencyWaitTimeoutMinutes(), 1, 43_200,
+                        "dependencyWaitTimeoutMinutes");
         requirePositive(request.slaMinutes(), "slaMinutes");
         requirePositive(request.timeoutMinutes(), "timeoutMinutes");
         int runRetryCount = request.runRetryCount() == null
@@ -82,6 +106,8 @@ public class PipelineSchedulingService {
                 maxActiveRuns,
                 priority,
                 scheduleMode,
+                misfirePolicy,
+                dependencyWaitTimeoutMinutes,
                 request.slaMinutes(),
                 request.timeoutMinutes(),
                 runRetryCount,
@@ -136,6 +162,16 @@ public class PipelineSchedulingService {
             throw new BizException(40023, "scheduleMode 仅支持 NORMAL、DRY_RUN 或 FROZEN");
         }
         return mode;
+    }
+
+    private String normalizeMisfirePolicy(String value) {
+        String policy = StringUtils.hasText(value)
+                ? value.trim().toUpperCase(Locale.ROOT)
+                : "FIRE_ONCE";
+        if (!MISFIRE_POLICIES.contains(policy)) {
+            throw new BizException(40023, "misfirePolicy 仅支持 FIRE_ONCE 或 SKIP");
+        }
+        return policy;
     }
 
     private void requirePositive(Integer value, String field) {

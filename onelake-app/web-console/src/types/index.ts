@@ -112,6 +112,7 @@ export interface Dag {
 }
 
 export type ScheduleMode = 'NORMAL' | 'DRY_RUN' | 'FROZEN';
+export type MisfirePolicy = 'FIRE_ONCE' | 'SKIP';
 
 export interface DagScheduling {
   dagId: UUID;
@@ -120,6 +121,8 @@ export interface DagScheduling {
   maxActiveRuns: number;
   priority: number;
   scheduleMode: ScheduleMode;
+  misfirePolicy: MisfirePolicy;
+  dependencyWaitTimeoutMinutes: number;
   slaMinutes?: number;
   timeoutMinutes?: number;
   runRetryCount: number;
@@ -135,6 +138,8 @@ export interface UpdateDagSchedulingRequest {
   maxActiveRuns: number;
   priority: number;
   scheduleMode: ScheduleMode;
+  misfirePolicy: MisfirePolicy;
+  dependencyWaitTimeoutMinutes: number;
   slaMinutes?: number | null;
   timeoutMinutes?: number | null;
   runRetryCount: number;
@@ -149,6 +154,22 @@ export interface ScheduleCalendar {
   name: string;
   timezone: string;
   createdAt: string;
+}
+
+export type ScheduleWaitStatus = 'WAITING' | 'RESOLVED' | 'TIMED_OUT' | 'CANCELLED';
+
+export interface ScheduleWait {
+  id: UUID;
+  dagId: UUID;
+  logicalDate: string;
+  scheduledAt: string;
+  waitReason: 'DEPENDENCY' | 'MISFIRE' | string;
+  status: ScheduleWaitStatus | string;
+  lastBlockers?: string;
+  expiresAt: string;
+  resolvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type PipelineDependencyType = 'SAME_CYCLE' | 'CROSS_CYCLE';

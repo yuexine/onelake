@@ -51,6 +51,9 @@ public class PipelineSchedulerService {
     /** JobRun 统一状态中仅 QUEUED/RUNNING 属于非终态，占用 DAG 并发槽位。 */
     private static final List<DagStatus> ACTIVE_RUN_STATUSES =
             List.of(DagStatus.QUEUED, DagStatus.RUNNING);
+    private static final String WAITING = "WAITING";
+    private static final String WAIT_REASON_DEPENDENCY = "DEPENDENCY";
+    private static final String WAIT_REASON_MISFIRE = "MISFIRE";
 
     /** 提供启用 DAG 的调度候选集合。 */
     private final DagRepository dagRepo;
@@ -101,7 +104,7 @@ public class PipelineSchedulerService {
         }
 
         try {
-            retryDependencyWaits();
+            retryDependencyWaits(tickAt);
             triggerDuePipelines(tickAt);
         } finally {
             try {
@@ -172,8 +175,8 @@ public class PipelineSchedulerService {
                 DependencyReadinessService.ReadinessResult readiness =
                         dependencyReadinessService.evaluate(dag, logicalDate);
                 if (!readiness.ready()) {
-                    dependencyWaitRepo.enqueue(
-                            dag.getTenantId(), dag.getId(), logicalDate, scheduledInstant);
+                    enqueueWait(dag, logicalDate, scheduledInstant, tickAt,
+                            WAIT_REASON_DEPENDENCY, readiness.summary());
                     log.info("PipelineSchedulerService：流水线 {} 等待上游/被阻塞，logicalDate={} blockers={}",
                             dag.getId(), logicalDate, readiness.summary());
                     continue;
@@ -182,10 +185,15 @@ public class PipelineSchedulerService {
                 int maxActiveRuns = Math.max(1, dag.getMaxActiveRuns() == null ? 1 : dag.getMaxActiveRuns());
                 long activeRuns = jobRunRepo.countByDagIdAndStatusIn(dag.getId(), ACTIVE_RUN_STATUSES);
                 if (activeRuns >= maxActiveRuns) {
-                    // 不创建第二条并发运行；记录计划点和策略，供运维追查 misfire。
+                    String policy = misfirePolicyOf(dag);
+                    if ("FIRE_ONCE".equals(policy)) {
+                        enqueueWait(dag, logicalDate, scheduledInstant, tickAt,
+                                WAIT_REASON_MISFIRE,
+                                "activeRuns=" + activeRuns + ", maxActiveRuns=" + maxActiveRuns);
+                    }
                     log.warn("PipelineSchedulerService：misfire dagId={} logicalDate={} activeRuns={} "
                                     + "maxActiveRuns={} policy={}",
-                            dag.getId(), scheduledInstant, activeRuns, maxActiveRuns, dag.getMisfirePolicy());
+                            dag.getId(), logicalDate, activeRuns, maxActiveRuns, policy);
                     continue;
                 }
 
@@ -248,12 +256,12 @@ public class PipelineSchedulerService {
      * 重判之前 tick 因依赖未就绪而保存的计划点。
      *
      * <p>等待记录使用原始 {@code scheduledAt} 触发，确保生成的 logical_date 与首次
-     * cron 命中一致；成功或唯一键确认已触发后才删除，其他异常保留到下一 tick。</p>
+     * cron 命中一致；成功或唯一键确认已触发后转为 RESOLVED，其他异常保留到下一 tick。</p>
      */
-    private void retryDependencyWaits() {
+    private void retryDependencyWaits(Instant tickAt) {
         List<PipelineDependencyWait> waits;
         try {
-            waits = dependencyWaitRepo.findAllByOrderByCreatedAtAscIdAsc();
+            waits = dependencyWaitRepo.findByStatusOrderByCreatedAtAscIdAsc(WAITING);
         } catch (RuntimeException e) {
             log.warn("PipelineSchedulerService：加载依赖等待计划点失败：{}", e.getMessage());
             return;
@@ -261,15 +269,29 @@ public class PipelineSchedulerService {
 
         for (PipelineDependencyWait wait : waits) {
             try {
+                if (wait.getExpiresAt() != null && !wait.getExpiresAt().isAfter(tickAt)) {
+                    dependencyWaitRepo.finish(
+                            wait.getId(), "TIMED_OUT", "等待超过 expiresAt=" + wait.getExpiresAt(), tickAt);
+                    log.warn("PipelineSchedulerService：等待计划点已超时 dagId={} logicalDate={} reason={}",
+                            wait.getDagId(), wait.getLogicalDate(), wait.getWaitReason());
+                    continue;
+                }
                 Optional<Dag> dagOptional = dagRepo.findByIdAndTenantId(
                         wait.getDagId(), wait.getTenantId());
                 if (dagOptional.isEmpty()) {
-                    dependencyWaitRepo.deleteById(wait.getId());
+                    dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "流水线已删除", tickAt);
                     continue;
                 }
                 Dag dag = dagOptional.get();
-                if (!isSchedulablePipeline(dag)
-                        || ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
+                if (!isSchedulablePipeline(dag)) {
+                    dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "流水线已停止生产调度", tickAt);
+                    continue;
+                }
+                if (dag.getScheduleEnd() != null && tickAt.isAfter(dag.getScheduleEnd())) {
+                    dependencyWaitRepo.finish(wait.getId(), "CANCELLED", "调度窗口已结束", tickAt);
+                    continue;
+                }
+                if (ScheduleMode.from(dag.getScheduleMode()) == ScheduleMode.FROZEN) {
                     continue;
                 }
 
@@ -277,6 +299,7 @@ public class PipelineSchedulerService {
                 DependencyReadinessService.ReadinessResult readiness =
                         dependencyReadinessService.evaluate(dag, wait.getLogicalDate());
                 if (!readiness.ready()) {
+                    dependencyWaitRepo.updateBlockers(wait.getId(), readiness.summary(), tickAt);
                     log.debug("PipelineSchedulerService：流水线 {} 仍等待上游，logicalDate={} blockers={}",
                             dag.getId(), wait.getLogicalDate(), readiness.summary());
                     continue;
@@ -287,13 +310,15 @@ public class PipelineSchedulerService {
                 long activeRuns = jobRunRepo.countByDagIdAndStatusIn(
                         dag.getId(), ACTIVE_RUN_STATUSES);
                 if (activeRuns >= maxActiveRuns) {
+                    dependencyWaitRepo.updateBlockers(wait.getId(),
+                            "activeRuns=" + activeRuns + ", maxActiveRuns=" + maxActiveRuns, tickAt);
                     continue;
                 }
 
                 try {
                     orchestrationService.triggerPipelineRun(
                             dag.getId(), TriggerType.CRON, wait.getScheduledAt());
-                    dependencyWaitRepo.deleteById(wait.getId());
+                    dependencyWaitRepo.finish(wait.getId(), "RESOLVED", "已触发运行", tickAt);
                     log.info("PipelineSchedulerService：依赖已就绪，恢复触发流水线 {} logicalDate={}",
                             dag.getId(), wait.getLogicalDate());
                 } catch (DataIntegrityViolationException e) {
@@ -303,8 +328,8 @@ public class PipelineSchedulerService {
                     if (!alreadyTriggered) {
                         throw e;
                     }
-                    dependencyWaitRepo.deleteById(wait.getId());
-                    log.info("PipelineSchedulerService：依赖等待计划点已由其他路径触发，清理 dagId={} logicalDate={}",
+                    dependencyWaitRepo.finish(wait.getId(), "RESOLVED", "运行已由其他路径触发", tickAt);
+                    log.info("PipelineSchedulerService：等待计划点已由其他路径触发，记录已解决 dagId={} logicalDate={}",
                             dag.getId(), wait.getLogicalDate());
                 }
             } catch (RuntimeException e) {
@@ -376,6 +401,28 @@ public class PipelineSchedulerService {
     private boolean isInsideScheduleWindow(Dag dag, Instant scheduledAt) {
         return (dag.getScheduleStart() == null || !scheduledAt.isBefore(dag.getScheduleStart()))
                 && (dag.getScheduleEnd() == null || !scheduledAt.isAfter(dag.getScheduleEnd()));
+    }
+
+    private void enqueueWait(Dag dag,
+                             Instant logicalDate,
+                             Instant scheduledAt,
+                             Instant tickAt,
+                             String reason,
+                             String blockers) {
+        int timeoutMinutes = Math.max(1, dag.getDependencyWaitTimeoutMinutes() == null
+                ? 1440 : dag.getDependencyWaitTimeoutMinutes());
+        dependencyWaitRepo.enqueue(
+                dag.getTenantId(),
+                dag.getId(),
+                logicalDate,
+                scheduledAt,
+                reason,
+                blockers,
+                tickAt.plus(Duration.ofMinutes(timeoutMinutes)));
+    }
+
+    private static String misfirePolicyOf(Dag dag) {
+        return "SKIP".equalsIgnoreCase(dag.getMisfirePolicy()) ? "SKIP" : "FIRE_ONCE";
     }
 
     /** 保留原调度入口约束：仅启用、已发布且使用统一流水线 Job 的 DAG 可进入 cron 调度。 */

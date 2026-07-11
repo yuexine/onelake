@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntApp } from 'antd';
-import { PipelineAPI, OrchestrationAPI, SecurityAPI } from '../../../api';
+import { PipelineAPI, PipelineVersionAPI, OrchestrationAPI, SecurityAPI } from '../../../api';
 import type {
   Pipeline,
   PipelineTask,
@@ -19,7 +19,40 @@ import type {
   PipelineValidationResult,
   TaskRun,
   JobRun,
+  ApprovalRequest,
 } from '../../../types';
+
+type PublishApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'STALE' | undefined;
+
+const APPROVAL_APPLY_GRACE_MS = 30_000;
+
+function publishApprovalView(
+  enabled: boolean,
+  pipeline: Pipeline,
+  latest: ApprovalRequest | null,
+): { status: PublishApprovalStatus; comment?: string } {
+  if (!enabled) return { status: undefined };
+  const cleanPublished = pipeline.status === 'PUBLISHED' && !pipeline.hasUnpublishedChanges;
+  let status: PublishApprovalStatus;
+  if (cleanPublished) {
+    status = latest?.status === 'APPROVED' ? 'APPROVED' : undefined;
+  } else if (latest?.status === 'PENDING' || latest?.status === 'REJECTED') {
+    status = latest.status;
+  } else if (latest?.status === 'APPROVED') {
+    const decidedAt = Date.parse(latest.decidedAt || latest.createdAt);
+    status = Number.isFinite(decidedAt) && Date.now() - decidedAt < APPROVAL_APPLY_GRACE_MS
+      ? 'PENDING'
+      : 'STALE';
+  }
+  return {
+    status,
+    comment: status === 'REJECTED'
+      ? (latest?.comment || '审批人未填写拒绝原因')
+      : status === 'STALE'
+        ? '审批已经通过，但送审快照未生成生产版本；草稿可能已在送审后发生变化，请重新提交审批。'
+      : latest?.comment,
+  };
+}
 
 export interface PipelineEditorState {
   loading: boolean;
@@ -40,20 +73,30 @@ export function usePipelineEditor(dagId: string | undefined) {
   const [selectedTaskKey, setSelectedTaskKey] = useState<string | undefined>(undefined);
   const [validation, setValidation] = useState<PipelineValidationResult | undefined>(undefined);
   const [saving, setSaving] = useState(false);
-  const [publishApprovalPending, setPublishApprovalPending] = useState(false);
-  const [publishApprovalRejectionReason, setPublishApprovalRejectionReason] = useState<string | undefined>(undefined);
+  const [currentPublishedVersion, setCurrentPublishedVersion] = useState<number | undefined>(undefined);
+  const [publishApprovalEnabled, setPublishApprovalEnabled] = useState(false);
+  const [publishApprovalStatus, setPublishApprovalStatus] = useState<PublishApprovalStatus>();
+  const [publishApprovalComment, setPublishApprovalComment] = useState<string | undefined>(undefined);
 
   // P6-A: live run state (auto-poll)
   const [latestRun, setLatestRun] = useState<JobRun | undefined>(undefined);
   const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const approvalPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const markPublishedDraftChanged = useCallback(() => {
     setPipeline((current) => current?.status === 'PUBLISHED'
       ? { ...current, hasUnpublishedChanges: true }
       : current);
-  }, []);
+    if (publishApprovalStatus === 'PENDING') {
+      setPublishApprovalStatus('STALE');
+      setPublishApprovalComment('草稿已在送审后修改，请重新提交审批。');
+    } else if (publishApprovalStatus === 'APPROVED' || publishApprovalStatus === 'REJECTED') {
+      setPublishApprovalStatus(undefined);
+      setPublishApprovalComment(undefined);
+    }
+  }, [publishApprovalStatus]);
 
   const loadAll = useCallback(async () => {
     if (!dagId) {
@@ -63,8 +106,10 @@ export function usePipelineEditor(dagId: string | undefined) {
       setEdges([]);
       setSelectedTaskKey(undefined);
       setValidation(undefined);
-      setPublishApprovalPending(false);
-      setPublishApprovalRejectionReason(undefined);
+      setCurrentPublishedVersion(undefined);
+      setPublishApprovalEnabled(false);
+      setPublishApprovalStatus(undefined);
+      setPublishApprovalComment(undefined);
       return;
     }
     setLoading(true);
@@ -78,24 +123,17 @@ export function usePipelineEditor(dagId: string | undefined) {
           .catch(() => ({ enabled: true })),
         SecurityAPI.publishApprovalState(dagId)
           .then((latest) => {
-            return {
-              pending: latest?.status === 'PENDING',
-              rejectionReason: latest?.status === 'REJECTED'
-                ? (latest.comment || '审批人未填写拒绝原因')
-                : undefined,
-            };
+            return latest;
           })
-          .catch(() => ({ pending: false, rejectionReason: undefined })),
+          .catch(() => null),
       ]);
       setPipeline(p);
       setTasks(ts);
       setEdges(es);
-      const cleanPublished = p.status === 'PUBLISHED' && !p.hasUnpublishedChanges;
-      const approvalRelevant = publishApprovalConfig.enabled && !cleanPublished;
-      setPublishApprovalPending(approvalRelevant && publishApprovalState.pending);
-      setPublishApprovalRejectionReason(
-        approvalRelevant ? publishApprovalState.rejectionReason : undefined,
-      );
+      setPublishApprovalEnabled(publishApprovalConfig.enabled);
+      const approval = publishApprovalView(publishApprovalConfig.enabled, p, publishApprovalState);
+      setPublishApprovalStatus(approval.status);
+      setPublishApprovalComment(approval.comment);
     } catch (err) {
       message.error(`加载流水线失败: ${(err as Error).message}`);
     } finally {
@@ -106,6 +144,95 @@ export function usePipelineEditor(dagId: string | undefined) {
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  // 版本号独立于编辑器主数据加载；瞬时失败时持续重试，避免把网络错误误判为“无版本”。
+  useEffect(() => {
+    const publishedVersionId = pipeline?.publishedVersionId;
+    if (!dagId || !publishedVersionId) {
+      setCurrentPublishedVersion(undefined);
+      return;
+    }
+
+    setCurrentPublishedVersion(undefined);
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const loadCurrentVersion = async () => {
+      try {
+        const versions = await PipelineVersionAPI.list(dagId);
+        if (cancelled) return;
+        const version = versions.find((item) => item.id === publishedVersionId)?.version;
+        if (version !== undefined) {
+          setCurrentPublishedVersion(version);
+          return;
+        }
+      } catch {
+        // 保留已有显示；版本服务恢复后由下一轮重试补齐。
+      }
+      if (!cancelled) retryTimer = setTimeout(loadCurrentVersion, 3000);
+    };
+
+    void loadCurrentVersion();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [dagId, pipeline?.publishedVersionId]);
+
+  // 发布送审后只轮询状态摘要，不触发编辑器全量 loading；通过或拒绝后自动停止。
+  useEffect(() => {
+    if (!dagId || !publishApprovalEnabled || publishApprovalStatus !== 'PENDING') return;
+
+    let cancelled = false;
+    const pollApproval = async () => {
+      try {
+        const [freshPipeline, latestApproval] = await Promise.all([
+          PipelineAPI.get(dagId),
+          SecurityAPI.publishApprovalState(dagId).catch(() => null),
+        ]);
+        if (cancelled) return;
+
+        setPipeline(freshPipeline);
+        const approval = publishApprovalView(true, freshPipeline, latestApproval);
+
+        if (approval.status === 'APPROVED') {
+          setPublishApprovalStatus('APPROVED');
+          setPublishApprovalComment(approval.comment);
+          message.success('发布审批已通过，生产版本已更新');
+          return;
+        }
+        if (approval.status === 'REJECTED') {
+          setPublishApprovalStatus('REJECTED');
+          setPublishApprovalComment(approval.comment);
+          message.error(`发布审批已拒绝：${approval.comment}`);
+          return;
+        }
+        if (approval.status === 'STALE') {
+          setPublishApprovalStatus('STALE');
+          setPublishApprovalComment(approval.comment);
+          message.warning(approval.comment || '送审草稿已变化，请重新提交审批');
+          return;
+        }
+        if (latestApproval?.status === 'CANCELED') {
+          setPublishApprovalStatus(undefined);
+          setPublishApprovalComment(latestApproval.comment);
+          message.info('发布审批已取消，可修改草稿后重新提交');
+          return;
+        }
+      } catch {
+        // 临时网络错误保留等待态，下一个周期继续查询。
+      }
+      if (!cancelled) approvalPollTimer.current = setTimeout(pollApproval, 3000);
+    };
+
+    approvalPollTimer.current = setTimeout(pollApproval, 3000);
+    return () => {
+      cancelled = true;
+      if (approvalPollTimer.current) {
+        clearTimeout(approvalPollTimer.current);
+        approvalPollTimer.current = null;
+      }
+    };
+  }, [dagId, message, publishApprovalEnabled, publishApprovalStatus]);
 
   const selectedTask = useMemo(
     () => tasks.find((t) => t.taskKey === selectedTaskKey),
@@ -263,14 +390,14 @@ export function usePipelineEditor(dagId: string | undefined) {
       next = await PipelineAPI.updateStatus(dagId, 'PUBLISHED');
     }
     setPipeline(next);
-    setPublishApprovalPending(
-      next.status !== 'PUBLISHED' || Boolean(next.hasUnpublishedChanges),
-    );
-    setPublishApprovalRejectionReason(undefined);
+    const waitingForApproval = publishApprovalEnabled
+      && (next.status !== 'PUBLISHED' || Boolean(next.hasUnpublishedChanges));
+    setPublishApprovalStatus(waitingForApproval ? 'PENDING' : undefined);
+    setPublishApprovalComment(undefined);
     const freshTasks = await PipelineAPI.listTasks(dagId);
     setTasks(freshTasks);
     return next;
-  }, [dagId, pipeline]);
+  }, [dagId, pipeline, publishApprovalEnabled]);
 
   // P6-A: poll active run's status + task_runs every 5s; stop on terminal or unmount
   useEffect(() => {
@@ -340,8 +467,10 @@ export function usePipelineEditor(dagId: string | undefined) {
     selectedTask,
     validation,
     saving,
-    publishApprovalPending,
-    publishApprovalRejectionReason,
+    currentPublishedVersion,
+    publishApprovalEnabled,
+    publishApprovalStatus,
+    publishApprovalComment,
     setSelectedTaskKey,
     reload: loadAll,
     createTask,

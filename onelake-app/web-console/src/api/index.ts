@@ -72,6 +72,7 @@ import type {
   PipelineParam,
   PipelineParamReplaceRequest,
   PipelineVersionDetail,
+  PipelineVersionDiff,
   PipelineVersionSummary,
 } from '../types';
 
@@ -418,10 +419,6 @@ export const PipelineAPI = {
     unwrap<{ enabled: boolean }>(http.get('/orchestration/pipelines/publish-approval-config')),
   updateStatus: (id: string, status: PipelineStatus) =>
     unwrap<Pipeline>(http.put(`/orchestration/pipelines/${id}/status`, { status })),
-  listVersions: (id: string) =>
-    unwrap<PipelineVersionSummary[]>(http.get(`/orchestration/pipelines/${id}/versions`)),
-  getVersion: (id: string, version: number) =>
-    unwrap<PipelineVersionDetail>(http.get(`/orchestration/pipelines/${id}/versions/${version}`)),
 
   // 流水线节点。
   listTasks: (id: string) =>
@@ -497,7 +494,21 @@ export const PipelineAPI = {
   }) =>
     unwrap<{ pipelineId: string; taskIds: string[]; edgeIds: string[]; warnings?: string }>(
       http.post('/orchestration/pipelines/templates/ods-dwd', payload)
-    ),
+  ),
+};
+
+/** 流水线不可变生产版本：历史、快照、结构化对比与 DEV 草稿回滚。 */
+export const PipelineVersionAPI = {
+  list: (dagId: string) =>
+    unwrap<PipelineVersionSummary[]>(http.get(`/orchestration/pipelines/${dagId}/versions`)),
+  get: (dagId: string, version: number) =>
+    unwrap<PipelineVersionDetail>(http.get(`/orchestration/pipelines/${dagId}/versions/${version}`)),
+  diff: (dagId: string, fromVersion: number, toVersion: number) =>
+    unwrap<PipelineVersionDiff>(http.get(`/orchestration/pipelines/${dagId}/versions/diff`, {
+      params: { from: fromVersion, to: toVersion },
+    })),
+  rollback: (dagId: string, version: number) =>
+    unwrap<void>(http.post(`/orchestration/pipelines/${dagId}/versions/${version}/rollback`)),
 };
 
 export const OperatorAPI = {

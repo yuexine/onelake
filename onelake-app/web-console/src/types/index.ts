@@ -490,6 +490,34 @@ export interface PipelineVersionDetail extends PipelineVersionSummary {
   snapshot: PipelineVersionSnapshot;
 }
 
+export interface PipelineVersionFieldChange {
+  field: string;
+  before?: unknown;
+  after?: unknown;
+}
+
+export interface PipelineVersionItemDiff {
+  key: string;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+  fields: PipelineVersionFieldChange[];
+}
+
+export interface PipelineVersionCollectionDiff {
+  added: PipelineVersionItemDiff[];
+  removed: PipelineVersionItemDiff[];
+  changed: PipelineVersionItemDiff[];
+}
+
+export interface PipelineVersionDiff {
+  dagId: UUID;
+  fromVersion: number;
+  toVersion: number;
+  tasks: PipelineVersionCollectionDiff;
+  edges: PipelineVersionCollectionDiff;
+  params: PipelineVersionCollectionDiff;
+}
+
 export interface OperatorPort {
   name: string;
   cardinality: 'ONE' | 'MANY' | string;

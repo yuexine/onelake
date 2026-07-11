@@ -59,7 +59,7 @@ import { TaskPalette } from './TaskPalette';
 import { DagCanvasSimple } from './DagCanvasSimple';
 import { InspectorRouter, type InspectorProps } from './InspectorRouter';
 import type { TaskTypeMeta } from './taskTypes';
-import { PipelineAPI } from '../../../api';
+import { PipelineAPI, PipelineVersionAPI } from '../../../api';
 import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
 import { BackfillWizard } from './BackfillWizard';
 import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
@@ -593,10 +593,17 @@ export default function UnifiedPipelineEditor() {
 
   const confirmPublish = useCallback(() => {
     if (!editor.pipeline) return;
+    const requiresApproval = editor.publishApprovalEnabled;
     modal.confirm({
-      title: editor.pipeline.publishedVersionId ? '重新发布流水线？' : '发布流水线？',
-      content: '发布后将生成不可变生产快照；后续编辑只修改草稿，运行仍使用最近发布版本。',
-      okText: editor.pipeline.publishedVersionId ? '生成新版本' : '发布',
+      title: requiresApproval
+        ? '提交发布审批？'
+        : editor.pipeline.publishedVersionId ? '重新发布流水线？' : '发布流水线？',
+      content: requiresApproval
+        ? '审批通过后才会生成新的不可变生产快照；审批期间生产运行继续使用当前已发布版本。'
+        : '发布后将生成不可变生产快照；后续编辑只修改草稿，运行仍使用最近发布版本。',
+      okText: requiresApproval
+        ? '提交审批'
+        : editor.pipeline.publishedVersionId ? '生成新版本' : '发布',
       cancelText: '取消',
       onOk: async () => {
         setPublishing(true);
@@ -607,9 +614,11 @@ export default function UnifiedPipelineEditor() {
             message.success('已提交发布审批，等待审批');
             return;
           }
-          const versions = await PipelineAPI.listVersions(dagId!);
-          const current = versions.find((item) => item.id === published.publishedVersionId);
-          message.success(current ? `已发布版本 ${current.version}` : '流水线已发布');
+          const versions = await PipelineVersionAPI.list(dagId!).catch(() => null);
+          const current = versions?.find((item) => item.id === published.publishedVersionId);
+          message.success(current
+            ? `已发布版本 ${current.version}`
+            : '流水线已发布，生产版本号正在同步');
         } catch (err) {
           message.error(`发布失败: ${(err as Error).message}`);
           throw err;
@@ -856,8 +865,20 @@ export default function UnifiedPipelineEditor() {
           <Space>
             <Text strong>{editor.pipeline.name}</Text>
             <Tag color={statusTagColor}>{editor.pipeline.status ?? 'DRAFT'}</Tag>
-            {editor.publishApprovalPending && (
+            {editor.currentPublishedVersion !== undefined && (
+              <Tag color="green">当前生产版本 v{editor.currentPublishedVersion}</Tag>
+            )}
+            {editor.publishApprovalStatus === 'PENDING' && (
               <Tag color="processing" icon={<LoadingOutlined />}>等待发布审批</Tag>
+            )}
+            {editor.publishApprovalStatus === 'APPROVED' && (
+              <Tag color="success" icon={<CheckCircleOutlined />}>发布审批已通过</Tag>
+            )}
+            {editor.publishApprovalStatus === 'REJECTED' && (
+              <Tag color="error" icon={<CloseCircleOutlined />}>发布审批已拒绝</Tag>
+            )}
+            {editor.publishApprovalStatus === 'STALE' && (
+              <Tag color="warning" icon={<WarningOutlined />}>审批内容需重新提交</Tag>
             )}
             {editor.pipeline.hasUnpublishedChanges && (
               <Tag color="orange" icon={<WarningOutlined />}>有未发布变更</Tag>
@@ -898,19 +919,20 @@ export default function UnifiedPipelineEditor() {
             <Button
               icon={<HistoryOutlined />}
               onClick={() => setVersionDrawerOpen(true)}
-              disabled={!editor.pipeline.publishedVersionId}
             >
-              版本
+              版本历史
             </Button>
             <Button
               icon={<CloudUploadOutlined />}
               onClick={confirmPublish}
               loading={publishing}
               disabled={editor.tasks.length === 0
-                || editor.publishApprovalPending
+                || editor.publishApprovalStatus === 'PENDING'
                 || (editor.pipeline.status === 'PUBLISHED' && !editor.pipeline.hasUnpublishedChanges)}
             >
-              {editor.pipeline.publishedVersionId ? '重新发布' : '发布'}
+              {editor.publishApprovalEnabled
+                ? '提交审批'
+                : editor.pipeline.publishedVersionId ? '重新发布' : '发布'}
             </Button>
             <Button
               type="primary"
@@ -927,12 +949,21 @@ export default function UnifiedPipelineEditor() {
         }
       />
 
-      {editor.publishApprovalRejectionReason && (
+      {editor.publishApprovalStatus === 'REJECTED' && (
         <Alert
           type="error"
           showIcon
           message="发布审批已拒绝"
-          description={editor.publishApprovalRejectionReason}
+          description={editor.publishApprovalComment || '审批人未填写拒绝原因'}
+          style={{ flex: '0 0 auto', marginBottom: 8 }}
+        />
+      )}
+      {editor.publishApprovalStatus === 'STALE' && (
+        <Alert
+          type="warning"
+          showIcon
+          message="送审内容已过期"
+          description={editor.publishApprovalComment || '草稿已在送审后发生变化，请重新提交发布审批。'}
           style={{ flex: '0 0 auto', marginBottom: 8 }}
         />
       )}
@@ -978,6 +1009,10 @@ export default function UnifiedPipelineEditor() {
         open={versionDrawerOpen}
         publishedVersionId={editor.pipeline.publishedVersionId}
         onClose={() => setVersionDrawerOpen(false)}
+        onRolledBack={async () => {
+          setVersionDrawerOpen(false);
+          await editor.reload();
+        }}
       />
 
       {/* P6-A: live run banner */}

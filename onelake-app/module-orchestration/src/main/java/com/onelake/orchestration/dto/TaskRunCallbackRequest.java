@@ -1,5 +1,6 @@
 package com.onelake.orchestration.dto;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
@@ -23,6 +24,7 @@ import java.time.Instant;
  * @param logRef 租户/run 前缀下的对象存储日志键
  * @param attempt 跨 Dagster run 累计 attempt
  * @param dagsterStepKey Dagster step key，GRAPH 模式应等于 taskKey
+ * @param outputs 节点成功输出，包含 rowsWritten、artifactPath 和自定义 KV
  */
 public record TaskRunCallbackRequest(
         @NotNull TaskRunStatus status,
@@ -34,6 +36,7 @@ public record TaskRunCallbackRequest(
         @PositiveOrZero Long scanBytes,
         @Size(max = 512) String logRef,
         @Min(1) Integer attempt,
-        @Size(max = 128) String dagsterStepKey
+        @Size(max = 128) String dagsterStepKey,
+        JsonNode outputs
 ) {
 }

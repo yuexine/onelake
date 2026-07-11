@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import signal
 import subprocess
@@ -9,6 +10,9 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothing, Shape, String, graph, job, multiprocess_executor, op, repository
+
+
+_TASK_OUTPUTS_MARKER = "ONELAKE_OUTPUTS_JSON="
 
 @op(
     name="reconcile_sync_task_schedule",
@@ -70,7 +74,8 @@ def _build_spark_submit(node, iceberg_catalog, spark_master):
             sql_file.write(node["sql_or_script"])
             sql_path = sql_file.name
         temp_paths.append(sql_path)
-        wrapper = """
+        wrapper = f"""
+import json
 import re
 import sys
 from pyspark.sql import SparkSession
@@ -78,18 +83,35 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder.appName("onelake-spark-sql").getOrCreate()
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     sql_text = f.read()
+target_fqn = sys.argv[2].strip() if len(sys.argv) > 2 else ""
 statements = [s.strip() for s in sql_text.split(";") if s.strip()]
+
 for statement in statements:
     df = spark.sql(statement)
     if re.match(r"^\\s*(select|show|describe|explain)\\b", statement, re.IGNORECASE):
         df.show(20, truncate=False)
+
+outputs = {{}}
+if target_fqn and spark.catalog.tableExists(target_fqn):
+    # Iceberg records the writer Spark application and added-records in snapshot summaries.
+    # Querying the application-owned snapshots after SQL execution covers INSERT/CTAS/MERGE
+    # and row-level DML regardless of comments or leading CTEs, without scanning table data.
+    app_id = spark.sparkContext.applicationId.replace("'", "''")
+    metrics = spark.sql(
+        f"SELECT summary['added-records'] AS added_records "
+        f"FROM {{target_fqn}}.snapshots "
+        f"WHERE summary['spark.app.id'] = '{{app_id}}'"
+    ).collect()
+    outputs["rowsWritten"] = sum(int(row["added_records"] or 0) for row in metrics)
+if outputs:
+    print("{_TASK_OUTPUTS_MARKER}" + json.dumps(outputs, separators=(",", ":")), flush=True)
 spark.stop()
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(wrapper)
             script_path = f.name
         temp_paths.append(script_path)
-        app_args = [sql_path]
+        app_args = [sql_path, str(node.get("target_fqn") or "")]
 
     cmd = [
         "spark-submit",
@@ -128,6 +150,38 @@ spark.stop()
     ]
     cmd.extend(app_args)
     return cmd, temp_paths
+
+
+def _extract_task_outputs(stdout):
+    """Read the last structured output marker emitted by a Spark SQL/PySpark process."""
+    outputs = {}
+    for line in (stdout or "").splitlines():
+        marker_index = line.find(_TASK_OUTPUTS_MARKER)
+        if marker_index < 0:
+            continue
+        raw = line[marker_index + len(_TASK_OUTPUTS_MARKER):].strip()
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            outputs = parsed
+    rows_written = outputs.get("rowsWritten")
+    if rows_written is not None:
+        if isinstance(rows_written, bool) or not isinstance(rows_written, int) or rows_written < 0:
+            raise ValueError("Spark outputs rowsWritten must be a non-negative integer")
+    return outputs
+
+
+def _success_callback_payload(node, result, **fields):
+    outputs = _extract_task_outputs(getattr(result, "stdout", ""))
+    payload = dict(fields)
+    payload["status"] = "SUCCEEDED"
+    payload["artifactPath"] = _table_artifact(node)
+    payload["outputs"] = outputs
+    if outputs.get("rowsWritten") is not None:
+        payload["rowsWritten"] = outputs["rowsWritten"]
+    return payload
 
 
 def _runtime_params(config):
@@ -188,6 +242,7 @@ def _node_with_runtime_params(node, params):
                 "sql_or_script": Field(String, description="Spark SQL string or PySpark script content"),
                 "target_fqn": Field(String, default_value=""),
                 "from_tables": Field(Array(String), default_value=[]),
+                "upstream_task_keys": Field(Array(String), default_value=[]),
                 "resource_profile": Field(
                     Shape({
                         "executor_memory": Field(String, default_value="2g"),
@@ -252,6 +307,7 @@ def run_spark_task_op(context):
             "dagsterStepKey": task["task_key"],
         }, context.log)
         try:
+            node = _render_node_config(base_url, cfg["run_id"], task["task_key"], node)
             cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
             context.log.info("spark-submit cmd: %s", " ".join(cmd))
             result = subprocess.run(
@@ -286,13 +342,10 @@ def run_spark_task_op(context):
                 terminal_callback_sent = True
                 raise RuntimeError(message)
 
-            _callback(base_url, cfg["run_id"], task["task_key"], {
-                "status": "SUCCEEDED",
-                "finishedAt": _now(),
-                "artifactPath": _table_artifact(task),
-                "logRef": log_ref,
-                "attempt": 1,
-            }, context.log)
+            _callback(base_url, cfg["run_id"], task["task_key"],
+                      _success_callback_payload(
+                          node, result, finishedAt=_now(), logRef=log_ref, attempt=1),
+                      context.log)
             terminal_callback_sent = True
 
             results.append({
@@ -385,9 +438,14 @@ def _table_artifact(node):
 def _callback(base_url, run_id, task_key, payload, log):
     import requests
 
+    payload = _normalize_callback_payload(payload)
+    requires_ack = payload.get("status") == "SUCCEEDED"
     target_base_url = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
     if not target_base_url:
-        log.info("callback skipped run=%s task=%s payload=%s", run_id, task_key, payload)
+        message = f"callback base URL is empty for run={run_id} task={task_key}"
+        if requires_ack:
+            raise _CallbackDeliveryError(message)
+        log.info("%s; payload=%s", message, payload)
         return
 
     token = os.getenv("ONELAKE_INTERNAL_TOKEN", "") or os.getenv("ONELAKE_ORCHESTRATION_INTERNAL_TOKEN", "")
@@ -398,11 +456,103 @@ def _callback(base_url, run_id, task_key, payload, log):
         f"{target_base_url}/api/v1/internal/orchestration/runs/{run_id}"
         f"/tasks/{quote(str(task_key), safe='')}/status"
     )
+    attempts = 3 if requires_ack else 1
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=5)
+            resp.raise_for_status()
+            if requires_ack:
+                response_body = resp.json()
+                current_status = (response_body.get("data") or {}).get("currentStatus")
+                if current_status != "SUCCEEDED":
+                    raise RuntimeError(
+                        f"SUCCEEDED callback was not applied; authoritative status={current_status}"
+                    )
+            return
+        except Exception as exc:
+            last_error = exc
+            log.warning(
+                "callback failed run=%s task=%s url=%s attempt=%s/%s error=%s",
+                run_id, task_key, url, attempt, attempts, exc,
+            )
+            if attempt < attempts:
+                time.sleep(0.2 * attempt)
+    if requires_ack:
+        raise _CallbackDeliveryError(
+            f"SUCCEEDED callback was not acknowledged for run={run_id} task={task_key}"
+        ) from last_error
+
+
+class _CallbackDeliveryError(RuntimeError):
+    """A successful task must not release downstream steps before outputs are persisted."""
+
+
+def _normalize_callback_payload(payload):
+    normalized = dict(payload or {})
+    if normalized.get("status") != "SUCCEEDED":
+        return normalized
+    outputs = dict(normalized.get("outputs") or {})
+    if normalized.get("rowsWritten") is not None:
+        outputs["rowsWritten"] = normalized["rowsWritten"]
+    if normalized.get("artifactPath") is not None:
+        outputs["artifactPath"] = normalized["artifactPath"]
+    normalized["outputs"] = outputs
+    return normalized
+
+
+def _contains_upstream_placeholder(value):
+    if isinstance(value, str):
+        return "${upstream." in value
+    if isinstance(value, dict):
+        return any(_contains_upstream_placeholder(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_upstream_placeholder(item) for item in value)
+    return False
+
+
+def _render_node_config(base_url, run_id, task_key, node):
+    """Ask Java to resolve upstream outputs immediately before this Dagster step executes."""
+    if not _contains_upstream_placeholder(node):
+        return node
+
+    import requests
+
+    target_base_url = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
+    if not target_base_url:
+        raise RuntimeError(
+            f"node {task_key} references upstream outputs but callback base URL is empty"
+        )
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "") or os.getenv(
+        "ONELAKE_ORCHESTRATION_INTERNAL_TOKEN", ""
+    )
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Onelake-Internal-Token"] = token
+    url = (
+        f"{target_base_url}/api/v1/internal/orchestration/runs/{run_id}"
+        f"/tasks/{quote(str(task_key), safe='')}/render-config"
+    )
+    response = requests.post(
+        url,
+        json={
+            "config": node,
+            "upstreamTaskKeys": list(node.get("upstream_task_keys") or []),
+        },
+        headers=headers,
+        timeout=5,
+    )
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=5)
-        resp.raise_for_status()
-    except Exception as exc:
-        log.warning("callback failed run=%s task=%s url=%s error=%s", run_id, task_key, url, exc)
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.ok:
+        message = body.get("message") or response.text or response.reason
+        raise RuntimeError(f"node {task_key} upstream output render failed: {message}")
+    rendered = (body.get("data") or {}).get("config")
+    if not isinstance(rendered, dict):
+        raise RuntimeError(f"node {task_key} upstream output render returned invalid config")
+    return rendered
 
 
 def _safe_key_part(value):
@@ -506,6 +656,7 @@ _NATIVE_NODE_CONFIG = {
     "sql_or_script": Field(String, default_value=""),
     "target_fqn": Field(String, default_value=""),
     "from_tables": Field(Array(String), default_value=[]),
+    "upstream_task_keys": Field(Array(String), default_value=[]),
     "resource_profile": Field(
         Shape({
             "executor_memory": Field(String, default_value="2g"),
@@ -548,16 +699,27 @@ def _execute_native_graph_node(context):
         "dagsterStepKey": task_key,
     }, context.log)
 
+    try:
+        node = _render_node_config(base_url, run_id, task_key, node)
+    except Exception as exc:
+        message = str(exc)
+        log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, message, context.log)
+        _callback(base_url, run_id, task_key, {
+            "status": "FAILED", "finishedAt": _now(), "attempt": first_attempt,
+            "dagsterStepKey": task_key, "errorMsg": _tail(message, 3900), "logRef": log_ref,
+        }, context.log)
+        raise Failure(description=message) from exc
+
     if node["task_type"] == "SYNC_REF":
         log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, "SYNC_REF completed", context.log)
-        context.log_event(AssetMaterialization(
-            asset_key=node.get("target_fqn") or task_key,
-            description=f"pipeline node {task_key}",
-        ))
         _callback(base_url, run_id, task_key, {
             "status": "SUCCEEDED", "finishedAt": _now(), "attempt": first_attempt,
             "dagsterStepKey": task_key, "artifactPath": _table_artifact(node), "logRef": log_ref,
         }, context.log)
+        context.log_event(AssetMaterialization(
+            asset_key=node.get("target_fqn") or task_key,
+            description=f"pipeline node {task_key}",
+        ))
         return
 
     attempts = max(1, int(node.get("max_retries", 0)) + 1)
@@ -643,16 +805,21 @@ def _execute_native_graph_node(context):
             last_log = _spark_log_content(cmd, result)
             last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
             if result.returncode == 0:
+                _callback(base_url, run_id, task_key,
+                          _success_callback_payload(
+                              node, result, finishedAt=_now(), attempt=attempt,
+                              dagsterStepKey=task_key, logRef=last_log_ref),
+                          context.log)
                 context.log_event(AssetMaterialization(
                     asset_key=node.get("target_fqn") or task_key,
                     description=f"pipeline node {task_key}",
                 ))
-                _callback(base_url, run_id, task_key, {
-                    "status": "SUCCEEDED", "finishedAt": _now(), "attempt": attempt,
-                    "dagsterStepKey": task_key, "artifactPath": _table_artifact(node), "logRef": last_log_ref,
-                }, context.log)
                 return
             context.log.warning("[%s] attempt %s failed with exit code %s", task_key, attempt, result.returncode)
+        except _CallbackDeliveryError:
+            # The Spark write already succeeded. Retrying the attempt could duplicate data;
+            # fail this Dagster step and keep all dependants blocked instead.
+            raise
         except BaseException as exc:
             last_log = str(exc)
             last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
@@ -802,6 +969,7 @@ def _load_native_pipeline_jobs():
                 "sql_or_script": Field(String, default_value=""),
                 "target_fqn": Field(String, default_value=""),
                 "from_tables": Field(Array(String), default_value=[]),
+                "upstream_task_keys": Field(Array(String), default_value=[]),
                 "resource_profile": Field(
                     Shape({
                         "executor_memory": Field(String, default_value="2g"),
@@ -969,10 +1137,20 @@ def run_pipeline_graph_op(context):
             "attempt": first_attempt,
         }, context.log)
 
+        try:
+            node = _render_node_config(base_url, run_id, task_key, node)
+        except Exception as exc:
+            message = str(exc)
+            log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, message, context.log)
+            _callback(base_url, run_id, task_key, {
+                "status": "FAILED", "finishedAt": _now(), "attempt": first_attempt,
+                "dagsterStepKey": task_key, "errorMsg": _tail(message, 3900), "logRef": log_ref,
+            }, context.log)
+            return "FAILED"
+
         if task_type == "SYNC_REF":
             # SYNC_REF 是图内可观测节点但不提交 Spark，同样要用累计 attempt 保持 task_run 单调。
             log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, "SYNC_REF completed", context.log)
-            materialize_success(task_key)
             _callback(base_url, run_id, task_key, {
                 "status": "SUCCEEDED",
                 "finishedAt": _now(),
@@ -980,6 +1158,7 @@ def run_pipeline_graph_op(context):
                 "logRef": log_ref,
                 "attempt": first_attempt,
             }, context.log)
+            materialize_success(task_key)
             return "SUCCEEDED"
 
         attempts = max(1, int(node.get("max_retries", 0)) + 1)
@@ -1017,14 +1196,12 @@ def run_pipeline_graph_op(context):
                 last_log = _spark_log_content(cmd, result)
                 last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)
                 if result.returncode == 0:
+                    _callback(base_url, run_id, task_key,
+                              _success_callback_payload(
+                                  node, result, finishedAt=_now(), logRef=last_log_ref,
+                                  attempt=attempt),
+                              context.log)
                     materialize_success(task_key)
-                    _callback(base_url, run_id, task_key, {
-                        "status": "SUCCEEDED",
-                        "finishedAt": _now(),
-                        "artifactPath": _table_artifact(node),
-                        "logRef": last_log_ref,
-                        "attempt": attempt,
-                    }, context.log)
                     return "SUCCEEDED"
                 context.log.warning(
                     "[%s] attempt %s failed with exit code %s",
@@ -1032,6 +1209,9 @@ def run_pipeline_graph_op(context):
                     attempt,
                     result.returncode,
                 )
+            except _CallbackDeliveryError:
+                # Do not run spark-submit again after the data write has succeeded.
+                raise
             except Exception as exc:
                 last_log = str(exc)
                 last_log_ref = _upload_log(tenant_id, run_id, task_key, attempt, last_log, context.log)

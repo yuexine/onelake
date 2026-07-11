@@ -65,6 +65,7 @@ class PipelineCompileServiceTest {
 
         PipelineTask upstream = sparkSqlTask("t_upstream", "iceberg.dwd.orders");
         PipelineTask downstream = sparkSqlTask("t_downstream", "iceberg.dwd.order_items");
+        downstream.setConfig("{\"sql\":\"select ${upstream.t_upstream.rowsWritten}\"}");
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId))
                 .thenReturn(List.of(upstream, downstream));
 
@@ -79,6 +80,25 @@ class PipelineCompileServiceTest {
         assertThat(result.tasks()).extracting("taskKey")
                 .containsExactly("t_upstream", "t_downstream");
         assertThat(result.pipelineTag()).startsWith("pipeline_");
+    }
+
+    @Test
+    void rejectsUpstreamOutputReferenceWithoutPipelineAncestry() {
+        Dag dag = newPipelineDag();
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+
+        PipelineTask sibling = sparkSqlTask("sibling", "iceberg.dwd.sibling");
+        PipelineTask consumer = sparkSqlTask("consumer", "iceberg.dwd.consumer");
+        consumer.setConfig("{\"sql\":\"select ${upstream.sibling.rowsWritten}\"}");
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId))
+                .thenReturn(List.of(sibling, consumer));
+        when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
+
+        PipelineCompileResult result = service.compile(dagId);
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.graphErrors())
+                .contains("Task consumer references non-upstream task: sibling");
     }
 
     @Test

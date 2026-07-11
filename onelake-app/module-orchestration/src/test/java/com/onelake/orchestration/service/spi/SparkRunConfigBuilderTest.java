@@ -147,11 +147,53 @@ class SparkRunConfigBuilderTest {
         assertThat(sparkNode).containsEntry("base_attempt", 1);
         assertThat(sparkNode).containsEntry("max_retries", 2);
         assertThat(sparkNode).containsEntry("callback_base_url", "http://localhost:8080");
+        assertThat((List<String>) sparkNode.get("upstream_task_keys"))
+                .containsExactly("sync_user");
         assertThat((List<String>) sparkNode.get("from_tables")).containsExactly("onelake.ods.user");
         verify(paramResolver).resolveForTasks(
                 tenantId, pipelineId, Set.of("sync_user", "spark_dwd"));
         Map<String, Object> execution = (Map<String, Object>) config.opConfig().get("execution");
         assertThat(execution).isEqualTo(Map.of("config", Map.of("max_concurrent", 6)));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphRunConfigFreezesTransitiveUpstreamTaskKeys() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask root = task(pipelineId, tenantId, "root", TaskType.SPARK_SQL, true, "{}");
+        PipelineTask middle = task(pipelineId, tenantId, "middle", TaskType.SPARK_SQL, true, "{}");
+        PipelineTask leaf = task(pipelineId, tenantId, "leaf", TaskType.SPARK_SQL, true, "{}");
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(root, middle, leaf).stream()
+                        .map(task -> new PipelineCompileResult.TaskCompileResult(
+                                task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                                true, task.getTargetFqn(), null))
+                        .toList(),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context,
+                List.of(root, middle, leaf),
+                List.of(
+                        edge("root", "middle", EdgeLayer.PIPELINE),
+                        edge("middle", "leaf", EdgeLayer.PIPELINE)),
+                "",
+                2);
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> leafConfig = (Map<String, Object>)
+                ((Map<String, Object>) ops.get("leaf")).get("config");
+        assertThat((List<String>) leafConfig.get("upstream_task_keys"))
+                .containsExactly("middle", "root");
     }
 
     @Test

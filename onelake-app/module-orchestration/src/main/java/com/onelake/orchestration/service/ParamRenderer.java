@@ -1,5 +1,7 @@
 package com.onelake.orchestration.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.YearMonth;
@@ -8,7 +10,9 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Locale;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -25,6 +29,8 @@ public final class ParamRenderer {
     private static final Pattern PARAM_KEY = Pattern.compile("[A-Za-z_][A-Za-z0-9_.-]*");
     private static final Pattern BIZDATE = Pattern.compile("bizdate([+-]\\d+)?(?::(.+))?");
     private static final Pattern CYCTIME = Pattern.compile("cyctime(?::(.+))?");
+    private static final Pattern UPSTREAM = Pattern.compile(
+            "upstream\\.([A-Za-z][A-Za-z0-9_-]*)\\.([A-Za-z_][A-Za-z0-9_.-]*)");
 
     private ParamRenderer() {
     }
@@ -46,6 +52,20 @@ public final class ParamRenderer {
      * @throws IllegalArgumentException 表达式、格式、时区或所需运行上下文非法
      */
     public static String render(String text, RunContext context, Map<String, String> params) {
+        return render(text, context, params, null);
+    }
+
+    /**
+     * 渲染普通参数、业务时间参数和同一 JobRun 内的上游节点输出。
+     *
+     * <p>{@code upstreamOutputs == null} 表示整图 runConfig 构建阶段，此时上游表达式原样
+     * 保留，等待 Dagster 节点开始前最终渲染；非 null 时启用严格解析，上游不存在、未成功
+     * 或字段缺失都会立即报错。</p>
+     */
+    public static String render(String text,
+                                RunContext context,
+                                Map<String, String> params,
+                                Map<String, UpstreamTaskOutput> upstreamOutputs) {
         String source = text == null ? "" : text;
         if (source.isEmpty()) {
             return source;
@@ -55,7 +75,7 @@ public final class ParamRenderer {
         StringBuffer rendered = new StringBuffer(source.length());
         while (matcher.find()) {
             String expression = matcher.group(1);
-            String value = renderExpression(expression, context, params);
+            String value = renderExpression(expression, context, params, upstreamOutputs);
             matcher.appendReplacement(rendered, Matcher.quoteReplacement(
                     value == null ? matcher.group() : value));
         }
@@ -89,9 +109,55 @@ public final class ParamRenderer {
         }
     }
 
+    /**
+     * 提取文本中声明的上游 taskKey，供编译期和节点执行前校验真实图依赖。
+     *
+     * <p>本方法与渲染使用同一套语法校验，避免图校验和最终渲染对表达式产生不同解释。</p>
+     */
+    public static Set<String> upstreamTaskKeys(String text) {
+        validate(text);
+        Set<String> taskKeys = new LinkedHashSet<>();
+        Matcher placeholders = PLACEHOLDER.matcher(text == null ? "" : text);
+        while (placeholders.find()) {
+            Matcher upstream = UPSTREAM.matcher(placeholders.group(1));
+            if (upstream.matches()) {
+                taskKeys.add(upstream.group(1));
+            }
+        }
+        return taskKeys;
+    }
+
     private static String renderExpression(String expression,
                                            RunContext context,
-                                           Map<String, String> params) {
+                                           Map<String, String> params,
+                                           Map<String, UpstreamTaskOutput> upstreamOutputs) {
+        Matcher upstream = UPSTREAM.matcher(expression);
+        if (upstream.matches()) {
+            if (upstreamOutputs == null) {
+                return null;
+            }
+            String taskKey = upstream.group(1);
+            String fieldPath = upstream.group(2);
+            UpstreamTaskOutput taskOutput = upstreamOutputs.get(taskKey);
+            if (taskOutput == null) {
+                throw invalidExpression(expression,
+                        "同一 job_run 内不存在上游节点 " + taskKey);
+            }
+            if (!taskOutput.succeeded()) {
+                throw invalidExpression(expression,
+                        "上游节点 " + taskKey + " 尚未成功，当前状态: " + taskOutput.status());
+            }
+            JsonNode value = taskOutput.outputs();
+            for (String field : fieldPath.split("\\.")) {
+                value = value == null ? null : value.get(field);
+            }
+            if (value == null || value.isMissingNode() || value.isNull()) {
+                throw invalidExpression(expression,
+                        "上游节点 " + taskKey + " 的 outputs 缺少字段 " + fieldPath);
+            }
+            return value.isValueNode() ? value.asText() : value.toString();
+        }
+
         Matcher bizdate = BIZDATE.matcher(expression);
         if (bizdate.matches()) {
             if (context == null) {
@@ -124,6 +190,13 @@ public final class ParamRenderer {
     }
 
     private static void validateExpression(String expression) {
+        if (UPSTREAM.matcher(expression).matches()) {
+            return;
+        }
+        if (expression.startsWith("upstream.")) {
+            throw invalidExpression(expression,
+                    "上游输出表达式仅支持 upstream.<taskKey>.<field>");
+        }
         Matcher bizdate = BIZDATE.matcher(expression);
         if (bizdate.matches()) {
             if (bizdate.group(1) != null) {
@@ -227,5 +300,12 @@ public final class ParamRenderer {
         HOUR,
         DAY,
         MONTH
+    }
+
+    /** 同一 JobRun 内一个节点的状态与 outputs 快照。 */
+    public record UpstreamTaskOutput(String status, JsonNode outputs) {
+        public boolean succeeded() {
+            return "SUCCEEDED".equals(status);
+        }
     }
 }

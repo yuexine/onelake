@@ -2,12 +2,14 @@ package com.onelake.orchestration.api;
 
 import com.onelake.common.exception.GlobalExceptionHandler;
 import com.onelake.common.security.InternalApiTokenFilter;
+import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
+import com.onelake.orchestration.dto.TaskConfigRenderResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
@@ -125,6 +127,28 @@ class InternalTaskRunCallbackControllerTest {
                 .andExpect(jsonPath("$.message").value("请求体格式错误"));
 
         verifyNoInteractions(orchestrationService);
+    }
+
+    @Test
+    void renderConfigWithValidTokenReturnsFinalNodeConfig() throws Exception {
+        String path = "/api/v1/internal/orchestration/runs/" + RUN_ID
+                + "/tasks/quality_gate/render-config";
+        when(orchestrationService.renderTaskConfig(
+                eq(RUN_ID), eq("quality_gate"), any(), eq(List.of("extract"))))
+                .thenReturn(new TaskConfigRenderResult(JsonUtil.mapper().readTree(
+                        "{\"sql_or_script\":\"assert 88 >= 0\"}")));
+
+        mockMvc.perform(post(path)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header(InternalTaskRunCallbackController.INTERNAL_TOKEN_HEADER, "secret-token")
+                        .content("{\"config\":{\"sql_or_script\":"
+                                + "\"assert ${upstream.extract.rowsWritten} >= 0\"},"
+                                + "\"upstreamTaskKeys\":[\"extract\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.config.sql_or_script").value("assert 88 >= 0"));
+
+        verify(orchestrationService).renderTaskConfig(
+                eq(RUN_ID), eq("quality_gate"), any(), eq(List.of("extract")));
     }
 
     @Test

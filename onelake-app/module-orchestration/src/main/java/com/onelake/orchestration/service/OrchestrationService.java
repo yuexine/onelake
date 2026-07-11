@@ -1,6 +1,8 @@
 package com.onelake.orchestration.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.OutboxPublisher;
@@ -21,6 +23,7 @@ import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.DagDTO;
 import com.onelake.orchestration.dto.JobRunDTO;
 import com.onelake.orchestration.dto.PipelineCompileResult;
+import com.onelake.orchestration.dto.TaskConfigRenderResult;
 import com.onelake.orchestration.dto.TaskRunCallbackRequest;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
 import com.onelake.orchestration.dto.TaskRerunResult;
@@ -859,7 +862,8 @@ public class OrchestrationService {
                 tasks,
                 pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                 runContext,
-                runtimeParams);
+                runtimeParams,
+                pipelineEdges);
     }
 
     private List<Map<String, String>> pipelineRunTags(UUID dagId,
@@ -1165,6 +1169,14 @@ public class OrchestrationService {
         if (request.attempt() != null && request.attempt() < 1) {
             throw new BizException(40022, "attempt 必须大于等于 1");
         }
+        if (request.outputs() != null && !request.outputs().isObject()) {
+            throw new BizException(40025, "task_run outputs 必须是 JSON 对象");
+        }
+        if (request.outputs() != null && requested != TaskRunStatus.SUCCEEDED) {
+            throw new BizException(40025, "只有 SUCCEEDED 回调可以写入 task_run outputs");
+        }
+        callbackRowsWritten(request);
+        callbackArtifactPath(request);
 
         TaskRunStatus current = taskRun.getStatus();
         // 单调状态机：终态不可变，低 rank 或低 attempt 的迟到回调不允许把节点状态倒退。
@@ -1184,6 +1196,73 @@ public class OrchestrationService {
             propagateUpstreamFailures(run, lockedTaskRuns, new HashSet<>(Set.of(taskKey)));
         }
         return new TaskRunCallbackResult(true, taskRun.getStatus());
+    }
+
+    /**
+     * 在 Dagster 节点实际执行前，用同一 JobRun 内已经成功的上游 outputs 最终渲染配置。
+     *
+     * <p>runConfig 初次构建时保留 {@code ${upstream.*}} 占位符并冻结祖先 taskKey；原生
+     * Dagster 图保证当前节点只会在依赖 step 终态后开始，因此这里读到的是回调已提交的
+     * 输出快照，且不受运行期间流水线拓扑编辑影响。</p>
+     */
+    @Transactional(readOnly = true)
+    public TaskConfigRenderResult renderTaskConfig(UUID runId,
+                                                   String taskKey,
+                                                   JsonNode config,
+                                                   List<String> frozenUpstreamTaskKeys) {
+        if (!StringUtils.hasText(taskKey)) {
+            throw new BizException(40021, "taskKey 不能为空");
+        }
+        if (config == null || config.isNull()) {
+            throw new BizException(40025, "待渲染节点 config 不能为空");
+        }
+        runRepo.findById(runId)
+                .orElseThrow(() -> new BizException(40400, "运行实例不存在"));
+        List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(runId);
+        if (taskRuns.stream().noneMatch(taskRun -> taskKey.equals(taskRun.getTaskKey()))) {
+            throw new BizException(40400, "task_run 不存在: " + taskKey);
+        }
+
+        try {
+            Set<String> referencedTaskKeys = upstreamTaskKeys(config);
+            Set<String> ancestorTaskKeys = new LinkedHashSet<>(
+                    frozenUpstreamTaskKeys == null ? List.of() : frozenUpstreamTaskKeys);
+            for (String referencedTaskKey : referencedTaskKeys) {
+                if (!ancestorTaskKeys.contains(referencedTaskKey)) {
+                    throw new IllegalArgumentException(
+                            "引用的节点 " + referencedTaskKey + " 不是当前节点的图上游");
+                }
+            }
+
+            Map<String, ParamRenderer.UpstreamTaskOutput> upstreamOutputs = new LinkedHashMap<>();
+            for (TaskRun taskRun : taskRuns) {
+                if (!referencedTaskKeys.contains(taskRun.getTaskKey())) {
+                    continue;
+                }
+                upstreamOutputs.put(taskRun.getTaskKey(), new ParamRenderer.UpstreamTaskOutput(
+                        taskRun.getStatus().name(),
+                        taskRun.getStatus() == TaskRunStatus.SUCCEEDED
+                                ? parseTaskRunOutputs(taskRun)
+                                : JsonUtil.mapper().createObjectNode()));
+            }
+            return new TaskConfigRenderResult(renderTaskConfigNode(config.deepCopy(), upstreamOutputs));
+        } catch (IllegalArgumentException ex) {
+            throw new BizException(40025,
+                    "节点 " + taskKey + " 参数渲染失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    private Set<String> upstreamTaskKeys(JsonNode node) {
+        Set<String> taskKeys = new LinkedHashSet<>();
+        if (node == null || node.isNull()) {
+            return taskKeys;
+        }
+        if (node.isTextual()) {
+            taskKeys.addAll(ParamRenderer.upstreamTaskKeys(node.asText()));
+        } else if (node.isContainerNode()) {
+            node.forEach(child -> taskKeys.addAll(upstreamTaskKeys(child)));
+        }
+        return taskKeys;
     }
 
     /**
@@ -1522,6 +1601,8 @@ public class OrchestrationService {
     private void applyTaskRunCallbackFields(JobRun run, TaskRun taskRun, TaskRunStatus requested,
                                             TaskRunCallbackRequest request) {
         Instant now = Instant.now();
+        Long rowsWritten = callbackRowsWritten(request);
+        String artifactPath = callbackArtifactPath(request);
         // 可选字段只在回调携带时覆盖，避免较早的空值回调冲掉已写入的观测信息。
         if (request.attempt() != null) {
             taskRun.setAttempt(Math.max(taskRun.getAttempt(), request.attempt()));
@@ -1532,14 +1613,26 @@ public class OrchestrationService {
         if (request.dagsterStepKey() != null) {
             taskRun.setDagsterStepKey(truncate(request.dagsterStepKey(), 128));
         }
-        if (request.rowsWritten() != null) {
-            taskRun.setRowsWritten(request.rowsWritten());
+        if (rowsWritten != null) {
+            taskRun.setRowsWritten(rowsWritten);
         }
         if (request.scanBytes() != null) {
             taskRun.setScanBytes(request.scanBytes());
         }
-        if (request.artifactPath() != null) {
-            taskRun.setArtifactPath(truncate(request.artifactPath(), 512));
+        if (artifactPath != null) {
+            taskRun.setArtifactPath(artifactPath);
+        }
+        if (requested == TaskRunStatus.SUCCEEDED) {
+            ObjectNode outputs = request.outputs() != null
+                    ? (ObjectNode) request.outputs().deepCopy()
+                    : JsonUtil.mapper().createObjectNode();
+            if (rowsWritten != null) {
+                outputs.put("rowsWritten", rowsWritten);
+            }
+            if (artifactPath != null) {
+                outputs.put("artifactPath", artifactPath);
+            }
+            taskRun.setOutputs(JsonUtil.toJson(outputs));
         }
         if (request.errorMsg() != null) {
             taskRun.setErrorMsg(truncate(request.errorMsg(), 4000));
@@ -1557,6 +1650,89 @@ public class OrchestrationService {
             // 终态回调必须让 task_run 可观测地收口；缺失 finishedAt 时用服务端时间兜底。
             taskRun.setFinishedAt(now);
         }
+    }
+
+    private Long callbackRowsWritten(TaskRunCallbackRequest request) {
+        Long typedValue = request.rowsWritten();
+        if (typedValue != null && typedValue < 0) {
+            throw new BizException(40025, "rowsWritten 必须大于等于 0");
+        }
+        JsonNode outputValue = request.outputs() == null
+                ? null : request.outputs().get("rowsWritten");
+        if (outputValue == null || outputValue.isNull()) {
+            return typedValue;
+        }
+        if (!outputValue.isIntegralNumber()
+                || !outputValue.canConvertToLong()
+                || outputValue.longValue() < 0) {
+            throw new BizException(40025, "outputs.rowsWritten 必须是非负 long 整数");
+        }
+        long normalized = outputValue.longValue();
+        if (typedValue != null && typedValue.longValue() != normalized) {
+            throw new BizException(40025, "rowsWritten 与 outputs.rowsWritten 不一致");
+        }
+        return normalized;
+    }
+
+    private String callbackArtifactPath(TaskRunCallbackRequest request) {
+        String typedValue = request.artifactPath();
+        if (typedValue != null && typedValue.length() > 512) {
+            throw new BizException(40025, "artifactPath 长度不能超过 512");
+        }
+        JsonNode outputValue = request.outputs() == null
+                ? null : request.outputs().get("artifactPath");
+        if (outputValue == null || outputValue.isNull()) {
+            return typedValue;
+        }
+        if (!outputValue.isTextual() || outputValue.asText().length() > 512) {
+            throw new BizException(40025, "outputs.artifactPath 必须是长度不超过 512 的字符串");
+        }
+        String normalized = outputValue.asText();
+        if (typedValue != null && !typedValue.equals(normalized)) {
+            throw new BizException(40025, "artifactPath 与 outputs.artifactPath 不一致");
+        }
+        return normalized;
+    }
+
+    private JsonNode parseTaskRunOutputs(TaskRun taskRun) {
+        if (!StringUtils.hasText(taskRun.getOutputs())) {
+            return JsonUtil.mapper().createObjectNode();
+        }
+        try {
+            JsonNode outputs = JsonUtil.mapper().readTree(taskRun.getOutputs());
+            if (!outputs.isObject()) {
+                throw new IllegalArgumentException("task_run.outputs 不是 JSON 对象");
+            }
+            return outputs;
+        } catch (Exception ex) {
+            throw new IllegalArgumentException(
+                    "上游节点 " + taskRun.getTaskKey() + " 的 outputs JSON 非法", ex);
+        }
+    }
+
+    private JsonNode renderTaskConfigNode(
+            JsonNode node,
+            Map<String, ParamRenderer.UpstreamTaskOutput> upstreamOutputs) {
+        if (node.isTextual()) {
+            return JsonUtil.mapper().getNodeFactory().textNode(
+                    ParamRenderer.render(node.asText(), null, Map.of(), upstreamOutputs));
+        }
+        if (node.isObject()) {
+            ObjectNode rendered = (ObjectNode) node;
+            List<String> fields = new ArrayList<>();
+            rendered.fieldNames().forEachRemaining(fields::add);
+            fields.forEach(field -> rendered.set(
+                    field, renderTaskConfigNode(rendered.get(field), upstreamOutputs)));
+            return rendered;
+        }
+        if (node.isArray()) {
+            ArrayNode rendered = (ArrayNode) node;
+            for (int index = 0; index < rendered.size(); index++) {
+                rendered.set(index, renderTaskConfigNode(rendered.get(index), upstreamOutputs));
+            }
+            return rendered;
+        }
+        return node;
     }
 
     private boolean needsTaskRunSummary(TaskRun tr) {

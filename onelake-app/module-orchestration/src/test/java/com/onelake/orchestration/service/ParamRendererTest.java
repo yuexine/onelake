@@ -1,5 +1,6 @@
 package com.onelake.orchestration.service;
 
+import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import org.junit.jupiter.api.Test;
 
@@ -102,6 +103,56 @@ class ParamRendererTest {
         assertThatThrownBy(() -> ParamRenderer.render("${bizdate}", RunContext.empty(TriggerType.MANUAL), Map.of()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("RunContext.logicalDate");
+    }
+
+    @Test
+    void rendersSucceededUpstreamOutputsWithoutRecursiveEvaluation() throws Exception {
+        var outputs = JsonUtil.mapper().readTree("""
+                {"rowsWritten":42,"artifactPath":"s3://bucket/${bizdate}",
+                 "custom":{"partition":"20260709"}}
+                """);
+        Map<String, ParamRenderer.UpstreamTaskOutput> upstream = Map.of(
+                "extract", new ParamRenderer.UpstreamTaskOutput("SUCCEEDED", outputs));
+
+        assertThat(ParamRenderer.render(
+                "rows=${upstream.extract.rowsWritten}; path=${upstream.extract.artifactPath}; "
+                        + "partition=${upstream.extract.custom.partition}",
+                null,
+                Map.of(),
+                upstream))
+                .isEqualTo("rows=42; path=s3://bucket/${bizdate}; partition=20260709");
+    }
+
+    @Test
+    void extractsDistinctUpstreamTaskKeysWithTheSameParserUsedForRendering() {
+        assertThat(ParamRenderer.upstreamTaskKeys(
+                "${upstream.extract.rowsWritten}|${upstream.lookup.path}|"
+                        + "${upstream.extract.custom.partition}"))
+                .containsExactly("extract", "lookup");
+    }
+
+    @Test
+    void keepsUpstreamPlaceholderDuringGraphBuildAndFailsClearlyAtFinalRender() throws Exception {
+        String expression = "${upstream.extract.rowsWritten}";
+
+        assertThat(ParamRenderer.render(expression, null, Map.of())).isEqualTo(expression);
+        assertThatThrownBy(() -> ParamRenderer.render(
+                expression,
+                null,
+                Map.of(),
+                Map.of("extract", new ParamRenderer.UpstreamTaskOutput(
+                        "RUNNING", JsonUtil.mapper().readTree("{}")))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("上游节点 extract 尚未成功")
+                .hasMessageContaining("RUNNING");
+        assertThatThrownBy(() -> ParamRenderer.render(
+                expression,
+                null,
+                Map.of(),
+                Map.of("extract", new ParamRenderer.UpstreamTaskOutput(
+                        "SUCCEEDED", JsonUtil.mapper().readTree("{}")))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("outputs 缺少字段 rowsWritten");
     }
 
     private RunContext context(String logicalDate, String dataIntervalEnd) {

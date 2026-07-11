@@ -3,6 +3,7 @@ package com.onelake.orchestration.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
@@ -740,7 +741,7 @@ class OrchestrationServiceTest {
         when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
         ReflectionTestUtils.setField(service, "pipelineCallbackBaseUrl", "http://localhost:8080");
         when(sparkBuilder.build(any(), anyList(), eq("http://localhost:8080"),
-                any(RunContext.class), anyMap()))
+                any(RunContext.class), anyMap(), anyList()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of("ops", Map.of())));
         when(dagster.launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"), anyMap(), anyList()))
                 .thenReturn("dagster-legacy");
@@ -750,7 +751,7 @@ class OrchestrationServiceTest {
         assertThat(runId).isEqualTo(RUN_ID);
         assertThat(statuses).contains(DagStatus.QUEUED, DagStatus.RUNNING);
         verify(sparkBuilder).build(any(), anyList(), eq("http://localhost:8080"),
-                any(RunContext.class), anyMap());
+                any(RunContext.class), anyMap(), anyList());
         verify(sparkBuilder, never()).buildGraphRunConfig(
                 any(), anyList(), anyList(), anyString(), anyInt(), anyMap(),
                 any(RunContext.class), anyMap());
@@ -1159,7 +1160,8 @@ class OrchestrationServiceTest {
                         34L,
                         "s3://logs/run/spark_node.log",
                         2,
-                        "spark_node_step"));
+                        "spark_node_step",
+                        null));
 
         assertThat(result.applied()).isTrue();
         assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.RUNNING);
@@ -1195,7 +1197,8 @@ class OrchestrationServiceTest {
                         null,
                         "new-log",
                         3,
-                        "new-step"));
+                        "new-step",
+                        null));
 
         assertThat(result.applied()).isFalse();
         assertThat(result.currentStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
@@ -1226,6 +1229,7 @@ class OrchestrationServiceTest {
                         null,
                         "rollback-log",
                         null,
+                        null,
                         null));
 
         assertThat(result.applied()).isFalse();
@@ -1255,6 +1259,7 @@ class OrchestrationServiceTest {
                         null,
                         "stale-log",
                         2,
+                        null,
                         null));
 
         assertThat(result.applied()).isFalse();
@@ -1277,6 +1282,8 @@ class OrchestrationServiceTest {
         when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
         when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
                 .thenReturn(Optional.of(taskRun));
+        var callbackOutputs = JsonUtil.mapper().createObjectNode();
+        callbackOutputs.put("partition", "2026-07-09");
 
         TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "spark_node",
                 new TaskRunCallbackRequest(
@@ -1289,7 +1296,8 @@ class OrchestrationServiceTest {
                         4096L,
                         "s3://logs/run/spark_node.log",
                         1,
-                        "spark_node_step"));
+                        "spark_node_step",
+                        callbackOutputs));
 
         assertThat(result.applied()).isTrue();
         assertThat(taskRun.getStatus()).isEqualTo(TaskRunStatus.SUCCEEDED);
@@ -1300,7 +1308,136 @@ class OrchestrationServiceTest {
         assertThat(taskRun.getScanBytes()).isEqualTo(4096L);
         assertThat(taskRun.getLogRef()).isEqualTo("s3://logs/run/spark_node.log");
         assertThat(taskRun.getDagsterStepKey()).isEqualTo("spark_node_step");
+        assertThat(JsonUtil.fromJson(taskRun.getOutputs(), Map.class))
+                .containsEntry("rowsWritten", 88)
+                .containsEntry("artifactPath", "table:dwd.spark_node")
+                .containsEntry("partition", "2026-07-09");
         verify(taskRunRepo).save(taskRun);
+    }
+
+    @Test
+    void applyTaskRunCallbackNormalizesReservedFieldsFromOutputs() {
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag()));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
+                .thenReturn(Optional.of(taskRun));
+        var outputs = JsonUtil.mapper().createObjectNode();
+        outputs.put("rowsWritten", 9L);
+        outputs.put("artifactPath", "table:dwd.spark_node");
+
+        service.applyTaskRunCallback(RUN_ID, "spark_node", new TaskRunCallbackRequest(
+                TaskRunStatus.SUCCEEDED,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                "spark_node",
+                outputs));
+
+        assertThat(taskRun.getRowsWritten()).isEqualTo(9L);
+        assertThat(taskRun.getArtifactPath()).isEqualTo("table:dwd.spark_node");
+        assertThat(JsonUtil.fromJson(taskRun.getOutputs(), Map.class))
+                .containsEntry("rowsWritten", 9)
+                .containsEntry("artifactPath", "table:dwd.spark_node");
+    }
+
+    @Test
+    void applyTaskRunCallbackRejectsInvalidReservedOutputType() {
+        JobRun run = jobRun(DAG_ID);
+        TaskRun taskRun = taskRun("spark_node", TaskRunStatus.RUNNING);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag()));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "spark_node"))
+                .thenReturn(Optional.of(taskRun));
+        var outputs = JsonUtil.mapper().createObjectNode();
+        outputs.put("rowsWritten", "invalid");
+
+        assertThatThrownBy(() -> service.applyTaskRunCallback(
+                RUN_ID, "spark_node", new TaskRunCallbackRequest(
+                        TaskRunStatus.SUCCEEDED,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        1,
+                        "spark_node",
+                        outputs)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("outputs.rowsWritten");
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
+    void renderTaskConfigReadsSucceededUpstreamOutputsFromSameJobRun() throws Exception {
+        JobRun run = jobRun(DAG_ID);
+        TaskRun upstream = taskRun("extract", TaskRunStatus.SUCCEEDED);
+        upstream.setOutputs("{\"rowsWritten\":88,\"artifactPath\":\"table:dwd.orders\","
+                + "\"custom\":{\"partition\":\"20260709\"}}");
+        TaskRun downstream = taskRun("quality_gate", TaskRunStatus.QUEUED);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of(upstream, downstream));
+
+        var config = JsonUtil.mapper().readTree("""
+                {"sql_or_script":"assert ${upstream.extract.rowsWritten} >= 0",
+                 "config":{"path":"${upstream.extract.artifactPath}",
+                           "partition":"${upstream.extract.custom.partition}"}}
+                """);
+
+        var result = service.renderTaskConfig(
+                RUN_ID, "quality_gate", config, List.of("extract"));
+
+        assertThat(result.config().path("sql_or_script").asText()).isEqualTo("assert 88 >= 0");
+        assertThat(result.config().path("config").path("path").asText())
+                .isEqualTo("table:dwd.orders");
+        assertThat(result.config().path("config").path("partition").asText())
+                .isEqualTo("20260709");
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(DAG_ID);
+    }
+
+    @Test
+    void renderTaskConfigReportsMissingUpstreamFieldClearly() throws Exception {
+        JobRun run = jobRun(DAG_ID);
+        TaskRun upstream = taskRun("extract", TaskRunStatus.SUCCEEDED);
+        upstream.setOutputs("{\"artifactPath\":\"table:dwd.orders\"}");
+        TaskRun downstream = taskRun("quality_gate", TaskRunStatus.QUEUED);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of(upstream, downstream));
+        var config = JsonUtil.mapper().readTree(
+                "{\"sql_or_script\":\"${upstream.extract.rowsWritten}\"}");
+
+        assertThatThrownBy(() -> service.renderTaskConfig(
+                RUN_ID, "quality_gate", config, List.of("extract")))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("extract")
+                .hasMessageContaining("outputs 缺少字段 rowsWritten");
+    }
+
+    @Test
+    void renderTaskConfigRejectsSucceededTaskThatIsNotAGraphAncestor() throws Exception {
+        JobRun run = jobRun(DAG_ID);
+        TaskRun sibling = taskRun("sibling", TaskRunStatus.SUCCEEDED);
+        sibling.setOutputs("{\"rowsWritten\":88}");
+        TaskRun downstream = taskRun("quality_gate", TaskRunStatus.QUEUED);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunId(RUN_ID)).thenReturn(List.of(sibling, downstream));
+        var config = JsonUtil.mapper().readTree(
+                "{\"sql_or_script\":\"${upstream.sibling.rowsWritten}\"}");
+
+        assertThatThrownBy(() -> service.renderTaskConfig(
+                RUN_ID, "quality_gate", config, List.of()))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("sibling")
+                .hasMessageContaining("不是当前节点的图上游");
     }
 
     @Test
@@ -1327,7 +1464,8 @@ class OrchestrationServiceTest {
                         null,
                         "s3://logs/run/extract.log",
                         1,
-                        "extract_step"));
+                        "extract_step",
+                        null));
 
         assertThat(result.applied()).isTrue();
         assertThat(failed.getStatus()).isEqualTo(TaskRunStatus.FAILED);

@@ -4,6 +4,8 @@ import com.onelake.common.api.ApiResponse;
 import com.onelake.common.security.InternalApiTokenFilter;
 import com.onelake.orchestration.dto.TaskRunCallbackRequest;
 import com.onelake.orchestration.dto.TaskRunCallbackResult;
+import com.onelake.orchestration.dto.TaskConfigRenderRequest;
+import com.onelake.orchestration.dto.TaskConfigRenderResult;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.repository.DagRepository;
@@ -51,6 +53,16 @@ public class InternalTaskRunCallbackController {
             @PathVariable String taskKey,
             @Valid @RequestBody TaskRunCallbackRequest request) {
         return ApiResponse.ok(orchestrationService.applyTaskRunCallback(runId, taskKey, request));
+    }
+
+    /** Dagster task step 在实际执行前回拉同一 JobRun 的上游 outputs 并完成最终配置渲染。 */
+    @PostMapping("/runs/{runId}/tasks/{taskKey}/render-config")
+    public ApiResponse<TaskConfigRenderResult> renderTaskConfig(
+            @PathVariable UUID runId,
+            @PathVariable String taskKey,
+            @Valid @RequestBody TaskConfigRenderRequest request) {
+        return ApiResponse.ok(orchestrationService.renderTaskConfig(
+                runId, taskKey, request.config(), request.upstreamTaskKeys()));
     }
 
     /**

@@ -2,6 +2,7 @@ package com.onelake.orchestration.service.spi;
 
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
+import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.PipelineCompileResult.TaskCompileResult;
@@ -15,10 +16,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * P-Spark：为 {@code run_spark_task_op} 构建 Dagster runConfig。
@@ -84,19 +90,33 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                   String callbackBaseUrl,
                                   RunContext runContext,
                                   Map<String, String> runtimeParams) {
+        return build(ctx, tasks, callbackBaseUrl, runContext, runtimeParams, List.of());
+    }
+
+    /** 构建 LEGACY 配置，并冻结本次运行用于节点间传参的 PIPELINE 祖先集合。 */
+    public DagsterRunConfig build(TaskBundleContext ctx,
+                                  List<PipelineTask> tasks,
+                                  String callbackBaseUrl,
+                                  RunContext runContext,
+                                  Map<String, String> runtimeParams,
+                                  List<PipelineTaskEdge> pipelineEdges) {
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(java.util.stream.Collectors.toMap(PipelineTask::getTaskKey, t -> t, (a, b) -> a));
         Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
                 ctx, taskByKey.keySet());
+        Map<String, List<String>> upstreamTaskKeys = frozenUpstreamTaskKeys(
+                plan.tasks().stream().map(TaskCompileResult::taskKey).toList(), pipelineEdges);
         for (TaskCompileResult result : plan.tasks()) {
             if (result.taskType() == null || !isSparkRuntimeType(result.taskType())) continue;
             PipelineTask task = taskByKey.get(result.taskKey());
             if (task == null || !Boolean.TRUE.equals(task.getExecutable())) continue;
-            sparkTasks.add(buildPerTaskOpConfig(
+            Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(
                     task, null, runContext,
                     resolveTaskParameters(task, runtimeParams, userParamsByTask)));
+            node.put("upstream_task_keys", upstreamTaskKeys.getOrDefault(task.getTaskKey(), List.of()));
+            sparkTasks.add(node);
         }
 
         Map<String, Object> opConfig = new LinkedHashMap<>();
@@ -170,6 +190,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
                 ctx, taskByKey.keySet());
         Map<String, Map<String, String>> paramsByTaskKey = new LinkedHashMap<>();
+        Map<String, List<String>> upstreamTaskKeys = frozenUpstreamTaskKeys(
+                plan.tasks().stream().map(TaskCompileResult::taskKey).toList(), pipelineEdges);
         List<Map<String, Object>> nodes = new ArrayList<>();
         for (TaskCompileResult result : plan.tasks()) {
             PipelineTask task = taskByKey.get(result.taskKey());
@@ -183,6 +205,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                     buildPerTaskOpConfig(task, null, runContext, taskParams));
             node.put("base_attempt", Math.max(1, safeBaseAttempts.getOrDefault(task.getTaskKey(), 1)));
             node.put("max_retries", resolveMaxRetries(task));
+            node.put("upstream_task_keys", upstreamTaskKeys.getOrDefault(task.getTaskKey(), List.of()));
             nodes.add(node);
         }
 
@@ -293,6 +316,33 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             }
         });
         return entries;
+    }
+
+    private static Map<String, List<String>> frozenUpstreamTaskKeys(
+            Collection<String> taskKeys,
+            List<PipelineTaskEdge> pipelineEdges) {
+        Map<String, Set<String>> parentsByTask = new LinkedHashMap<>();
+        for (PipelineTaskEdge edge : pipelineEdges == null ? List.<PipelineTaskEdge>of() : pipelineEdges) {
+            if (edge.getEdgeLayer() == EdgeLayer.PIPELINE) {
+                parentsByTask.computeIfAbsent(edge.getTargetKey(), ignored -> new LinkedHashSet<>())
+                        .add(edge.getSourceKey());
+            }
+        }
+
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        for (String taskKey : taskKeys) {
+            Set<String> ancestors = new LinkedHashSet<>();
+            Deque<String> pending = new ArrayDeque<>(
+                    parentsByTask.getOrDefault(taskKey, Set.of()));
+            while (!pending.isEmpty()) {
+                String parent = pending.removeFirst();
+                if (ancestors.add(parent)) {
+                    pending.addAll(parentsByTask.getOrDefault(parent, Set.of()));
+                }
+            }
+            result.put(taskKey, List.copyOf(ancestors));
+        }
+        return result;
     }
 
     private static Map<String, Object> resourceProfile(JsonNode cfg) {

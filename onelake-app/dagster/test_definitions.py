@@ -1,3 +1,4 @@
+import os
 import signal
 import sys
 from types import SimpleNamespace
@@ -88,8 +89,9 @@ def _native_node_config(task_key, task_type="SPARK_SQL"):
     }
 
 
-def _command(exit_code):
-    return [sys.executable, "-c", f"import sys; sys.exit({exit_code})"], []
+def _command(exit_code, stdout=""):
+    script = f"import sys; print({stdout!r}); sys.exit({exit_code})"
+    return [sys.executable, "-c", script], []
 
 
 def _install_callback_collector(monkeypatch):
@@ -202,12 +204,177 @@ def test_spark_log_content_redacts_credentials():
     assert "spark.executorEnv.AWS_SECRET_ACCESS_KEY=***REDACTED***" in content
 
 
+def test_success_callback_normalizes_standard_and_custom_outputs():
+    payload = definitions._normalize_callback_payload({
+        "status": "SUCCEEDED",
+        "rowsWritten": 42,
+        "artifactPath": "table:onelake.dwd.orders",
+        "outputs": {"partition": "20260709"},
+    })
+
+    assert payload["outputs"] == {
+        "rowsWritten": 42,
+        "artifactPath": "table:onelake.dwd.orders",
+        "partition": "20260709",
+    }
+
+
+def test_succeeded_callback_retries_and_requires_backend_ack(monkeypatch):
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise RuntimeError("backend unavailable")
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    monkeypatch.setattr(definitions.time, "sleep", lambda *_: None)
+    log = _Log()
+
+    with pytest.raises(definitions._CallbackDeliveryError, match="not acknowledged"):
+        definitions._callback(
+            "http://api", "run-1", "extract", {"status": "SUCCEEDED"}, log
+        )
+
+    assert len(calls) == 3
+    assert len(log.warnings) == 3
+
+
+def test_succeeded_callback_requires_configured_backend_url(monkeypatch):
+    monkeypatch.delenv("ONELAKE_CALLBACK_BASE_URL", raising=False)
+
+    with pytest.raises(definitions._CallbackDeliveryError, match="base URL is empty"):
+        definitions._callback(
+            "", "run-1", "extract", {"status": "SUCCEEDED"}, _Log()
+        )
+
+
+def test_succeeded_callback_accepts_only_authoritative_succeeded_status(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"applied": False, "currentStatus": "FAILED"}}
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response()
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    monkeypatch.setattr(definitions.time, "sleep", lambda *_: None)
+
+    with pytest.raises(definitions._CallbackDeliveryError, match="not acknowledged"):
+        definitions._callback(
+            "http://api", "run-1", "extract", {"status": "SUCCEEDED"}, _Log()
+        )
+
+    assert len(calls) == 3
+
+
+def test_succeeded_callback_accepts_idempotent_succeeded_status(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"applied": False, "currentStatus": "SUCCEEDED"}}
+
+    monkeypatch.setitem(
+        sys.modules, "requests", SimpleNamespace(post=lambda *args, **kwargs: Response())
+    )
+
+    definitions._callback(
+        "http://api", "run-1", "extract", {"status": "SUCCEEDED"}, _Log()
+    )
+
+
+def test_extract_task_outputs_uses_last_valid_marker_and_validates_rows_written():
+    stdout = """
+noise
+ONELAKE_OUTPUTS_JSON={not-json}
+ONELAKE_OUTPUTS_JSON={"rowsWritten":5,"partition":"20260711"}
+"""
+
+    assert definitions._extract_task_outputs(stdout) == {
+        "rowsWritten": 5,
+        "partition": "20260711",
+    }
+    with pytest.raises(ValueError, match="non-negative integer"):
+        definitions._extract_task_outputs('ONELAKE_OUTPUTS_JSON={"rowsWritten":-1}')
+
+
+def test_spark_sql_wrapper_reads_snapshot_metrics_without_write_statement_regex():
+    node = _node("spark_a")
+    node["sql_or_script"] = """
+-- transformation header
+INSERT INTO onelake.dwd.spark_a SELECT 1;
+MERGE INTO onelake.dwd.spark_a t USING source s ON t.id = s.id
+WHEN MATCHED THEN UPDATE SET t.value = s.value
+"""
+    cmd, temp_paths = definitions._build_spark_submit(node, "onelake", "local[2]")
+    try:
+        wrapper_path = cmd[-3]
+        with open(wrapper_path, encoding="utf-8") as wrapper_file:
+            wrapper = wrapper_file.read()
+        assert definitions._TASK_OUTPUTS_MARKER in wrapper
+        assert "summary['added-records']" in wrapper
+        assert "summary['spark.app.id']" in wrapper
+        assert "spark.catalog.tableExists(target_fqn)" in wrapper
+        assert "table_write" not in wrapper
+        assert ".count()" not in wrapper
+        assert cmd[-1] == "onelake.dwd.spark_a"
+    finally:
+        for path in temp_paths:
+            os.unlink(path)
+
+
+def test_render_node_config_pulls_final_config_only_when_upstream_is_referenced(monkeypatch):
+    calls = []
+
+    class Response:
+        ok = True
+        text = ""
+        reason = "OK"
+
+        def json(self):
+            return {"data": {"config": {"sql_or_script": "assert 42 >= 0"}}}
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    monkeypatch.setenv("ONELAKE_INTERNAL_TOKEN", "internal-secret")
+
+    untouched = {"sql_or_script": "SELECT 1"}
+    assert definitions._render_node_config("http://api", "run-1", "plain", untouched) is untouched
+    rendered = definitions._render_node_config(
+        "http://api",
+        "run-1",
+        "quality_gate",
+        {
+            "sql_or_script": "assert ${upstream.extract.rowsWritten} >= 0",
+            "upstream_task_keys": ["extract"],
+        },
+    )
+
+    assert rendered["sql_or_script"] == "assert 42 >= 0"
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/runs/run-1/tasks/quality_gate/render-config")
+    assert calls[0][1]["headers"]["X-Onelake-Internal-Token"] == "internal-secret"
+    assert calls[0][1]["json"]["upstreamTaskKeys"] == ["extract"]
+
+
 def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
     callbacks = _install_callback_collector(monkeypatch)
     task = _node("spark_a")
     task.pop("max_retries")
 
-    monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: _command(0))
+    monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: _command(
+        0, 'ONELAKE_OUTPUTS_JSON={"rowsWritten":5,"partition":"20260711"}'
+    ))
 
     result = definitions.run_spark_task_op(
         build_op_context(op_config=_legacy_config([task], callback_base_url="http://api"))
@@ -219,6 +386,8 @@ def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
     assert success_payload["logRef"] == "log://placeholder"
     assert success_payload["attempt"] == 1
     assert success_payload["artifactPath"] == "table:onelake.dwd.spark_a"
+    assert success_payload["rowsWritten"] == 5
+    assert success_payload["outputs"] == {"rowsWritten": 5, "partition": "20260711"}
 
 
 def test_native_pipeline_job_exposes_per_task_steps_and_native_dependencies(monkeypatch):
@@ -320,6 +489,36 @@ def test_native_node_forwards_termination_to_spark_process_group(monkeypatch):
 
     assert killed == [(4321, signal.SIGTERM)]
     assert _statuses(callbacks, "slow_node") == ["RUNNING"]
+
+
+def test_native_node_does_not_repeat_spark_write_when_success_callback_is_unacknowledged(monkeypatch):
+    submit_calls = []
+    materializations = []
+
+    def build(*args):
+        submit_calls.append(args)
+        return _command(0, 'ONELAKE_OUTPUTS_JSON={"rowsWritten":5}')
+
+    def callback(base_url, run_id, task_key, payload, log):
+        if payload["status"] == "SUCCEEDED":
+            raise definitions._CallbackDeliveryError("backend unavailable")
+
+    monkeypatch.setattr(definitions, "_build_spark_submit", build)
+    monkeypatch.setattr(definitions, "_callback", callback)
+    monkeypatch.setattr(definitions, "_upload_log", lambda *args: "log://placeholder")
+    config = _native_node_config("spark_write")
+    config["max_retries"] = 2
+    context = SimpleNamespace(
+        op_config=config,
+        log=_Log(),
+        log_event=materializations.append,
+    )
+
+    with pytest.raises(definitions._CallbackDeliveryError, match="backend unavailable"):
+        definitions._execute_native_graph_node(context)
+
+    assert len(submit_calls) == 1
+    assert materializations == []
 
 
 def test_graph_linear_order_and_sync_ref(monkeypatch):

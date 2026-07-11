@@ -24,6 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -80,6 +82,7 @@ public class PipelineCompileService {
 
         // 2. 图级校验：环路、悬空边、反向跨引擎边等。
         List<String> graphErrors = new ArrayList<>(validateGraph(tasks, edges, taskByKey));
+        graphErrors.addAll(validateUpstreamReferences(tasks, edges));
 
         // 3. 按 PIPELINE 边做拓扑排序。
         List<PipelineTask> ordered;
@@ -164,7 +167,7 @@ public class PipelineCompileService {
             return fail(t, t.getTaskType().name() + " task requires non-empty config." + expectedField);
         }
         try {
-            ParamRenderer.validate(script);
+            validateParamExpressions(cfg);
         } catch (IllegalArgumentException ex) {
             return fail(t, t.getTaskType().name() + " parameter expression invalid: " + ex.getMessage());
         }
@@ -185,6 +188,68 @@ public class PipelineCompileService {
         if (node.isContainerNode()) {
             node.forEach(PipelineCompileService::validateParamExpressions);
         }
+    }
+
+    /** 上游输出引用必须与 PIPELINE 图的传递依赖一致，不能借执行时序读取兄弟节点。 */
+    private static List<String> validateUpstreamReferences(List<PipelineTask> tasks,
+                                                           List<PipelineTaskEdge> edges) {
+        Map<String, Set<String>> parentsByTask = new LinkedHashMap<>();
+        for (PipelineTask task : tasks) {
+            parentsByTask.put(task.getTaskKey(), new LinkedHashSet<>());
+        }
+        for (PipelineTaskEdge edge : edges) {
+            if (edge.getEdgeLayer() == EdgeLayer.PIPELINE
+                    && parentsByTask.containsKey(edge.getSourceKey())
+                    && parentsByTask.containsKey(edge.getTargetKey())) {
+                parentsByTask.get(edge.getTargetKey()).add(edge.getSourceKey());
+            }
+        }
+
+        List<String> errors = new ArrayList<>();
+        for (PipelineTask task : tasks) {
+            Set<String> references;
+            try {
+                references = upstreamTaskKeys(parseSafeJson(task.getConfig()));
+            } catch (IllegalArgumentException ignored) {
+                // 节点级参数校验已经给出更精确的语法错误，避免重复图错误。
+                continue;
+            }
+            Set<String> ancestors = collectAncestors(task.getTaskKey(), parentsByTask);
+            for (String referencedTask : references) {
+                if (!ancestors.contains(referencedTask)) {
+                    errors.add("Task " + task.getTaskKey()
+                            + " references non-upstream task: " + referencedTask);
+                }
+            }
+        }
+        return errors;
+    }
+
+    private static Set<String> upstreamTaskKeys(JsonNode node) {
+        Set<String> taskKeys = new LinkedHashSet<>();
+        if (node == null || node.isNull()) {
+            return taskKeys;
+        }
+        if (node.isTextual()) {
+            taskKeys.addAll(ParamRenderer.upstreamTaskKeys(node.asText()));
+        } else if (node.isContainerNode()) {
+            node.forEach(child -> taskKeys.addAll(upstreamTaskKeys(child)));
+        }
+        return taskKeys;
+    }
+
+    private static Set<String> collectAncestors(String taskKey,
+                                                Map<String, Set<String>> parentsByTask) {
+        Set<String> ancestors = new LinkedHashSet<>();
+        Deque<String> pending = new ArrayDeque<>(
+                parentsByTask.getOrDefault(taskKey, Set.of()));
+        while (!pending.isEmpty()) {
+            String parent = pending.removeFirst();
+            if (ancestors.add(parent)) {
+                pending.addAll(parentsByTask.getOrDefault(parent, Set.of()));
+            }
+        }
+        return ancestors;
     }
 
     private static com.fasterxml.jackson.databind.JsonNode parseSafeJson(String json) {

@@ -21,6 +21,7 @@ import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
+import com.onelake.orchestration.repository.PipelineParamRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
 import com.onelake.orchestration.service.spi.SparkRunConfigBuilder;
 import org.junit.jupiter.api.AfterEach;
@@ -79,6 +80,7 @@ class PipelineEndToEndTest {
     @Mock private DagRepository dagRepo;
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
+    @Mock private PipelineParamRepository paramRepo;
     @Mock private TaskRunRepository taskRunRepo;
     @Mock private JobRunRepository runRepo;
     @Mock private DagsterClient dagster;
@@ -108,7 +110,7 @@ class PipelineEndToEndTest {
     @BeforeEach
     void setup() {
         compileService = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
-        pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, taskRunRepo,
+        pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
                 runRepo, compileService, outboxProvider);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, taskRepo, edgeRepo, taskRunRepo,

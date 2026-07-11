@@ -35,6 +35,16 @@ public final class ParamRenderer {
     private ParamRenderer() {
     }
 
+    /** 判断参数键是否会被运行时表达式语法占用，避免用户参数保存后被静默覆盖。 */
+    public static boolean isReservedExpressionKey(String key) {
+        if (key == null) {
+            return false;
+        }
+        return key.startsWith("bizdate")
+                || key.startsWith("cyctime")
+                || key.startsWith("upstream.");
+    }
+
     /**
      * H1 兼容入口：只渲染普通键值参数。
      */

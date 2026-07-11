@@ -38,6 +38,7 @@ import {
   CheckCircleOutlined,
   CheckOutlined,
   CalendarOutlined,
+  ControlOutlined,
   CloseCircleOutlined,
   CloseOutlined,
   DeleteOutlined,
@@ -59,6 +60,7 @@ import { PipelineAPI } from '../../../api';
 import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
 import { BackfillWizard } from './BackfillWizard';
 import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
+import { PipelineParamDrawer } from './PipelineParamDrawer';
 
 const { Text } = Typography;
 
@@ -428,6 +430,7 @@ export default function UnifiedPipelineEditor() {
   const [validationRequestError, setValidationRequestError] = useState<string | undefined>(undefined);
   const [backfillOpen, setBackfillOpen] = useState(false);
   const [schedulingOpen, setSchedulingOpen] = useState(false);
+  const [paramDrawerOpen, setParamDrawerOpen] = useState(false);
 
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
     setCreateMeta(meta);
@@ -585,6 +588,7 @@ export default function UnifiedPipelineEditor() {
   // Build inspector props from selected task + local draft patch
   const inspectorProps: InspectorProps | undefined = editor.selectedTask
     ? {
+        dagId: dagId!,
         task: { ...editor.selectedTask, ...(draftPatch as Partial<typeof editor.selectedTask> | undefined) },
         tasks: editor.tasks,
         edges: editor.edges,
@@ -847,6 +851,9 @@ export default function UnifiedPipelineEditor() {
             <Button icon={<SettingOutlined />} onClick={() => setSchedulingOpen(true)}>
               调度配置
             </Button>
+            <Button icon={<ControlOutlined />} onClick={() => setParamDrawerOpen(true)}>
+              参数管理
+            </Button>
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -888,6 +895,12 @@ export default function UnifiedPipelineEditor() {
         dagId={dagId}
         open={schedulingOpen}
         onClose={() => setSchedulingOpen(false)}
+      />
+
+      <PipelineParamDrawer
+        dagId={dagId}
+        open={paramDrawerOpen}
+        onClose={() => setParamDrawerOpen(false)}
       />
 
       {/* P6-A: live run banner */}

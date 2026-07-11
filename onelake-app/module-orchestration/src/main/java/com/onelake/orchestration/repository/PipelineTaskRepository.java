@@ -1,7 +1,11 @@
 package com.onelake.orchestration.repository;
 
 import com.onelake.orchestration.domain.entity.PipelineTask;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
@@ -22,6 +26,17 @@ public interface PipelineTaskRepository extends JpaRepository<PipelineTask, UUID
 
     /** 用 DAG + taskKey 定位节点；taskKey 是流水线内业务唯一键。 */
     Optional<PipelineTask> findByDagIdAndTaskKey(UUID dagId, String taskKey);
+
+    /**
+     * 锁定流水线节点，串行化节点删除与节点级参数替换。
+     *
+     * <p>pipeline_param 以 task_key 软关联节点，保存 TASK 参数前必须持有节点行锁，
+     * 确保并发删除会在参数保存完成后执行清理，或让保存方观察到节点已经不存在。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select pt from PipelineTask pt where pt.dagId = :dagId and pt.taskKey = :taskKey")
+    Optional<PipelineTask> findByDagIdAndTaskKeyForUpdate(@Param("dagId") UUID dagId,
+                                                          @Param("taskKey") String taskKey);
 
     /** 兼容历史模型迁移时查询已引用该 modelId 的节点。 */
     Optional<PipelineTask> findByTenantIdAndModelId(UUID tenantId, UUID modelId);

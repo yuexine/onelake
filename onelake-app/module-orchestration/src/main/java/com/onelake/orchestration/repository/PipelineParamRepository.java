@@ -25,6 +25,10 @@ public interface PipelineParamRepository extends JpaRepository<PipelineParam, UU
     List<PipelineParam> findByTenantIdAndDagIdAndTaskKeyAndScope(
             UUID tenantId, UUID dagId, String taskKey, String scope);
 
+    /** 删除节点时同步清理其参数，避免 task_key 字符串引用形成孤儿记录。 */
+    long deleteByTenantIdAndDagIdAndTaskKeyAndScope(
+            UUID tenantId, UUID dagId, String taskKey, String scope);
+
     /** 单次读取一条流水线运行所需的全局、流水线和指定节点参数。 */
     @Query("""
             select p from PipelineParam p

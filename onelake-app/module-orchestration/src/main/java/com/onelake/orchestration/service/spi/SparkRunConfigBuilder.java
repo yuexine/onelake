@@ -105,7 +105,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         Map<String, PipelineTask> taskByKey = tasks.stream()
                 .collect(java.util.stream.Collectors.toMap(PipelineTask::getTaskKey, t -> t, (a, b) -> a));
         Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
-                ctx, taskByKey.keySet());
+                ctx, taskByKey.keySet(), runContext, runtimeParams);
         Map<String, List<String>> upstreamTaskKeys = frozenUpstreamTaskKeys(
                 plan.tasks().stream().map(TaskCompileResult::taskKey).toList(), pipelineEdges);
         for (TaskCompileResult result : plan.tasks()) {
@@ -188,7 +188,7 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         // base_attempt 只在重跑子图时由服务层传入；普通触发默认 1，保持旧 GRAPH 行为不变。
         Map<String, Integer> safeBaseAttempts = baseAttempts == null ? Map.of() : baseAttempts;
         Map<String, Map<String, String>> userParamsByTask = resolveUserParameters(
-                ctx, taskByKey.keySet());
+                ctx, taskByKey.keySet(), runContext, runtimeParams);
         Map<String, Map<String, String>> paramsByTaskKey = new LinkedHashMap<>();
         Map<String, List<String>> upstreamTaskKeys = frozenUpstreamTaskKeys(
                 plan.tasks().stream().map(TaskCompileResult::taskKey).toList(), pipelineEdges);
@@ -290,9 +290,12 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
     private Map<String, Map<String, String>> resolveUserParameters(
             TaskBundleContext ctx,
-            java.util.Collection<String> taskKeys) {
+            java.util.Collection<String> taskKeys,
+            RunContext runContext,
+            Map<String, String> builtInParams) {
         Map<String, Map<String, String>> resolved = paramResolver.resolveForTasks(
-                ctx.tenantId(), ctx.pipelineId(), taskKeys);
+                ctx.tenantId(), ctx.pipelineId(), taskKeys, runContext,
+                builtInParams == null ? Map.of() : builtInParams);
         return resolved == null ? Map.of() : resolved;
     }
 
@@ -311,7 +314,12 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         }
         List<Map<String, String>> entries = new ArrayList<>();
         runtimeParams.forEach((key, value) -> {
-            if (StringUtils.hasText(key) && value != null) {
+            // 已被 SQL/脚本实际引用的上游表达式会在 Java 一次渲染后留在 sql_or_script，
+            // 由节点启动前的 render-config 解析；不要把未使用的表达式放进整份 op config，
+            // 否则 Dagster 会误判该节点引用了对应上游并触发无关的祖先校验。
+            if (StringUtils.hasText(key)
+                    && value != null
+                    && !value.contains("${upstream.")) {
                 entries.add(Map.of("key", key, "value", value));
             }
         });

@@ -20,7 +20,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
@@ -34,7 +37,9 @@ class SparkRunConfigBuilderTest {
     @BeforeEach
     void setup() {
         reset(paramResolver);
-        when(paramResolver.resolveForTasks(any(), any(), anyCollection())).thenReturn(Map.of());
+        when(paramResolver.resolveForTasks(
+                any(), any(), anyCollection(), nullable(RunContext.class), anyMap()))
+                .thenReturn(Map.of());
     }
 
     @Test
@@ -151,7 +156,7 @@ class SparkRunConfigBuilderTest {
                 .containsExactly("sync_user");
         assertThat((List<String>) sparkNode.get("from_tables")).containsExactly("onelake.ods.user");
         verify(paramResolver).resolveForTasks(
-                tenantId, pipelineId, Set.of("sync_user", "spark_dwd"));
+                tenantId, pipelineId, Set.of("sync_user", "spark_dwd"), null, Map.of());
         Map<String, Object> execution = (Map<String, Object>) config.opConfig().get("execution");
         assertThat(execution).isEqualTo(Map.of("config", Map.of("max_concurrent", 6)));
     }
@@ -261,7 +266,7 @@ class SparkRunConfigBuilderTest {
                 pipelineId, tenantId, runId, compile,
                 "pipeline_" + pipelineId, "spark-default", "spark-small");
         when(paramResolver.resolveForTasks(
-                eq(tenantId), eq(pipelineId), anyCollection()))
+                eq(tenantId), eq(pipelineId), anyCollection(), isNull(), anyMap()))
                 .thenReturn(Map.of("daily", Map.of(
                         "region", "eu", "run_id", "user-value")));
 
@@ -278,6 +283,62 @@ class SparkRunConfigBuilderTest {
                 .containsExactlyInAnyOrder(
                         Map.of("key", "region", "value", "eu"),
                         Map.of("key", "run_id", "value", runId.toString()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void keepsDeferredUpstreamExpressionsOnlyWhereNodeSqlUsesThem() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask extract = task(
+                pipelineId, tenantId, "extract", TaskType.SPARK_SQL, true,
+                "{\"sql\":\"select 1\"}");
+        PipelineTask transform = task(
+                pipelineId, tenantId, "transform", TaskType.SPARK_SQL, true,
+                "{\"sql\":\"select '${row_count}'\"}");
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(extract, transform).stream()
+                        .map(task -> new PipelineCompileResult.TaskCompileResult(
+                                task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                                true, task.getTargetFqn(), null))
+                        .toList(),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+        Map<String, String> resolved = Map.of(
+                "region", "cn",
+                "row_count", "${upstream.extract.rowsWritten}");
+        when(paramResolver.resolveForTasks(
+                eq(tenantId), eq(pipelineId), anyCollection(), isNull(), anyMap()))
+                .thenReturn(Map.of("extract", resolved, "transform", resolved));
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context,
+                List.of(extract, transform),
+                List.of(edge("extract", "transform", EdgeLayer.PIPELINE)),
+                "",
+                1,
+                Map.of(),
+                Map.of());
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> extractConfig = (Map<String, Object>)
+                ((Map<String, Object>) ops.get("extract")).get("config");
+        Map<String, Object> transformConfig = (Map<String, Object>)
+                ((Map<String, Object>) ops.get("transform")).get("config");
+        assertThat(extractConfig.get("sql_or_script")).isEqualTo("select 1");
+        assertThat(transformConfig.get("sql_or_script"))
+                .isEqualTo("select '${upstream.extract.rowsWritten}'");
+        assertThat((List<Map<String, String>>) extractConfig.get("runtime_params"))
+                .containsExactly(Map.of("key", "region", "value", "cn"));
+        assertThat((List<Map<String, String>>) transformConfig.get("runtime_params"))
+                .containsExactly(Map.of("key", "region", "value", "cn"));
     }
 
     @Test
@@ -312,6 +373,12 @@ class SparkRunConfigBuilderTest {
         Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
         assertThat(opConfig.get("sql_or_script"))
                 .isEqualTo("select '2026-07-01', '20260630', '2026-07-02T00:00:00+08:00'");
+        verify(paramResolver).resolveForTasks(
+                tenantId,
+                pipelineId,
+                Set.of("daily"),
+                runContext,
+                runContext.builtInParameters(runId));
     }
 
     @Test

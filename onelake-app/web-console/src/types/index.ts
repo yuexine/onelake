@@ -172,6 +172,29 @@ export interface CreatePipelineDependencyRequest {
   offsetN?: number;
 }
 
+export type PipelineParamScope = 'GLOBAL' | 'PIPELINE' | 'TASK';
+export type PipelineParamValueType = 'STRING' | 'NUMBER' | 'BOOL' | 'EXPR';
+
+/** 租户全局、流水线或节点级运行参数。 */
+export interface PipelineParam {
+  id?: UUID;
+  scope: PipelineParamScope;
+  dagId?: UUID;
+  taskKey?: string;
+  paramKey: string;
+  paramValue?: string;
+  valueType: PipelineParamValueType;
+  description?: string;
+  updatedAt?: string;
+}
+
+/** 流水线参数 PUT 的目标作用域；每次只替换一个集合。 */
+export interface PipelineParamReplaceRequest {
+  scope: 'PIPELINE' | 'TASK';
+  taskKey?: string;
+  params: PipelineParam[];
+}
+
 export interface JobRun {
   id: UUID;
   dagId: UUID;

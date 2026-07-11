@@ -4,11 +4,13 @@ import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
+import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.dto.PipelineValidationResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
+import com.onelake.orchestration.repository.PipelineParamRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,6 +47,7 @@ class PipelineStatusMachineTest {
     @Mock private DagRepository dagRepo;
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
+    @Mock private PipelineParamRepository paramRepo;
     @Mock private TaskRunRepository taskRunRepo;
     @Mock private JobRunRepository runRepo;
     @Mock private PipelineCompileService compileService;
@@ -57,7 +60,7 @@ class PipelineStatusMachineTest {
 
     @BeforeEach
     void setup() {
-        service = new PipelineService(dagRepo, taskRepo, edgeRepo, taskRunRepo,
+        service = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
                 runRepo, compileService, outboxProvider);
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
@@ -162,6 +165,27 @@ class PipelineStatusMachineTest {
                 .hasMessageContaining("运行实例不存在");
 
         verifyNoInteractions(taskRunRepo);
+    }
+
+    @Test
+    void deletingTaskAlsoDeletesItsScopedParams() {
+        Dag dag = dag("DRAFT");
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey("transform");
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKeyForUpdate(dagId, "transform"))
+                .thenReturn(Optional.of(task));
+        when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
+
+        service.deleteTask(dagId, "transform");
+
+        verify(paramRepo).deleteByTenantIdAndDagIdAndTaskKeyAndScope(
+                tenantId, dagId, "transform", "TASK");
+        verify(taskRepo).findByDagIdAndTaskKeyForUpdate(dagId, "transform");
+        verify(taskRepo).delete(task);
     }
 
     private Dag dag(String status) {

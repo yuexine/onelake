@@ -119,6 +119,38 @@ class ParamResolverTest {
                 .containsEntry("trigger_type", "BACKFILL");
     }
 
+    @Test
+    void evaluatesOnlyTypedExpressionsOnceWithRunContext() {
+        UUID runId = UUID.randomUUID();
+        RunContext context = new RunContext(
+                Instant.parse("2026-07-01T16:00:00Z"),
+                Instant.parse("2026-07-01T16:00:00Z"),
+                Instant.parse("2026-07-02T16:00:00Z"),
+                "Asia/Shanghai",
+                "NORMAL",
+                null,
+                TriggerType.BACKFILL);
+        when(paramRepository.findForResolution(tenantId, dagId, Set.of("transform")))
+                .thenReturn(List.of(
+                        scopedParam("GLOBAL", null, "region", "cn", "STRING"),
+                        scopedParam("PIPELINE", null, "cutoff", "${bizdate-1:yyyyMMdd}", "EXPR"),
+                        scopedParam("TASK", "transform", "limit", "${upstream.extract.rowsWritten}", "EXPR"),
+                        scopedParam("TASK", "transform", "literal", "${bizdate}", "STRING")));
+
+        Map<String, Map<String, String>> resolved = resolver.resolveForTasks(
+                tenantId,
+                dagId,
+                Set.of("transform"),
+                context,
+                context.builtInParameters(runId));
+
+        assertThat(resolved.get("transform"))
+                .containsEntry("region", "cn")
+                .containsEntry("cutoff", "20260701")
+                .containsEntry("limit", "${upstream.extract.rowsWritten}")
+                .containsEntry("literal", "${bizdate}");
+    }
+
     private PipelineParam param(String key, String value) {
         PipelineParam param = new PipelineParam();
         param.setParamKey(key);
@@ -127,9 +159,15 @@ class ParamResolverTest {
     }
 
     private PipelineParam scopedParam(String scope, String taskKey, String key, String value) {
+        return scopedParam(scope, taskKey, key, value, "STRING");
+    }
+
+    private PipelineParam scopedParam(
+            String scope, String taskKey, String key, String value, String valueType) {
         PipelineParam param = param(key, value);
         param.setScope(scope);
         param.setTaskKey(taskKey);
+        param.setValueType(valueType);
         return param;
     }
 }

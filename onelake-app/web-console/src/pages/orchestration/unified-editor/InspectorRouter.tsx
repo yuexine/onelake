@@ -10,8 +10,10 @@ import { InspectorLayout } from './InspectorLayout';
 import { QualityGateInspector } from './inspectors/QualityGateInspector';
 import { SparkInspector } from './inspectors/SparkInspector';
 import { SyncRefInspector } from './inspectors/SyncRefInspector';
+import { NodeParamEditor } from './NodeParamEditor';
 
 export interface InspectorProps {
+  dagId: string;
   task: PipelineTask;
   tasks: PipelineTask[];
   edges: PipelineTaskEdge[];
@@ -48,6 +50,7 @@ export function InspectorRouter(props: InspectorProps | { task?: undefined }) {
   return (
     <InspectorLayout task={task} tasks={props.tasks} edges={props.edges}>
       {inspector}
+      <NodeParamEditor dagId={props.dagId} taskKey={task.taskKey} />
     </InspectorLayout>
   );
 }

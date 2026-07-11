@@ -26,6 +26,7 @@ import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.JobRunRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
+import com.onelake.orchestration.repository.PipelineParamRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -68,6 +69,7 @@ public class PipelineService {
     private final DagRepository dagRepo;
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
+    private final PipelineParamRepository paramRepo;
     private final TaskRunRepository taskRunRepo;
     private final JobRunRepository runRepo;
     private final PipelineCompileService compileService;
@@ -240,9 +242,12 @@ public class PipelineService {
     /** 删除节点及所有入边/出边，避免图中残留悬空引用。 */
     @Transactional
     public void deleteTask(UUID dagId, String taskKey) {
-        getPipeline(dagId);
-        PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
+        Dag dag = getPipeline(dagId);
+        PipelineTask t = taskRepo.findByDagIdAndTaskKeyForUpdate(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
+        // pipeline_param 通过稳定 task_key 关联节点而非外键，必须在同一事务显式清理。
+        paramRepo.deleteByTenantIdAndDagIdAndTaskKeyAndScope(
+                dag.getTenantId(), dagId, taskKey, "TASK");
         taskRepo.delete(t);
         // 级联删除引用该 task_key 的边，避免留下悬空引用。
         edgeRepo.findByDagId(dagId).stream()

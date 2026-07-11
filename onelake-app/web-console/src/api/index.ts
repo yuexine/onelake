@@ -68,6 +68,8 @@ import type {
   ScheduleCalendar,
   PipelineDependency,
   CreatePipelineDependencyRequest,
+  PipelineParam,
+  PipelineParamReplaceRequest,
 } from '../types';
 
 export interface PageResult<T> {
@@ -382,6 +384,18 @@ export const DependencyAPI = {
     unwrap<PipelineDependency>(http.post(`/orchestration/pipelines/${dagId}/dependencies`, payload)),
   delete: (dagId: string, dependencyId: string) =>
     unwrap<void>(http.delete(`/orchestration/pipelines/${dagId}/dependencies/${dependencyId}`)),
+};
+
+/** 三级运行参数管理 API；流水线 PUT 每次只替换显式指定的目标作用域。 */
+export const ParamAPI = {
+  getGlobal: () =>
+    unwrap<PipelineParam[]>(http.get('/orchestration/params/global')),
+  updateGlobal: (params: PipelineParam[]) =>
+    unwrap<PipelineParam[]>(http.put('/orchestration/params/global', params)),
+  getPipeline: (dagId: string) =>
+    unwrap<PipelineParam[]>(http.get(`/orchestration/pipelines/${dagId}/params`)),
+  updatePipeline: (dagId: string, request: PipelineParamReplaceRequest) =>
+    unwrap<PipelineParam[]>(http.put(`/orchestration/pipelines/${dagId}/params`, request)),
 };
 
 /**

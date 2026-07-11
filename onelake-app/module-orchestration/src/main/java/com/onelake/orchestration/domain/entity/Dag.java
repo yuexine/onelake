@@ -57,6 +57,11 @@ public class Dag {
     private String engine;           // 当前流水线主路径使用 SPARK。
     private String resourceGroup;    // 例如 spark-default。
     private String computeProfile;   // 例如 spark-small。
+    /** 当前生产环境使用的不可变流水线发布版本。 */
+    private UUID publishedVersionId;
+    /** 当前 DEV 草稿是否包含尚未发布的变更。 */
+    @Column(nullable = false)
+    private Boolean hasUnpublishedChanges = false;
     /** 业务数据区间粒度：HOUR、DAY 或 MONTH。 */
     private String partitionGrain = "DAY";
 

@@ -60,6 +60,9 @@ public class JobRun {
     /** 非空时表示该运行由某个 scheduler-managed backfill 批次产生。 */
     private UUID backfillId;
 
+    /** 本次运行绑定的不可变流水线发布版本；DEV 草稿试跑可为空。 */
+    private UUID pipelineVersionId;
+
     /** 创建运行时冻结的业务时区，避免 DAG 配置变更重解释历史业务日期。 */
     @Column(nullable = false, length = 64)
     private String timezone = "Asia/Shanghai";

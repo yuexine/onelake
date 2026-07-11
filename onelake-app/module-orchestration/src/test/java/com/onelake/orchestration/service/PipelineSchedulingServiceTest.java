@@ -63,8 +63,8 @@ class PipelineSchedulingServiceTest {
         ScheduleCalendar calendar = new ScheduleCalendar();
         calendar.setId(calendarId);
         calendar.setTenantId(TENANT_ID);
-        when(dagRepo.findByIdAndTenantId(dag.getId(), TENANT_ID))
-                .thenReturn(Optional.of(dag), Optional.of(persisted));
+        when(dagRepo.findByIdForUpdate(dag.getId())).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dag.getId(), TENANT_ID)).thenReturn(Optional.of(persisted));
         when(calendarRepo.findByIdAndTenantId(calendarId, TENANT_ID))
                 .thenReturn(Optional.of(calendar));
         when(dagRepo.updateSchedulingPolicy(
@@ -116,8 +116,7 @@ class PipelineSchedulingServiceTest {
     @Test
     void rejectsInvalidTimezoneAndReversedWindow() {
         Dag dag = dag();
-        when(dagRepo.findByIdAndTenantId(dag.getId(), TENANT_ID))
-                .thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dag.getId())).thenReturn(Optional.of(dag));
 
         assertThatThrownBy(() -> service.updateScheduling(
                 dag.getId(),
@@ -155,8 +154,8 @@ class PipelineSchedulingServiceTest {
         persisted.setId(dag.getId());
         persisted.setRunRetryCount(2);
         persisted.setRunRetryIntervalSeconds(45);
-        when(dagRepo.findByIdAndTenantId(dag.getId(), TENANT_ID))
-                .thenReturn(Optional.of(dag), Optional.of(persisted));
+        when(dagRepo.findByIdForUpdate(dag.getId())).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dag.getId(), TENANT_ID)).thenReturn(Optional.of(persisted));
         when(dagRepo.updateSchedulingPolicy(
                 any(UUID.class), any(UUID.class), anyString(), anyBoolean(),
                 anyInt(), anyInt(), anyString(), anyString(), anyInt(), any(), any(), anyInt(), anyInt(),

@@ -44,6 +44,8 @@ public final class DomainEvents {
     public static final String SECURITY_PII_DETECTED = "security.pii.detected";
     public static final String SECURITY_MASKING_POLICY_UPDATED = "security.masking_policy.updated";
     public static final String SECURITY_ACCESS_CHANGED = "security.access.changed";
+    /** 审批中心已完成审批，业务模块按 requestType 消费结果。 */
+    public static final String SECURITY_APPROVAL_DECIDED = "security.approval.decided";
 
     public static final String DATASERVICE_API_PUBLISHED = "dataservice.api.published";
     public static final String DATASERVICE_API_OFFLINE = "dataservice.api.offline";
@@ -56,6 +58,8 @@ public final class DomainEvents {
      * Replace cross-schema JDBC writes from orchestration → modeling/catalog/quality/security.
      */
     public static final String PIPELINE_PUBLISHED = "pipeline.published";
+    /** 流水线发布审批申请，由 security 模块消费并创建 PUBLISH 审批单。 */
+    public static final String PIPELINE_PUBLISH_APPROVAL_REQUESTED = "pipeline.publish-approval.requested";
     public static final String PIPELINE_RUN_SUCCEEDED = "pipeline.run.succeeded";
     public static final String PIPELINE_RUN_FAILED = "pipeline.run.failed";
     public static final String PIPELINE_RUN_SLA_MISSED = "pipeline.run.sla_missed";

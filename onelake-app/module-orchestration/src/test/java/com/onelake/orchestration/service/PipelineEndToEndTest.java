@@ -3,6 +3,8 @@ package com.onelake.orchestration.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.system.entity.TenantEntity;
+import com.onelake.common.system.repository.TenantRepository;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.JobRun;
@@ -92,6 +94,7 @@ class PipelineEndToEndTest {
     @Mock private PipelineLogStorage pipelineLogStorage;
     @Mock private ParamResolver paramResolver;
     @Mock private PipelineSnapshotService snapshotService;
+    @Mock private TenantRepository tenantRepo;
 
     private PipelineService pipelineService;
     private PipelineCompileService compileService;
@@ -114,7 +117,7 @@ class PipelineEndToEndTest {
     void setup() {
         compileService = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
         pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, snapshotService, outboxProvider);
+                runRepo, compileService, snapshotService, outboxProvider, tenantRepo);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
                 new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
@@ -124,6 +127,8 @@ class PipelineEndToEndTest {
         modelId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
         TenantContext.setUserId(UUID.randomUUID());
+        lenient().when(tenantRepo.findByIdForUpdate(tenantId))
+                .thenReturn(Optional.of(new TenantEntity()));
 
         dag = new Dag();
         dag.setId(dagId);
@@ -160,6 +165,7 @@ class PipelineEndToEndTest {
 
         // 将 Repository mock 接到内存状态上，模拟最小持久化行为。
         lenient().when(dagRepo.findByIdAndTenantId(eq(dagId), eq(tenantId))).thenReturn(Optional.of(dag));
+        lenient().when(dagRepo.findByIdForUpdate(eq(dagId))).thenReturn(Optional.of(dag));
         lenient().when(dagRepo.findById(eq(dagId))).thenReturn(Optional.of(dag));
         lenient().when(dagRepo.findByTenantId(eq(tenantId))).thenReturn(List.of(dag));
         lenient().when(dagRepo.save(any(Dag.class))).thenAnswer(inv -> {

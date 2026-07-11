@@ -16,5 +16,9 @@ public interface ApprovalRequestRepository extends JpaRepository<ApprovalRequest
     Page<ApprovalRequest> findByTenantIdAndApplicantIdAndStatusInOrderByCreatedAtDesc(UUID tenantId, UUID applicantId, Collection<String> statuses, Pageable pageable);
     Optional<ApprovalRequest> findFirstByTenantIdAndApplicantIdAndTargetRefAndStatusOrderByCreatedAtDesc(UUID tenantId, UUID applicantId, String targetRef, String status);
     Optional<ApprovalRequest> findFirstByTenantIdAndApplicantIdAndRequestTypeAndTargetRefAndStatusOrderByCreatedAtDesc(UUID tenantId, UUID applicantId, String requestType, String targetRef, String status);
+    List<ApprovalRequest> findByTenantIdAndRequestTypeAndTargetRefAndStatus(
+        UUID tenantId, String requestType, String targetRef, String status);
+    Optional<ApprovalRequest> findFirstByTenantIdAndRequestTypeAndTargetRefOrderByCreatedAtDesc(
+        UUID tenantId, String requestType, String targetRef);
     List<ApprovalRequest> findByApplicantId(UUID applicantId);
 }

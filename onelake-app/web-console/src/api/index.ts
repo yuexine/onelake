@@ -414,6 +414,8 @@ export const PipelineAPI = {
     unwrap<Pipeline>(http.post('/orchestration/pipelines', payload)),
   get: (id: string) =>
     unwrap<Pipeline>(http.get(`/orchestration/pipelines/${id}`)),
+  publishApprovalConfig: () =>
+    unwrap<{ enabled: boolean }>(http.get('/orchestration/pipelines/publish-approval-config')),
   updateStatus: (id: string, status: PipelineStatus) =>
     unwrap<Pipeline>(http.put(`/orchestration/pipelines/${id}/status`, { status })),
   listVersions: (id: string) =>
@@ -725,6 +727,8 @@ export const SecurityAPI = {
     unwrap<AccessGrant>(http.post(`/security/grants/${grantId}/extend`, undefined, { params: { durationDays } })),
   myApprovals: (params?: { status?: string; page?: number; size?: number }) =>
     unwrap<PageResult<ApprovalRequest>>(http.get('/security/approvals/me', { params })),
+  publishApprovalState: (dagId: string) =>
+    unwrap<ApprovalRequest | null>(http.get('/security/approvals/publish-state', { params: { dagId } })),
   pendingApprovals: () => unwrap<ApprovalRequest[]>(http.get('/security/approvals/pending')),
   processedApprovals: (params?: { status?: string; page?: number; size?: number }) =>
     unwrap<PageResult<ApprovalRequest>>(http.get('/security/approvals/processed', { params })),

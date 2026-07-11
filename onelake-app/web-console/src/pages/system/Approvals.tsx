@@ -32,6 +32,12 @@ type ApprovalPayload = {
   executionSql?: string;
   executionError?: string;
   beforeColumns?: Array<{ name: string; type?: string; description?: string; classification?: string }>;
+  pipelineName?: string;
+  pipelineKind?: string;
+  dagVersion?: number;
+  taskCount?: number;
+  snapshotChecksum?: string;
+  snapshotBytes?: number;
   permissions?: {
     query?: boolean;
     download?: boolean;
@@ -108,6 +114,9 @@ function schemaChangeText(payload?: ApprovalPayload) {
 function requestSummary(row: ApprovalRow) {
   if (row.requestType === 'SCHEMA_CHANGE') {
     return schemaChangeText(row.payload);
+  }
+  if (row.requestType === 'PUBLISH') {
+    return `${row.payload?.pipelineName || row.targetRef} · ${row.payload?.taskCount ?? 0} 任务`;
   }
   return permissionText(row.payload);
 }
@@ -264,9 +273,23 @@ export default function Approvals() {
           removePendingRows([row.id]);
           loadProcessed(0, processedSize, processedStatus);
           message.success('Schema 变更已通过并执行');
-        } else {
+        } else if (row.requestType === 'PUBLISH') {
+          const latest = await SecurityAPI.publishApprovalState(row.targetRef);
+          if (latest?.status === 'PENDING') {
+            loadPending();
+            message.success('当前审批步骤已通过，等待加签复核');
+          } else {
+            removePendingRows([row.id]);
+            loadProcessed(0, processedSize, processedStatus);
+            message.success('发布审批已通过，正在发布流水线');
+          }
+        } else if (row.requestType === 'ACCESS') {
           loadPending();
           message.success('一审已通过，等待二审复核');
+        } else {
+          removePendingRows([row.id]);
+          loadProcessed(0, processedSize, processedStatus);
+          message.success('审批已通过');
         }
         setDrawerId(undefined);
       })
@@ -292,9 +315,10 @@ export default function Approvals() {
     setActionLoading('batch-approve');
     Promise.all(ids.map((approvalId) => SecurityAPI.approveApproval(approvalId, 'batch-approve')))
       .then(() => {
-        removePendingRows(ids);
+        setSelectedRowKeys([]);
+        loadPending();
         loadProcessed(0, processedSize, processedStatus);
-        message.success(`已批量通过 ${ids.length} 项审批`);
+        message.success(`已处理 ${ids.length} 项审批；多阶段申请将等待下一审批人`);
       })
       .catch((e) => message.error(e.message || '批量通过失败'))
       .finally(() => setActionLoading(undefined));
@@ -681,6 +705,22 @@ export default function Approvals() {
                         </Space>
                       </div>
                     )}
+                  </div>
+                ) : current.requestType === 'PUBLISH' ? (
+                  <div>
+                    <Text style={{ color: 'var(--ol-ink-3)', fontSize: 12 }}>发布快照摘要</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Space direction="vertical" size={4}>
+                        <Text style={{ fontSize: 12 }}>
+                          {current.payload?.pipelineName || current.targetRef}
+                          {' · '}{current.payload?.pipelineKind || 'BLANK'}
+                          {' · '}{current.payload?.taskCount ?? 0} 任务
+                        </Text>
+                        <Text code style={{ fontSize: 11 }}>
+                          checksum: {current.payload?.snapshotChecksum || '-'}
+                        </Text>
+                      </Space>
+                    </div>
                   </div>
                 ) : (
                   <div>

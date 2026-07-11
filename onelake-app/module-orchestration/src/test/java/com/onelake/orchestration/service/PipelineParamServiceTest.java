@@ -126,8 +126,8 @@ class PipelineParamServiceTest {
                 .containsExactly("EXPR", "BOOL");
         assertThat(result).extracting(ParamDTO::paramValue)
                 .containsExactly("${bizdate-1:yyyyMMdd}", "true");
+        verify(dagRepo).findByIdForUpdate(DAG_ID);
         verify(taskRepo).findByDagIdAndTaskKeyForUpdate(DAG_ID, "transform");
-        verify(dagRepo, never()).findByIdForUpdate(DAG_ID);
         verify(paramRepo).deleteAllInBatch(existing);
         verify(paramRepo, never()).findByTenantIdAndDagIdAndScope(
                 TENANT_ID, DAG_ID, "PIPELINE");
@@ -208,7 +208,7 @@ class PipelineParamServiceTest {
         Dag dag = new Dag();
         dag.setId(DAG_ID);
         dag.setTenantId(TENANT_ID);
-        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        lenient().when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
         lenient().when(dagRepo.findByIdForUpdate(DAG_ID)).thenReturn(Optional.of(dag));
     }
 

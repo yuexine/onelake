@@ -4,10 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.security.domain.entity.*;
 import com.onelake.security.repository.*;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -41,6 +44,7 @@ public class SecurityService {
     private final AccessGrantRepository grantRepo;
     private final ApprovalRequestRepository approvalRepo;
     private final SecretRepository secretRepo;
+    private final ObjectProvider<OutboxPublisher> outboxPublisher;
 
     /** 按密级/角色查询脱敏策略；冲突时取最高优先级。 */
     @Transactional(readOnly = true)
@@ -343,6 +347,43 @@ public class SecurityService {
         return approvalRepo.save(req);
     }
 
+    /** 由跨模块事件创建流水线发布审批；同一 DAG、同一 snapshot checksum 只保留一张待审批单。 */
+    @Transactional
+    public ApprovalRequest applyPublish(UUID tenantId,
+                                        UUID applicantId,
+                                        String dagId,
+                                        Map<String, Object> payload) {
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        if (applicantId == null) throw new BizException(40100, "用户上下文缺失");
+        String targetRef = cleanRequired(dagId, "流水线 ID 不能为空");
+        Object checksumValue = payload == null ? null : payload.get("snapshotChecksum");
+        String snapshotChecksum = cleanRequired(
+            checksumValue == null ? null : checksumValue.toString(), "发布快照 checksum 不能为空");
+        ApprovalRequest existing = approvalRepo
+            .findByTenantIdAndRequestTypeAndTargetRefAndStatus(tenantId, "PUBLISH", targetRef, "PENDING")
+            .stream()
+            .filter(candidate -> snapshotChecksum.equals(
+                String.valueOf(payloadMap(candidate.getPayload()).get("snapshotChecksum"))))
+            .findFirst()
+            .orElse(null);
+        if (existing != null) {
+            return existing;
+        }
+
+        Map<String, Object> summary = payload == null
+            ? new LinkedHashMap<>()
+            : new LinkedHashMap<>(payload);
+        summary.put("snapshotChecksum", snapshotChecksum);
+        ApprovalRequest req = new ApprovalRequest();
+        req.setTenantId(tenantId);
+        req.setRequestType("PUBLISH");
+        req.setApplicantId(applicantId);
+        req.setTargetRef(targetRef);
+        req.setPayload(JsonUtil.toJson(summary));
+        req.setStatus("PENDING");
+        return approvalRepo.save(req);
+    }
+
     /** 审批通过 → 生成 AccessGrant。 */
     @Transactional
     public AccessGrant approve(UUID approvalId, UUID approverId, String comment) {
@@ -352,6 +393,32 @@ public class SecurityService {
             throw new BizException(40900, "审批单已处理");
         }
         Map<String, Object> payload = payloadMap(req.getPayload());
+        if ("PUBLISH".equals(req.getRequestType())) {
+            List<Map<String, Object>> chain = approvalChain(payload);
+            Map<String, Object> pendingStep = chain.stream()
+                .filter(step -> "PENDING".equals(step.get("status")))
+                .findFirst()
+                .orElseThrow(() -> new BizException(40900, "审批链已处理完成"));
+            boolean alreadyApprovedBySameUser = chain.stream()
+                .filter(step -> "APPROVED".equals(step.get("status")))
+                .map(step -> String.valueOf(step.get("approverId")))
+                .anyMatch(approverId.toString()::equals);
+            if (alreadyApprovedBySameUser) {
+                throw new BizException(40910, "加签审批需由另一审批人复核");
+            }
+            completeApprovalStep(pendingStep, "APPROVED", approverId, comment);
+            payload.put("approvalChain", chain);
+            req.setPayload(JsonUtil.toJson(payload));
+            req.setComment(comment);
+            if (chain.stream().anyMatch(step -> "PENDING".equals(step.get("status")))) {
+                return null;
+            }
+            req.setStatus("APPROVED");
+            req.setApproverId(approverId);
+            req.setDecidedAt(Instant.now());
+            emitApprovalDecision(req, "APPROVED");
+            return null;
+        }
         if (!"ACCESS".equals(req.getRequestType())) {
             markPendingSteps(payload, "APPROVED", approverId, comment);
             req.setPayload(JsonUtil.toJson(payload));
@@ -359,6 +426,7 @@ public class SecurityService {
             req.setApproverId(approverId);
             req.setComment(comment);
             req.setDecidedAt(Instant.now());
+            emitApprovalDecision(req, "APPROVED");
             return null;
         }
         if (requiresSecondApproval(payload) && !firstApprovalDone(payload)) {
@@ -408,6 +476,31 @@ public class SecurityService {
         Map<String, Object> payload = payloadMap(req.getPayload());
         markPendingSteps(payload, "REJECTED", approverId, comment);
         req.setPayload(JsonUtil.toJson(payload));
+        emitApprovalDecision(req, "REJECTED");
+    }
+
+    /** 审批中心通过 Outbox 通知业务模块，避免直接调用或写入业务模块数据库。 */
+    private void emitApprovalDecision(ApprovalRequest req, String decision) {
+        if (!"PUBLISH".equals(req.getRequestType())) {
+            return;
+        }
+        OutboxPublisher publisher = outboxPublisher.getIfAvailable();
+        if (publisher == null) {
+            throw new BizException(50320, "审批结果事件发布器不可用");
+        }
+        Map<String, Object> requestPayload = payloadMap(req.getPayload());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("approvalId", req.getId() == null ? null : req.getId().toString());
+        payload.put("requestType", req.getRequestType());
+        payload.put("targetRef", req.getTargetRef());
+        payload.put("tenantId", req.getTenantId().toString());
+        payload.put("applicantId", req.getApplicantId().toString());
+        payload.put("applicantName", requestPayload.get("applicantName"));
+        payload.put("snapshotChecksum", requestPayload.get("snapshotChecksum"));
+        payload.put("decision", decision);
+        payload.put("reason", req.getComment());
+        String aggregateId = req.getId() == null ? req.getTargetRef() : req.getId().toString();
+        publisher.publish(DomainEvents.SECURITY_APPROVAL_DECIDED, aggregateId, payload);
     }
 
     @Transactional
@@ -531,6 +624,18 @@ public class SecurityService {
             approvalStatuses(status),
             pageable
         );
+    }
+
+    /** 返回租户内指定流水线最近一次发布审批，供协作编辑者共享等待/拒绝状态。 */
+    @Transactional(readOnly = true)
+    public ApprovalRequest latestPublishApproval(String dagId) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) throw new BizException(40100, "租户上下文缺失");
+        String targetRef = cleanRequired(dagId, "流水线 ID 不能为空");
+        return approvalRepo
+            .findFirstByTenantIdAndRequestTypeAndTargetRefOrderByCreatedAtDesc(
+                tenantId, "PUBLISH", targetRef)
+            .orElse(null);
     }
 
     @Transactional(readOnly = true)
@@ -696,6 +801,16 @@ public class SecurityService {
                 step.put("at", Instant.now().toString());
             });
         payload.put("approvalChain", chain);
+    }
+
+    private void completeApprovalStep(Map<String, Object> step,
+                                      String status,
+                                      UUID approverId,
+                                      String comment) {
+        step.put("status", status);
+        step.put("approverId", approverId.toString());
+        step.put("comment", comment);
+        step.put("at", Instant.now().toString());
     }
 
     private void markPendingSteps(Map<String, Object> payload, String status, UUID approverId, String comment) {

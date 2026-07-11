@@ -5,6 +5,7 @@ import com.onelake.common.exception.BizException;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.system.repository.TenantRepository;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
@@ -31,6 +32,7 @@ import com.onelake.orchestration.repository.PipelineParamRepository;
 import com.onelake.orchestration.repository.TaskRunRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -76,8 +78,17 @@ public class PipelineService {
     private final PipelineCompileService compileService;
     private final PipelineSnapshotService snapshotService;
     private final org.springframework.beans.factory.ObjectProvider<OutboxPublisher> outboxPublisher;
+    private final TenantRepository tenantRepo;
+
+    @Value("${onelake.orchestration.publish-approval.enabled:false}")
+    private boolean publishApprovalEnabled;
 
     // ---------- 流水线（dag） ----------
+
+    /** 供控制台按服务端实际配置决定是否展示发布审批态。 */
+    public boolean isPublishApprovalEnabled() {
+        return publishApprovalEnabled;
+    }
 
     /** 在当前租户边界内读取流水线。 */
     @Transactional
@@ -118,12 +129,16 @@ public class PipelineService {
      */
     @Transactional
     public Dag updatePipelineStatus(UUID dagId, String targetStatusRaw) {
-        Dag dag = getPipeline(dagId);
-        String current = dag.getStatus() == null ? "DRAFT" : dag.getStatus().toUpperCase();
         String target = targetStatusRaw == null ? "" : targetStatusRaw.toUpperCase();
         if (!Set.of("DRAFT", "VALIDATED", "PUBLISHED").contains(target)) {
             throw new BizException(40020, "非法 pipeline status: " + targetStatusRaw);
         }
+        UUID tenantId = requireTenant();
+        if ("PUBLISHED".equals(target)) {
+            lockTenant(tenantId);
+        }
+        Dag dag = getPipelineForUpdate(dagId, tenantId);
+        String current = dag.getStatus() == null ? "DRAFT" : dag.getStatus().toUpperCase();
         if (target.equals(current)) {
             if ("PUBLISHED".equals(target)
                     && (dag.getPublishedVersionId() == null
@@ -131,6 +146,10 @@ public class PipelineService {
                 PipelineValidationResult result = validate(dagId);
                 if (!result.valid()) {
                     throw new BizException(40070, "无法重新发布：当前草稿校验未通过");
+                }
+                if (publishApprovalEnabled) {
+                    submitPublishApproval(dag);
+                    return dag;
                 }
                 PipelineVersion publishedVersion = snapshotService.publishSnapshot(dagId);
                 emitPipelinePublishedEvent(dag, publishedVersion.getId());
@@ -150,6 +169,12 @@ public class PipelineService {
             throw new BizException(40071, "无法直接从 " + current + " 发布到 PUBLISHED：必须先 VALIDATED");
         }
 
+        if ("PUBLISHED".equals(target) && publishApprovalEnabled) {
+            submitPublishApproval(dag);
+            log.info("流水线 {} 已提交发布审批，主状态保持 {}", dag.getId(), current);
+            return dag;
+        }
+
         dag.setStatus(target);
         dag.setVersion((dag.getVersion() == null ? 0 : dag.getVersion()) + 1);
         dag = dagRepo.save(dag);
@@ -162,6 +187,78 @@ public class PipelineService {
         log.info("流水线 {} 状态流转：{} → {} (v{})",
                 dag.getId(), current, target, dag.getVersion());
         return dag;
+    }
+
+    /**
+     * 消费 security 审批结果后完成发布门控。
+     *
+     * <p>审批通过只发布审批时 checksum 对应的当前草稿，避免旧审批误发布后续编辑；
+     * 审批拒绝不改变主状态机，拒绝原因由 security.approval_request.comment 持久化。
+     */
+    @Transactional
+    public Dag handlePublishApprovalDecision(UUID dagId,
+                                             String approvedChecksum,
+                                             boolean approved,
+                                             String reason) {
+        UUID tenantId = requireTenant();
+        lockTenant(tenantId);
+        Dag dag = dagRepo.findByIdForUpdate(dagId)
+                .filter(candidate -> tenantId.equals(candidate.getTenantId()))
+                .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
+        if (!approved) {
+            log.info("流水线 {} 发布审批被拒绝，保持状态 {}，原因={}", dagId, dag.getStatus(), reason);
+            return dag;
+        }
+
+        PipelineSnapshotService.SnapshotPayload currentSnapshot = snapshotService.snapshot(dagId);
+        if (!java.util.Objects.equals(approvedChecksum, currentSnapshot.checksum())) {
+            log.warn("流水线 {} 发布审批对应内容已过期，保持状态 {}：approvedChecksum={} currentChecksum={}",
+                    dagId, dag.getStatus(), approvedChecksum, currentSnapshot.checksum());
+            return dag;
+        }
+        if (!"VALIDATED".equalsIgnoreCase(dag.getStatus())
+                && !("PUBLISHED".equalsIgnoreCase(dag.getStatus())
+                    && (dag.getPublishedVersionId() == null
+                        || Boolean.TRUE.equals(dag.getHasUnpublishedChanges())))) {
+            log.warn("流水线 {} 当前状态 {} 不接受发布审批结果，跳过", dagId, dag.getStatus());
+            return dag;
+        }
+
+        String previous = dag.getStatus();
+        dag.setStatus("PUBLISHED");
+        dag.setVersion((dag.getVersion() == null ? 0 : dag.getVersion()) + 1);
+        dag = dagRepo.save(dag);
+        PipelineVersion publishedVersion = snapshotService.publishSnapshot(dagId, currentSnapshot);
+        emitPipelinePublishedEvent(dag, publishedVersion.getId());
+        log.info("流水线 {} 审批通过后完成发布：{} → PUBLISHED (v{})",
+                dagId, previous, dag.getVersion());
+        return dag;
+    }
+
+    /** 发送只包含快照摘要的审批申请，不把完整不可变快照复制进审批库。 */
+    private void submitPublishApproval(Dag dag) {
+        OutboxPublisher publisher = outboxPublisher.getIfAvailable();
+        if (publisher == null) {
+            throw new BizException(50320, "审批服务暂不可用，请稍后重试");
+        }
+        UUID applicantId = TenantContext.getUserId();
+        if (applicantId == null) {
+            throw new BizException(40100, "用户上下文缺失");
+        }
+        PipelineSnapshotService.SnapshotPayload snapshot = snapshotService.snapshot(dag.getId());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("requestType", "PUBLISH");
+        payload.put("targetRef", dag.getId().toString());
+        payload.put("tenantId", dag.getTenantId().toString());
+        payload.put("applicantId", applicantId.toString());
+        payload.put("applicantName", TenantContext.getUsername());
+        payload.put("pipelineName", dag.getName());
+        payload.put("pipelineKind", dag.getPipelineKind());
+        payload.put("dagVersion", dag.getVersion());
+        payload.put("snapshotChecksum", snapshot.checksum());
+        payload.put("snapshotBytes", snapshot.json().getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        payload.put("taskCount", taskRepo.findByDagIdOrderByCreatedAtAsc(dag.getId()).size());
+        publisher.publish(DomainEvents.PIPELINE_PUBLISH_APPROVAL_REQUESTED, dag.getId().toString(), payload);
     }
 
     /** 发布流水线版本事件，携带目标资产集合供下游目录/血缘消费者处理。 */
@@ -206,7 +303,7 @@ public class PipelineService {
     /** 创建节点并校验 taskKey 唯一性、类型和执行引擎契约。 */
     @Transactional
     public PipelineTaskDTO createTask(UUID dagId, PipelineTaskRequest req) {
-        Dag dag = getPipeline(dagId);
+        Dag dag = getPipelineForUpdate(dagId, requireTenant());
         validateTaskRequest(req, true);
         if (taskRepo.findByDagIdAndTaskKey(dagId, req.taskKey()).isPresent()) {
             throw new BizException(40901, "task_key 已存在: " + req.taskKey());
@@ -233,7 +330,7 @@ public class PipelineService {
     /** 更新节点可编辑字段，并重置编译状态等待重新校验。 */
     @Transactional
     public PipelineTaskDTO updateTask(UUID dagId, String taskKey, PipelineTaskRequest req) {
-        Dag dag = getPipeline(dagId);
+        Dag dag = getPipelineForUpdate(dagId, requireTenant());
         PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
         validateTaskRequest(req, false);
@@ -258,7 +355,7 @@ public class PipelineService {
     /** 删除节点及所有入边/出边，避免图中残留悬空引用。 */
     @Transactional
     public void deleteTask(UUID dagId, String taskKey) {
-        Dag dag = getPipeline(dagId);
+        Dag dag = getPipelineForUpdate(dagId, requireTenant());
         PipelineTask t = taskRepo.findByDagIdAndTaskKeyForUpdate(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
         // pipeline_param 通过稳定 task_key 关联节点而非外键，必须在同一事务显式清理。
@@ -286,7 +383,7 @@ public class PipelineService {
     /** 创建边并补齐端口、输入别名、触发和新鲜度默认策略。 */
     @Transactional
     public PipelineTaskEdgeDTO createEdge(UUID dagId, PipelineTaskEdgeRequest req) {
-        Dag dag = getPipeline(dagId);
+        Dag dag = getPipelineForUpdate(dagId, requireTenant());
         if (!StringUtils.hasText(req.sourceKey()) || !StringUtils.hasText(req.targetKey())) {
             throw new BizException(40020, "edge sourceKey/targetKey 不能为空");
         }
@@ -326,7 +423,7 @@ public class PipelineService {
     /** 删除 sourceKey -> targetKey 的确定边；不存在时幂等返回。 */
     @Transactional
     public void deleteEdge(UUID dagId, String sourceKey, String targetKey) {
-        Dag dag = getPipeline(dagId);
+        Dag dag = getPipelineForUpdate(dagId, requireTenant());
         edgeRepo.findByDagId(dagId).stream()
                 .filter(e -> e.getSourceKey().equals(sourceKey) && e.getTargetKey().equals(targetKey))
                 .findFirst()
@@ -516,10 +613,22 @@ public class PipelineService {
 
     /** 已发布流水线继续编辑时只修改 DEV 草稿，并提示存在未发布变更。 */
     private void markUnpublishedChanges(Dag dag) {
-        if (dag != null && "PUBLISHED".equalsIgnoreCase(dag.getStatus())) {
-            // 即使标记已经为 true 也执行 UPDATE，以 DAG 行锁与 publishSnapshot 串行化。
+        if (dag != null) {
+            // 始终执行条件 UPDATE：编辑事务即使读到审批前的 VALIDATED，也会在审批发布提交后
+            // 重新按数据库当前状态判断并标记未发布变更。
             dagRepo.markPublishedDagChanged(dag.getId(), dag.getTenantId());
         }
+    }
+
+    private Dag getPipelineForUpdate(UUID dagId, UUID tenantId) {
+        return dagRepo.findByIdForUpdate(dagId)
+                .filter(candidate -> tenantId.equals(candidate.getTenantId()))
+                .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
+    }
+
+    private void lockTenant(UUID tenantId) {
+        tenantRepo.findByIdForUpdate(tenantId)
+                .orElseThrow(() -> new BizException(40100, "Tenant context required"));
     }
 
     /** 校验节点请求的必填字段、支持类型和 Spark-only 引擎边界。 */

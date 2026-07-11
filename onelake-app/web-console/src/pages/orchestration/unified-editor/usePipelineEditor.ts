@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntApp } from 'antd';
-import { PipelineAPI, OrchestrationAPI } from '../../../api';
+import { PipelineAPI, OrchestrationAPI, SecurityAPI } from '../../../api';
 import type {
   Pipeline,
   PipelineTask,
@@ -40,6 +40,8 @@ export function usePipelineEditor(dagId: string | undefined) {
   const [selectedTaskKey, setSelectedTaskKey] = useState<string | undefined>(undefined);
   const [validation, setValidation] = useState<PipelineValidationResult | undefined>(undefined);
   const [saving, setSaving] = useState(false);
+  const [publishApprovalPending, setPublishApprovalPending] = useState(false);
+  const [publishApprovalRejectionReason, setPublishApprovalRejectionReason] = useState<string | undefined>(undefined);
 
   // P6-A: live run state (auto-poll)
   const [latestRun, setLatestRun] = useState<JobRun | undefined>(undefined);
@@ -61,18 +63,39 @@ export function usePipelineEditor(dagId: string | undefined) {
       setEdges([]);
       setSelectedTaskKey(undefined);
       setValidation(undefined);
+      setPublishApprovalPending(false);
+      setPublishApprovalRejectionReason(undefined);
       return;
     }
     setLoading(true);
     try {
-      const [p, ts, es] = await Promise.all([
+      const [p, ts, es, publishApprovalConfig, publishApprovalState] = await Promise.all([
         PipelineAPI.get(dagId),
         PipelineAPI.listTasks(dagId),
         PipelineAPI.listEdges(dagId),
+        PipelineAPI.publishApprovalConfig()
+          // 配置查询失败时按开启处理，避免网络故障意外绕过发布门控。
+          .catch(() => ({ enabled: true })),
+        SecurityAPI.publishApprovalState(dagId)
+          .then((latest) => {
+            return {
+              pending: latest?.status === 'PENDING',
+              rejectionReason: latest?.status === 'REJECTED'
+                ? (latest.comment || '审批人未填写拒绝原因')
+                : undefined,
+            };
+          })
+          .catch(() => ({ pending: false, rejectionReason: undefined })),
       ]);
       setPipeline(p);
       setTasks(ts);
       setEdges(es);
+      const cleanPublished = p.status === 'PUBLISHED' && !p.hasUnpublishedChanges;
+      const approvalRelevant = publishApprovalConfig.enabled && !cleanPublished;
+      setPublishApprovalPending(approvalRelevant && publishApprovalState.pending);
+      setPublishApprovalRejectionReason(
+        approvalRelevant ? publishApprovalState.rejectionReason : undefined,
+      );
     } catch (err) {
       message.error(`加载流水线失败: ${(err as Error).message}`);
     } finally {
@@ -240,6 +263,10 @@ export function usePipelineEditor(dagId: string | undefined) {
       next = await PipelineAPI.updateStatus(dagId, 'PUBLISHED');
     }
     setPipeline(next);
+    setPublishApprovalPending(
+      next.status !== 'PUBLISHED' || Boolean(next.hasUnpublishedChanges),
+    );
+    setPublishApprovalRejectionReason(undefined);
     const freshTasks = await PipelineAPI.listTasks(dagId);
     setTasks(freshTasks);
     return next;
@@ -313,6 +340,8 @@ export function usePipelineEditor(dagId: string | undefined) {
     selectedTask,
     validation,
     saving,
+    publishApprovalPending,
+    publishApprovalRejectionReason,
     setSelectedTaskKey,
     reload: loadAll,
     createTask,

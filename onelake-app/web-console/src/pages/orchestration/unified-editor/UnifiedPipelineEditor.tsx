@@ -603,6 +603,10 @@ export default function UnifiedPipelineEditor() {
         try {
           const published = await editor.publish();
           if (!published) return;
+          if (published.status !== 'PUBLISHED' || published.hasUnpublishedChanges) {
+            message.success('已提交发布审批，等待审批');
+            return;
+          }
           const versions = await PipelineAPI.listVersions(dagId!);
           const current = versions.find((item) => item.id === published.publishedVersionId);
           message.success(current ? `已发布版本 ${current.version}` : '流水线已发布');
@@ -852,6 +856,9 @@ export default function UnifiedPipelineEditor() {
           <Space>
             <Text strong>{editor.pipeline.name}</Text>
             <Tag color={statusTagColor}>{editor.pipeline.status ?? 'DRAFT'}</Tag>
+            {editor.publishApprovalPending && (
+              <Tag color="processing" icon={<LoadingOutlined />}>等待发布审批</Tag>
+            )}
             {editor.pipeline.hasUnpublishedChanges && (
               <Tag color="orange" icon={<WarningOutlined />}>有未发布变更</Tag>
             )}
@@ -900,6 +907,7 @@ export default function UnifiedPipelineEditor() {
               onClick={confirmPublish}
               loading={publishing}
               disabled={editor.tasks.length === 0
+                || editor.publishApprovalPending
                 || (editor.pipeline.status === 'PUBLISHED' && !editor.pipeline.hasUnpublishedChanges)}
             >
               {editor.pipeline.publishedVersionId ? '重新发布' : '发布'}
@@ -918,6 +926,16 @@ export default function UnifiedPipelineEditor() {
           </Space>
         }
       />
+
+      {editor.publishApprovalRejectionReason && (
+        <Alert
+          type="error"
+          showIcon
+          message="发布审批已拒绝"
+          description={editor.publishApprovalRejectionReason}
+          style={{ flex: '0 0 auto', marginBottom: 8 }}
+        />
+      )}
 
       <ValidationModal
         open={validationOpen}

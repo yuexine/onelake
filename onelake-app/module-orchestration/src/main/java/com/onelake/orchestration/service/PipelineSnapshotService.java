@@ -69,11 +69,17 @@ public class PipelineSnapshotService {
      */
     @Transactional
     public PipelineVersion publishSnapshot(UUID dagId) {
+        return publishSnapshot(dagId, null);
+    }
+
+    /** 发布调用方已经校验过的规范化快照，避免审批校验后再次读取可变草稿。 */
+    @Transactional
+    public PipelineVersion publishSnapshot(UUID dagId, SnapshotPayload verifiedPayload) {
         UUID tenantId = requireTenant();
         Dag dag = dagRepo.findByIdForUpdate(dagId)
                 .filter(candidate -> tenantId.equals(candidate.getTenantId()))
                 .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
-        SnapshotPayload payload = snapshot(dag);
+        SnapshotPayload payload = verifiedPayload == null ? snapshot(dag) : verifiedPayload;
         PipelineVersion version = versionRepo
                 .findFirstByDagIdAndChecksumOrderByVersionDesc(dagId, payload.checksum())
                 .filter(candidate -> dag.getPublishedVersionId() != null

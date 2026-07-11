@@ -64,7 +64,9 @@ public class PipelineSchedulingService {
     @Transactional
     public DagSchedulingDTO updateScheduling(UUID dagId, UpdateDagSchedulingRequest request) {
         UUID tenantId = requireTenant();
-        Dag dag = requireDag(dagId, tenantId);
+        Dag dag = dagRepo.findByIdForUpdate(dagId)
+                .filter(candidate -> tenantId.equals(candidate.getTenantId()))
+                .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
         if (request == null) {
             throw new BizException(40020, "调度配置不能为空");
         }

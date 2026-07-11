@@ -79,7 +79,7 @@ public class PipelineParamService {
     @Transactional
     public List<ParamDTO> replacePipelineParams(UUID dagId, ParamReplaceRequest request) {
         UUID tenantId = requireTenant();
-        requireDag(dagId, tenantId);
+        lockDag(dagId, tenantId);
         if (request == null || !StringUtils.hasText(request.scope())) {
             throw new BizException(40041, "参数替换 scope 不能为空");
         }
@@ -114,10 +114,6 @@ public class PipelineParamService {
                 .toList();
         List<PipelineParam> replacement = validateAndMap(
                 normalizedItems, tenantId, dagId, taskKeys, Set.of(scope));
-
-        if (PIPELINE.equals(scope)) {
-            lockDag(dagId, tenantId);
-        }
 
         List<PipelineParam> existing = PIPELINE.equals(scope)
                 ? paramRepo.findByTenantIdAndDagIdAndScope(tenantId, dagId, PIPELINE)

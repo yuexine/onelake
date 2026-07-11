@@ -69,6 +69,13 @@ public class PipelineController {
         return ApiResponse.ok(pipelineService.getPipeline(dagId));
     }
 
+    /** 返回发布审批门控的服务端实际开关，避免控制台误用历史审批记录。 */
+    @GetMapping("/publish-approval-config")
+    @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
+    public ApiResponse<Map<String, Boolean>> publishApprovalConfig() {
+        return ApiResponse.ok(Map.of("enabled", pipelineService.isPublishApprovalEnabled()));
+    }
+
     /** 执行 DRAFT、VALIDATED、PUBLISHED 生命周期流转。 */
     @PutMapping("/{dagId}/status")
     @PreAuthorize("hasRole('DE')")

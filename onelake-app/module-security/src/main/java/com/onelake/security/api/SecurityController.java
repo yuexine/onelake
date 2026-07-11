@@ -135,6 +135,16 @@ public class SecurityController {
     }
 
     @Operation(
+        summary = "查询流水线最近发布审批",
+        description = "用途：按租户和 DAG 返回最近一次 PUBLISH 审批，供所有流水线协作者共享等待与拒绝状态。"
+    )
+    @GetMapping("/approvals/publish-state")
+    @PreAuthorize("hasAnyRole('CONSUMER','DE','OPS','ADMIN','SEC')")
+    public ApiResponse<ApprovalRequest> latestPublishApproval(@RequestParam String dagId) {
+        return ApiResponse.ok(service.latestPublishApproval(dagId));
+    }
+
+    @Operation(
         summary = "撤回我的审批申请",
         description = "用途：申请人撤回未完成审批。前端对接：SecurityAPI.cancelApproval，由 SqlWorkbench 申请状态列表调用。"
     )

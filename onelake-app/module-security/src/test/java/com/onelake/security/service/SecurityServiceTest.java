@@ -2,6 +2,8 @@ package com.onelake.security.service;
 
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.util.JsonUtil;
 import com.onelake.security.domain.entity.AccessGrant;
 import com.onelake.security.domain.entity.ApprovalRequest;
 import com.onelake.security.domain.entity.MaskingPolicy;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -40,6 +43,8 @@ class SecurityServiceTest {
     private AccessGrantRepository grantRepo;
     private ApprovalRequestRepository approvalRepo;
     private MaskingPolicyRepository maskingRepo;
+    private ObjectProvider<OutboxPublisher> outboxProvider;
+    private OutboxPublisher outboxPublisher;
     private SecurityService service;
 
     @BeforeEach
@@ -47,11 +52,14 @@ class SecurityServiceTest {
         grantRepo = mock(AccessGrantRepository.class);
         approvalRepo = mock(ApprovalRequestRepository.class);
         maskingRepo = mock(MaskingPolicyRepository.class);
+        outboxProvider = mock(ObjectProvider.class);
+        outboxPublisher = mock(OutboxPublisher.class);
         service = new SecurityService(
             maskingRepo,
             grantRepo,
             approvalRepo,
-            mock(SecretRepository.class)
+            mock(SecretRepository.class),
+            outboxProvider
         );
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(USER_ID);
@@ -60,6 +68,113 @@ class SecurityServiceTest {
     @AfterEach
     void tearDown() {
         TenantContext.clear();
+    }
+
+    @Test
+    void applyPublishReusesPendingApprovalForSameSnapshot() {
+        ApprovalRequest existing = new ApprovalRequest();
+        existing.setId(UUID.randomUUID());
+        existing.setTenantId(TENANT_ID);
+        existing.setApplicantId(USER_ID);
+        existing.setRequestType("PUBLISH");
+        existing.setTargetRef("dag-1");
+        existing.setPayload("{\"snapshotChecksum\":\"checksum-1\"}");
+        when(approvalRepo.findByTenantIdAndRequestTypeAndTargetRefAndStatus(
+            TENANT_ID, "PUBLISH", "dag-1", "PENDING")).thenReturn(List.of(existing));
+
+        ApprovalRequest result = service.applyPublish(
+            TENANT_ID, USER_ID, "dag-1", Map.of("snapshotChecksum", "checksum-1"));
+
+        assertThat(result).isSameAs(existing);
+        verify(approvalRepo, never()).save(any(ApprovalRequest.class));
+    }
+
+    @Test
+    void publishApprovalDecisionEmitsResultWithRejectionReason() {
+        UUID approvalId = UUID.randomUUID();
+        UUID approverId = UUID.randomUUID();
+        ApprovalRequest approval = new ApprovalRequest();
+        approval.setId(approvalId);
+        approval.setTenantId(TENANT_ID);
+        approval.setApplicantId(USER_ID);
+        approval.setRequestType("PUBLISH");
+        approval.setTargetRef("dag-1");
+        approval.setPayload("{\"snapshotChecksum\":\"checksum-1\",\"applicantName\":\"Data Engineer\"}");
+        approval.setStatus("PENDING");
+        when(approvalRepo.findById(approvalId)).thenReturn(Optional.of(approval));
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
+
+        service.reject(approvalId, approverId, "risk rejected");
+
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<Map<String, Object>> payloadCaptor =
+            org.mockito.ArgumentCaptor.forClass(Map.class);
+        assertThat(approval.getStatus()).isEqualTo("REJECTED");
+        assertThat(approval.getComment()).isEqualTo("risk rejected");
+        verify(outboxPublisher).publish(eq("security.approval.decided"),
+            eq(approvalId.toString()), payloadCaptor.capture());
+        assertThat(payloadCaptor.getValue())
+            .containsEntry("decision", "REJECTED")
+            .containsEntry("reason", "risk rejected")
+            .containsEntry("applicantName", "Data Engineer")
+            .containsEntry("snapshotChecksum", "checksum-1");
+    }
+
+    @Test
+    void latestPublishApprovalIsDagScopedAcrossApplicants() {
+        ApprovalRequest latest = new ApprovalRequest();
+        latest.setId(UUID.randomUUID());
+        latest.setTenantId(TENANT_ID);
+        latest.setApplicantId(UUID.randomUUID());
+        latest.setRequestType("PUBLISH");
+        latest.setTargetRef("dag-1");
+        latest.setStatus("PENDING");
+        when(approvalRepo.findFirstByTenantIdAndRequestTypeAndTargetRefOrderByCreatedAtDesc(
+            TENANT_ID, "PUBLISH", "dag-1")).thenReturn(Optional.of(latest));
+
+        ApprovalRequest result = service.latestPublishApproval("dag-1");
+
+        assertThat(result).isSameAs(latest);
+    }
+
+    @Test
+    void publishAddSignRequiresDifferentReviewerBeforeDecisionEvent() {
+        UUID approvalId = UUID.randomUUID();
+        UUID firstReviewer = UUID.randomUUID();
+        UUID secondReviewer = UUID.randomUUID();
+        ApprovalRequest approval = new ApprovalRequest();
+        approval.setId(approvalId);
+        approval.setTenantId(TENANT_ID);
+        approval.setApplicantId(USER_ID);
+        approval.setRequestType("PUBLISH");
+        approval.setTargetRef("dag-1");
+        approval.setPayload("""
+            {"snapshotChecksum":"checksum-1","approvalChain":[
+              {"role":"ASSET_OWNER","status":"PENDING"},
+              {"role":"SECURITY_REVIEW","status":"PENDING"}
+            ]}
+            """);
+        approval.setStatus("PENDING");
+        when(approvalRepo.findById(approvalId)).thenReturn(Optional.of(approval));
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
+
+        service.approve(approvalId, firstReviewer, "owner approved");
+
+        assertThat(approval.getStatus()).isEqualTo("PENDING");
+        assertThat(JsonUtil.parse(approval.getPayload()).path("approvalChain").get(0).path("status").asText())
+            .isEqualTo("APPROVED");
+        assertThat(JsonUtil.parse(approval.getPayload()).path("approvalChain").get(1).path("status").asText())
+            .isEqualTo("PENDING");
+        verify(outboxPublisher, never()).publish(any(), any(), any(Map.class));
+
+        assertThatThrownBy(() -> service.approve(approvalId, firstReviewer, "self review"))
+            .isInstanceOf(BizException.class)
+            .hasMessageContaining("另一审批人");
+
+        service.approve(approvalId, secondReviewer, "security approved");
+
+        assertThat(approval.getStatus()).isEqualTo("APPROVED");
+        verify(outboxPublisher).publish(eq("security.approval.decided"), eq(approvalId.toString()), any(Map.class));
     }
 
     @Test

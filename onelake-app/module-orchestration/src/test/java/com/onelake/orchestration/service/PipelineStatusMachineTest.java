@@ -3,6 +3,8 @@ package com.onelake.orchestration.service;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.OutboxPublisher;
+import com.onelake.common.system.entity.TenantEntity;
+import com.onelake.common.system.repository.TenantRepository;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineVersion;
@@ -22,6 +24,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Optional;
@@ -36,6 +39,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 /**
@@ -56,6 +60,7 @@ class PipelineStatusMachineTest {
     @Mock private PipelineSnapshotService snapshotService;
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
+    @Mock private TenantRepository tenantRepo;
 
     private PipelineService service;
     private UUID tenantId;
@@ -64,17 +69,25 @@ class PipelineStatusMachineTest {
     @BeforeEach
     void setup() {
         service = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, snapshotService, outboxProvider);
+                runRepo, compileService, snapshotService, outboxProvider, tenantRepo);
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
         TenantContext.setUserId(UUID.randomUUID());
+        TenantContext.setUsername("pipeline-author");
+        lenient().when(tenantRepo.findByIdForUpdate(tenantId))
+                .thenReturn(Optional.of(new TenantEntity()));
         lenient().doAnswer(inv -> {
             Dag d = inv.getArgument(0);
             if (d.getId() == null) d.setId(UUID.randomUUID());
             return d;
         }).when(dagRepo).save(any(Dag.class));
         lenient().when(snapshotService.publishSnapshot(any())).thenAnswer(inv -> {
+            PipelineVersion version = new PipelineVersion();
+            version.setId(UUID.randomUUID());
+            return version;
+        });
+        lenient().when(snapshotService.publishSnapshot(any(), any())).thenAnswer(inv -> {
             PipelineVersion version = new PipelineVersion();
             version.setId(UUID.randomUUID());
             return version;
@@ -89,6 +102,7 @@ class PipelineStatusMachineTest {
     @Test
     void validatedTransitionRequiresValidationPass() {
         Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
         // 编译返回无效计划，validate() 也应返回无效结果。
         lenient().when(compileService.compile(dagId)).thenReturn(invalidCompileResult());
@@ -102,6 +116,7 @@ class PipelineStatusMachineTest {
     @Test
     void validatedTransitionSucceedsWhenCompilePasses() {
         Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
         when(compileService.compile(dagId)).thenReturn(validCompileResult());
         lenient().when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of());
@@ -111,12 +126,13 @@ class PipelineStatusMachineTest {
 
         assertThat(updated.getStatus()).isEqualTo("VALIDATED");
         assertThat(updated.getVersion()).isEqualTo(2); // 已自增。
+        verify(tenantRepo, never()).findByIdForUpdate(tenantId);
     }
 
     @Test
     void publishedFromDraftRejected() {
         Dag dag = dag("DRAFT");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
 
         assertThatThrownBy(() -> service.updatePipelineStatus(dagId, "PUBLISHED"))
                 .isInstanceOf(BizException.class)
@@ -126,7 +142,7 @@ class PipelineStatusMachineTest {
     @Test
     void publishedEmitsOutboxEvent() {
         Dag dag = dag("VALIDATED");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of());
 
@@ -143,9 +159,75 @@ class PipelineStatusMachineTest {
     }
 
     @Test
+    void approvalEnabledSubmitsSnapshotSummaryAndKeepsValidated() {
+        Dag dag = dag("VALIDATED");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
+        when(snapshotService.snapshot(dagId))
+                .thenReturn(new PipelineSnapshotService.SnapshotPayload("{\"tasks\":[]}", "checksum-1"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of());
+        ReflectionTestUtils.setField(service, "publishApprovalEnabled", true);
+
+        Dag updated = service.updatePipelineStatus(dagId, "PUBLISHED");
+
+        ArgumentCaptor<java.util.Map<String, Object>> payloadCaptor =
+                ArgumentCaptor.forClass(java.util.Map.class);
+        assertThat(updated.getStatus()).isEqualTo("VALIDATED");
+        assertThat(updated.getVersion()).isEqualTo(1);
+        verify(tenantRepo).findByIdForUpdate(tenantId);
+        verify(outboxPublisher).publish(eq("pipeline.publish-approval.requested"),
+                eq(dagId.toString()), payloadCaptor.capture());
+        assertThat(payloadCaptor.getValue())
+                .containsEntry("requestType", "PUBLISH")
+                .containsEntry("targetRef", dagId.toString())
+                .containsEntry("applicantName", "pipeline-author")
+                .containsEntry("snapshotChecksum", "checksum-1")
+                .containsEntry("taskCount", 0);
+        verify(snapshotService, never()).publishSnapshot(any());
+    }
+
+    @Test
+    void publishApprovalConfigReflectsConfiguredSwitch() {
+        assertThat(service.isPublishApprovalEnabled()).isFalse();
+
+        ReflectionTestUtils.setField(service, "publishApprovalEnabled", true);
+
+        assertThat(service.isPublishApprovalEnabled()).isTrue();
+    }
+
+    @Test
+    void approvedDecisionPublishesMatchingSnapshotAndSetsPublished() {
+        Dag dag = dag("VALIDATED");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        PipelineSnapshotService.SnapshotPayload verifiedSnapshot =
+                new PipelineSnapshotService.SnapshotPayload("{}", "checksum-1");
+        when(snapshotService.snapshot(dagId)).thenReturn(verifiedSnapshot);
+
+        Dag updated = service.handlePublishApprovalDecision(dagId, "checksum-1", true, "approved");
+
+        assertThat(updated.getStatus()).isEqualTo("PUBLISHED");
+        assertThat(updated.getVersion()).isEqualTo(2);
+        verify(snapshotService).publishSnapshot(dagId, verifiedSnapshot);
+        verify(dagRepo).save(dag);
+    }
+
+    @Test
+    void rejectedDecisionKeepsValidatedWithoutPublishing() {
+        Dag dag = dag("VALIDATED");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+
+        Dag updated = service.handlePublishApprovalDecision(dagId, "checksum-1", false, "risk rejected");
+
+        assertThat(updated.getStatus()).isEqualTo("VALIDATED");
+        assertThat(updated.getVersion()).isEqualTo(1);
+        verify(snapshotService, never()).publishSnapshot(any());
+        verify(dagRepo, never()).save(any(Dag.class));
+    }
+
+    @Test
     void sameStatusIsNoOp() {
         Dag dag = dag("DRAFT");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
 
         Dag updated = service.updatePipelineStatus(dagId, "DRAFT");
 
@@ -158,6 +240,7 @@ class PipelineStatusMachineTest {
         Dag dag = dag("PUBLISHED");
         dag.setPublishedVersionId(null);
         dag.setHasUnpublishedChanges(false);
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
         when(compileService.compile(dagId)).thenReturn(validCompileResult());
 
@@ -168,9 +251,6 @@ class PipelineStatusMachineTest {
 
     @Test
     void invalidStatusRejected() {
-        Dag dag = dag("DRAFT");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
-
         assertThatThrownBy(() -> service.updatePipelineStatus(dagId, "ARCHIVED"))
                 .isInstanceOf(BizException.class);
     }
@@ -197,7 +277,7 @@ class PipelineStatusMachineTest {
         task.setTenantId(tenantId);
         task.setDagId(dagId);
         task.setTaskKey("transform");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(taskRepo.findByDagIdAndTaskKeyForUpdate(dagId, "transform"))
                 .thenReturn(Optional.of(task));
         when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
@@ -223,7 +303,30 @@ class PipelineStatusMachineTest {
         task.setName("transform");
         task.setEngine("SPARK_SQL");
         task.setConfig("{\"sql\":\"SELECT 1\"}");
-        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "transform")).thenReturn(Optional.of(task));
+        when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.updateTask(dagId, "transform", new PipelineTaskRequest(
+                null, null, "changed", null, null, null, null,
+                java.util.Map.of("sql", "SELECT 2"), null, null));
+
+        verify(dagRepo).markPublishedDagChanged(dagId, tenantId);
+    }
+
+    @Test
+    void editingValidatedTaskStillChecksDatabaseStatusForConcurrentApproval() {
+        Dag dag = dag("VALIDATED");
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey("transform");
+        task.setTaskType(com.onelake.orchestration.domain.enums.TaskType.SPARK_SQL);
+        task.setName("transform");
+        task.setEngine("SPARK_SQL");
+        task.setConfig("{\"sql\":\"SELECT 1\"}");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(taskRepo.findByDagIdAndTaskKey(dagId, "transform")).thenReturn(Optional.of(task));
         when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> inv.getArgument(0));
 

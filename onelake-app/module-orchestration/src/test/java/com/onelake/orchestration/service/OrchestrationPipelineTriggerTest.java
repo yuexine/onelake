@@ -113,7 +113,8 @@ class OrchestrationPipelineTriggerTest {
             if (t.getId() == null) t.setId(UUID.randomUUID());
             return t;
         }).when(taskRunRepo).save(any(TaskRun.class));
-        org.mockito.Mockito.lenient().when(sparkBuilder.build(any(), anyList(), anyString(), any()))
+        org.mockito.Mockito.lenient().when(sparkBuilder.build(
+                any(), anyList(), anyString(), any(RunContext.class), any()))
                 .thenReturn(new DagsterRunConfig("onelake_pipeline_run", Map.of()));
         org.mockito.Mockito.lenient().when(runtimeContractService.launchBlockedReason(anyString(), any()))
                 .thenReturn(Optional.empty());
@@ -326,7 +327,7 @@ class OrchestrationPipelineTriggerTest {
         when(compileService.compile(DAG_ID)).thenReturn(validPlan("retry_task"));
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
                 .thenReturn(List.of(task("retry_task", true)));
-        when(sparkBuilder.build(any(), anyList(), anyString(), any()))
+        when(sparkBuilder.build(any(), anyList(), anyString(), any(RunContext.class), any()))
                 .thenThrow(new RuntimeException("invalid run config"));
         when(taskRunRepo.findByJobRunId(any())).thenReturn(List.of());
         JobRun source = new JobRun();
@@ -461,7 +462,8 @@ class OrchestrationPipelineTriggerTest {
         assertThat(savedTaskRun.getDataIntervalEnd()).isEqualTo(intervalEnd);
 
         ArgumentCaptor<Map<String, String>> runtimeParamsCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(sparkBuilder).build(any(), anyList(), anyString(), runtimeParamsCaptor.capture());
+        verify(sparkBuilder).build(
+                any(), anyList(), anyString(), any(RunContext.class), runtimeParamsCaptor.capture());
         assertThat(runtimeParamsCaptor.getValue())
                 .containsEntry("bizdate", "2026-01-02")
                 .containsEntry("logical_date", "2026-01-02T00:00:00Z");

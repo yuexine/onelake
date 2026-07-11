@@ -4,11 +4,14 @@ import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.enums.TaskType;
+import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.service.ParamResolver;
+import com.onelake.orchestration.service.RunContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -233,6 +236,77 @@ class SparkRunConfigBuilderTest {
                 .containsExactlyInAnyOrder(
                         Map.of("key", "region", "value", "eu"),
                         Map.of("key", "run_id", "value", runId.toString()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void rendersDynamicTimeBeforeProducingSqlOrScript() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask task = task(pipelineId, tenantId, "daily", TaskType.SPARK_SQL, true, """
+            {"sql":"select '${bizdate}', '${bizdate-1:yyyyMMdd}', '${cyctime}'"}
+            """);
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                        true, task.getTargetFqn(), null)),
+                true,
+                List.of());
+        TaskBundleContext bundle = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+        RunContext runContext = runContext("2026-06-30T16:00:00Z", "2026-07-01T16:00:00Z");
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                bundle, List.of(task), List.of(), "", 1, Map.of(),
+                runContext, runContext.builtInParameters(runId));
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> op = (Map<String, Object>) ops.get("daily");
+        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
+        assertThat(opConfig.get("sql_or_script"))
+                .isEqualTo("select '2026-07-01', '20260630', '2026-07-02T00:00:00+08:00'");
+    }
+
+    @Test
+    void rendersQualityGateParametersBeforeJsonEncoding() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        PipelineTask gate = task(pipelineId, tenantId, "gate", TaskType.QUALITY_GATE, true, """
+            {
+              "targetModelFqn":"onelake.dwd.orders",
+              "gates":[{
+                "id":"daily","kind":"CUSTOM_SQL","enabled":true,
+                "assertionSql":"select * from {{ model }} where dt = '${bizdate}' and region = '${region}'"
+              }]
+            }
+            """);
+        RunContext runContext = runContext("2026-06-30T16:00:00Z", "2026-07-01T16:00:00Z");
+
+        Map<String, Object> config = builder.buildPerTaskOpConfig(
+                gate, null, runContext, Map.of("region", "north\\west's"));
+
+        assertThat(config.get("sql_or_script").toString())
+                .contains("2026-07-01")
+                .contains("north\\\\\\\\west's")
+                .doesNotContain("${bizdate}")
+                .doesNotContain("${region}");
+    }
+
+    private RunContext runContext(String logicalDate, String dataIntervalEnd) {
+        Instant logical = Instant.parse(logicalDate);
+        return new RunContext(
+                logical,
+                logical,
+                Instant.parse(dataIntervalEnd),
+                "Asia/Shanghai",
+                "NORMAL",
+                null,
+                TriggerType.BACKFILL);
     }
 
     private PipelineTask task(UUID pipelineId, UUID tenantId, String key, TaskType type,

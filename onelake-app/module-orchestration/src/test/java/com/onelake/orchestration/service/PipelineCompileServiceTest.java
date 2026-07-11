@@ -132,6 +132,25 @@ class PipelineCompileServiceTest {
     }
 
     @Test
+    void rejectsInvalidDynamicTimeExpressionDuringCompile() {
+        Dag dag = newPipelineDag();
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+
+        PipelineTask t = sparkSqlTask("t_invalid_param", "iceberg.dwd.invalid_param");
+        t.setConfig("{\"sql\":\"SELECT '${bizdate--1}'\"}");
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(t));
+        when(edgeRepo.findByDagId(dagId)).thenReturn(List.of());
+
+        PipelineCompileResult result = service.compile(dagId);
+
+        assertThat(result.tasks().get(0).valid()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage())
+                .contains("parameter expression invalid")
+                .contains("bizdate--1");
+        assertThat(t.getCompileStatus()).isEqualTo(TaskCompileStatus.FAILED);
+    }
+
+    @Test
     void pysparkRequiresScriptConfig() {
         Dag dag = newPipelineDag();
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));

@@ -614,6 +614,14 @@ public class OrchestrationService {
                 dag.getResourceGroup() == null ? "spark-default" : dag.getResourceGroup(),
                 dag.getComputeProfile() == null ? "spark-small" : dag.getComputeProfile()
         );
+        RunContext rerunContext = new RunContext(
+                run.getLogicalDate(),
+                run.getDataIntervalStart(),
+                run.getDataIntervalEnd(),
+                run.getTimezone(),
+                run.getRunMode(),
+                run.getBackfillId(),
+                run.getTriggerType());
         DagsterRunConfig runConfig = sparkBuilder.buildGraphRunConfig(
                 ctx,
                 subgraphTasks,
@@ -621,15 +629,8 @@ public class OrchestrationService {
                 pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                 Math.max(1, pipelineMaxParallel),
                 baseAttempts,
-                new RunContext(
-                        run.getLogicalDate(),
-                        run.getDataIntervalStart(),
-                        run.getDataIntervalEnd(),
-                        run.getTimezone(),
-                        run.getRunMode(),
-                        run.getBackfillId(),
-                        run.getTriggerType())
-                        .builtInParameters(run.getId()));
+                rerunContext,
+                rerunContext.builtInParameters(run.getId()));
 
         try {
             String dagsterRunId = dagster.launch(
@@ -850,12 +851,14 @@ public class OrchestrationService {
                     pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
                     Math.max(1, pipelineMaxParallel),
                     Map.of(),
+                    runContext,
                     runtimeParams);
         }
         return sparkBuilder.build(
                 ctx,
                 tasks,
                 pipelineCallbackBaseUrl == null ? "" : pipelineCallbackBaseUrl.trim(),
+                runContext,
                 runtimeParams);
     }
 

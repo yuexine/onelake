@@ -139,6 +139,11 @@ public class PipelineCompileService {
         if (!gates.isArray() || gates.size() == 0) {
             return fail(t, "QUALITY_GATE task requires config.gates with at least one rule");
         }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "QUALITY_GATE parameter expression invalid: " + ex.getMessage());
+        }
         return ok(t);
     }
 
@@ -158,10 +163,28 @@ public class PipelineCompileService {
         if (!StringUtils.hasText(script)) {
             return fail(t, t.getTaskType().name() + " task requires non-empty config." + expectedField);
         }
+        try {
+            ParamRenderer.validate(script);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, t.getTaskType().name() + " parameter expression invalid: " + ex.getMessage());
+        }
         if (!StringUtils.hasText(t.getTargetFqn())) {
             return fail(t, t.getTaskType().name() + " task requires targetFqn for catalog, lineage, and quality checks");
         }
         return ok(t);
+    }
+
+    private static void validateParamExpressions(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return;
+        }
+        if (node.isTextual()) {
+            ParamRenderer.validate(node.asText());
+            return;
+        }
+        if (node.isContainerNode()) {
+            node.forEach(PipelineCompileService::validateParamExpressions);
+        }
     }
 
     private static com.fasterxml.jackson.databind.JsonNode parseSafeJson(String json) {

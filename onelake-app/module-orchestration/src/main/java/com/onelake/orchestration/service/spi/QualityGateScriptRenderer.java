@@ -1,9 +1,15 @@
 package com.onelake.orchestration.service.spi;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.PipelineTask;
+import com.onelake.orchestration.service.ParamRenderer;
+import com.onelake.orchestration.service.RunContext;
 import org.springframework.util.StringUtils;
+
+import java.util.Map;
 
 /**
  * 为 {@code QUALITY_GATE} 流水线节点渲染可执行 PySpark 脚本。
@@ -27,8 +33,18 @@ final class QualityGateScriptRenderer {
      * @return 可直接放入 Dagster Spark op 配置的 Python 源码
      */
     static String render(PipelineTask task) {
-        JsonNode config = parseConfig(task);
-        String targetFqn = targetFqn(task, config);
+        return render(task, null, Map.of());
+    }
+
+    /**
+     * 先在结构化门禁配置中渲染参数，再编码为 Python/JSON 字面量。
+     *
+     * <p>这样参数中的引号和反斜杠会由 JSON 编码器统一转义，不会破坏生成脚本结构。</p>
+     */
+    static String render(PipelineTask task, RunContext context, Map<String, String> params) {
+        JsonNode rawConfig = parseConfig(task);
+        String targetFqn = ParamRenderer.render(targetFqn(task, rawConfig), context, params);
+        JsonNode config = renderConfig(rawConfig, context, params);
         String qualityTableFqn = qualityTableFqn(targetFqn, config);
         JsonNode gates = config.path("gates");
         String gatesJson = gates.isArray() ? gates.toString() : "[]";
@@ -188,6 +204,30 @@ final class QualityGateScriptRenderer {
                 pythonString(qualityTableFqn),
                 pythonString(gatesJson)
         ).trim();
+    }
+
+    private static JsonNode renderConfig(JsonNode node,
+                                         RunContext context,
+                                         Map<String, String> params) {
+        if (node == null || node.isNull()) {
+            return JsonUtil.mapper().nullNode();
+        }
+        if (node.isTextual()) {
+            return JsonUtil.mapper().getNodeFactory().textNode(
+                    ParamRenderer.render(node.asText(), context, params));
+        }
+        if (node.isObject()) {
+            ObjectNode rendered = JsonUtil.mapper().createObjectNode();
+            node.fields().forEachRemaining(entry -> rendered.set(
+                    entry.getKey(), renderConfig(entry.getValue(), context, params)));
+            return rendered;
+        }
+        if (node.isArray()) {
+            ArrayNode rendered = JsonUtil.mapper().createArrayNode();
+            node.forEach(item -> rendered.add(renderConfig(item, context, params)));
+            return rendered;
+        }
+        return node.deepCopy();
     }
 
     /** 解析被检查模型，配置值优先于任务通用的 targetFqn。 */

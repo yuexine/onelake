@@ -75,6 +75,15 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                   List<PipelineTask> tasks,
                                   String callbackBaseUrl,
                                   Map<String, String> runtimeParams) {
+        return build(ctx, tasks, callbackBaseUrl, null, runtimeParams);
+    }
+
+    /** 构建 LEGACY 配置，并用运行上下文渲染动态业务时间参数。 */
+    public DagsterRunConfig build(TaskBundleContext ctx,
+                                  List<PipelineTask> tasks,
+                                  String callbackBaseUrl,
+                                  RunContext runContext,
+                                  Map<String, String> runtimeParams) {
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -86,7 +95,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             PipelineTask task = taskByKey.get(result.taskKey());
             if (task == null || !Boolean.TRUE.equals(task.getExecutable())) continue;
             sparkTasks.add(buildPerTaskOpConfig(
-                    task, null, resolveTaskParameters(task, runtimeParams, userParamsByTask)));
+                    task, null, runContext,
+                    resolveTaskParameters(task, runtimeParams, userParamsByTask)));
         }
 
         Map<String, Object> opConfig = new LinkedHashMap<>();
@@ -136,6 +146,20 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                                 int maxParallel,
                                                 Map<String, Integer> baseAttempts,
                                                 Map<String, String> runtimeParams) {
+        return buildGraphRunConfig(
+                ctx, tasks, pipelineEdges, callbackBaseUrl, maxParallel,
+                baseAttempts, null, runtimeParams);
+    }
+
+    /** 构建 GRAPH 配置，并用运行上下文渲染动态业务时间参数。 */
+    public DagsterRunConfig buildGraphRunConfig(TaskBundleContext ctx,
+                                                List<PipelineTask> tasks,
+                                                List<PipelineTaskEdge> pipelineEdges,
+                                                String callbackBaseUrl,
+                                                int maxParallel,
+                                                Map<String, Integer> baseAttempts,
+                                                RunContext runContext,
+                                                Map<String, String> runtimeParams) {
         // GRAPH 模式把可观测节点和 PIPELINE 边完整交给 Dagster op 内置调度器，旧 build(...) 保持扁平 tasks[] 回退。
         PipelineCompileResult plan = ctx.compileResult();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -155,7 +179,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             Map<String, String> taskParams = resolveTaskParameters(
                     task, runtimeParams, userParamsByTask);
             paramsByTaskKey.put(task.getTaskKey(), taskParams);
-            Map<String, Object> node = new LinkedHashMap<>(buildPerTaskOpConfig(task, null, taskParams));
+            Map<String, Object> node = new LinkedHashMap<>(
+                    buildPerTaskOpConfig(task, null, runContext, taskParams));
             node.put("base_attempt", Math.max(1, safeBaseAttempts.getOrDefault(task.getTaskKey(), 1)));
             node.put("max_retries", resolveMaxRetries(task));
             nodes.add(node);
@@ -201,9 +226,17 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         return buildPerTaskOpConfig(task, resourceProfile, Map.of());
     }
 
-    /** 为单个节点生成配置，并在输出 sql_or_script 前完成 H1 参数替换。 */
+    /** H1 兼容入口；无运行上下文时只渲染普通键值参数。 */
     public Map<String, Object> buildPerTaskOpConfig(PipelineTask task,
                                                     Map<String, Object> resourceProfile,
+                                                    Map<String, String> params) {
+        return buildPerTaskOpConfig(task, resourceProfile, null, params);
+    }
+
+    /** 为单个节点生成配置，并在输出 sql_or_script 前完成 H2 参数渲染。 */
+    public Map<String, Object> buildPerTaskOpConfig(PipelineTask task,
+                                                    Map<String, Object> resourceProfile,
+                                                    RunContext runContext,
                                                     Map<String, String> params) {
         Map<String, Object> opConfig = new LinkedHashMap<>();
         opConfig.put("task_key", task.getTaskKey());
@@ -214,14 +247,15 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
         // 解析 config jsonb，提取 script/sql/from_tables。
         JsonNode cfg = parseSafe(task.getConfig());
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
-            opConfig.put("sql_or_script", ParamRenderer.render(QualityGateScriptRenderer.render(task), params));
-            String target = QualityGateScriptRenderer.targetFqn(task, cfg);
+            opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task, runContext, params));
+            String target = ParamRenderer.render(
+                    QualityGateScriptRenderer.targetFqn(task, cfg), runContext, params);
             opConfig.put("from_tables", StringUtils.hasText(target) ? List.of(target) : List.of());
         } else {
             String sql = textOrEmpty(cfg, "sql");
             String script = textOrEmpty(cfg, "script");
             opConfig.put("sql_or_script", ParamRenderer.render(
-                    StringUtils.hasText(script) ? script : sql, params));
+                    StringUtils.hasText(script) ? script : sql, runContext, params));
             opConfig.put("from_tables", textArray(cfg.path("from_tables")));
         }
 

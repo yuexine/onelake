@@ -1616,6 +1616,49 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void failedInternalCallbackLoadsPublishedTopologyWithoutUserTenantContext() {
+        UUID versionId = UUID.randomUUID();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        run.setPipelineVersionId(versionId);
+        Dag dag = dag();
+        TaskRun failed = taskRun("observe", TaskRunStatus.RUNNING);
+        TaskRun downstream = taskRun("downstream", TaskRunStatus.QUEUED);
+        PipelineTaskEdge edge = pipelineEdge("observe", "downstream");
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(failed, downstream));
+        when(pipelineSnapshotService.loadExecutionSnapshotForRuntime(versionId, DAG_ID, TENANT_ID))
+                .thenReturn(new PipelineSnapshotService.ExecutionSnapshot(
+                        version, dag, List.of(), List.of(edge), List.of()));
+        TenantContext.clear();
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "observe",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.FAILED,
+                        null,
+                        Instant.parse("2026-07-12T13:36:25Z"),
+                        "SENSOR timed out after 3s",
+                        null,
+                        null,
+                        null,
+                        TENANT_ID + "/" + RUN_ID + "/observe/latest.log",
+                        1,
+                        "observe",
+                        null));
+
+        assertThat(result.applied()).isTrue();
+        assertThat(failed.getStatus()).isEqualTo(TaskRunStatus.FAILED);
+        assertThat(failed.getErrorMsg()).isEqualTo("SENSOR timed out after 3s");
+        assertThat(failed.getLogRef()).endsWith("/observe/latest.log");
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.UPSTREAM_FAILED);
+    }
+
+    @Test
     void applyTaskRunCallbackKeepsIntentionalSkipDistinctFromUpstreamFailure() {
         JobRun run = jobRun(DAG_ID);
         run.setStatus(DagStatus.RUNNING);
@@ -1757,6 +1800,35 @@ class OrchestrationServiceTest {
         assertThat(pending.getErrorMsg()).isEqualTo("Dagster graph run reported FAILED before node callback completed");
         verify(taskRunRepo, never()).save(callbackTerminal);
         verify(taskRunRepo).save(pending);
+    }
+
+    @Test
+    void successfulGraphRunPropagatesSkippedCallbackToUnexecutedDownstream() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.SUCCEEDED);
+        run.setFinishedAt(Instant.parse("2026-07-12T13:31:27Z"));
+        TaskRun sensor = taskRun("sensor", TaskRunStatus.SKIPPED);
+        sensor.setFinishedAt(Instant.parse("2026-07-12T13:31:26Z"));
+        TaskRun downstream = taskRun("downstream", TaskRunStatus.QUEUED);
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)), eq(pageable)))
+                .thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(sensor, downstream));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID))
+                .thenReturn(List.of(pipelineEdge("sensor", "downstream")));
+
+        service.listRuns(pageable);
+
+        assertThat(sensor.getStatus()).isEqualTo(TaskRunStatus.SKIPPED);
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.SKIPPED);
+        assertThat(downstream.getStartedAt()).isNull();
+        assertThat(downstream.getFinishedAt()).isEqualTo(run.getFinishedAt());
+        assertThat(downstream.getErrorMsg()).isEqualTo("Upstream task skipped: sensor");
+        verify(taskRunRepo).save(downstream);
     }
 
     private Dag dag() {

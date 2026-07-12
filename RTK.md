@@ -31,7 +31,7 @@
 | Backend | Java 17, Spring Boot 3.3.2, Maven multi-module modular monolith under `onelake-app/`. |
 | Modules | `module-common`, `module-integration`, `module-orchestration`, `module-catalog`, `module-modeling`, `module-quality`, `module-security`, `module-dataservice`, `module-analytics`, and `bootstrap`. |
 | Data plane | `onelake-app/docker-compose.yml` defines Postgres, Redis, MinIO, Hive Metastore, Trino, Keycloak, OpenMetadata, PostgREST, APISIX, Dagster, Superset, JupyterHub, Spark, Flink, Kafka/Zookeeper, and etcd. Airbyte local deployment is managed by `abctl` through `onelake-app/scripts/airbyte-local.sh`. |
-| Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. The orchestration migration head is V30; M4 starts at V31. |
+| Database | Flyway migrations live under `onelake-app/bootstrap/src/main/resources/db/migration/*` and target multiple schemas. The orchestration migration head is V32; M4 started at V31. |
 | Frontend | React 18, Vite 5, TypeScript, Ant Design 5, Pro Components, React Router, React Query, Zustand, X6, Monaco, ECharts under `onelake-app/web-console`. |
 | Product Scope | Modular control-plane implementation with broad frontend coverage. Orchestration V2 M1–M3 are complete; M4 status is tracked in `docs/数据开发与编排模块V2升级计划.md` and the detailed plan. |
 | Runtime Logs | Use root `.run-logs/` for long-running local process logs. Existing frontend log path: `.run-logs/web-console-vite.log`. |

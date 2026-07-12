@@ -78,6 +78,8 @@ public class PipelineCompileService {
             "PATH", "HOME", "TMPDIR", "LANG", "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONHOME",
             "LD_LIBRARY_PATH", "LD_PRELOAD", "BASH_ENV", "ENV");
     private static final int SCRIPT_MAX_ENV_ENTRIES = 16;
+    private static final int OBSERVE_MAX_WAIT_SECONDS = 86_400;
+    private static final int SENSOR_MAX_POLL_INTERVAL_SECONDS = 300;
 
     private final DagRepository dagRepo;
     private final PipelineTaskRepository taskRepo;
@@ -215,8 +217,110 @@ public class PipelineCompileService {
             case PYTHON, SHELL -> validateScriptTask(t, tenantId);
             case CONDITION -> validateConditionTask(t);
             case BRANCH -> validateBranchTask(t);
-            case SENSOR, WAIT, SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
+            case SENSOR -> validateSensorTask(t);
+            case WAIT -> validateWaitTask(t);
+            case SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
         };
+    }
+
+    private TaskCompileResult validateSensorTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "SENSOR task requires valid object config");
+        }
+        String assetFqn = firstText(
+                textOrEmpty(cfg, "assetFqn"),
+                textOrEmpty(cfg, "asset_fqn"),
+                textOrEmpty(cfg, "targetFqn"),
+                textOrEmpty(cfg, "target_fqn"));
+        if (!StringUtils.hasText(assetFqn)) {
+            return fail(t, "SENSOR task requires config.assetFqn");
+        }
+        if (assetFqn.length() > 512) {
+            return fail(t, "SENSOR config.assetFqn must not exceed 512 characters");
+        }
+        String partition = firstText(
+                textOrEmpty(cfg, "partition"),
+                textOrEmpty(cfg, "batchId"),
+                textOrEmpty(cfg, "batch_id"));
+        if (partition.length() > 128) {
+            return fail(t, "SENSOR config.partition must not exceed 128 characters");
+        }
+        try {
+            int timeout = requiredObserveSeconds(
+                    cfg, "timeoutSeconds", "timeout_seconds", 1, OBSERVE_MAX_WAIT_SECONDS);
+            int pollInterval = requiredObserveSeconds(
+                    cfg, "pollIntervalSeconds", "poll_interval_seconds",
+                    1, SENSOR_MAX_POLL_INTERVAL_SECONDS);
+            if (pollInterval > timeout) {
+                return fail(t, "SENSOR poll interval must not exceed timeout");
+            }
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "SENSOR wait config invalid: " + ex.getMessage());
+        }
+        String onTimeout = firstText(
+                textOrEmpty(cfg, "onTimeout"), textOrEmpty(cfg, "on_timeout"));
+        if (!Set.of("FAILED", "SKIPPED").contains(onTimeout.toUpperCase(Locale.ROOT))) {
+            return fail(t, "SENSOR config.onTimeout must be FAILED or SKIPPED");
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "SENSOR parameter expression invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private TaskCompileResult validateWaitTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "WAIT task requires valid object config");
+        }
+        boolean hasOffset = hasAnyField(cfg, "offsetSeconds", "offset_seconds");
+        boolean hasDuration = hasAnyField(cfg, "durationSeconds", "duration_seconds");
+        if (hasOffset == hasDuration) {
+            return fail(t, "WAIT task requires exactly one of config.offsetSeconds or config.durationSeconds");
+        }
+        try {
+            if (hasOffset) {
+                requiredObserveSeconds(
+                        cfg, "offsetSeconds", "offset_seconds", 0, OBSERVE_MAX_WAIT_SECONDS);
+            } else {
+                requiredObserveSeconds(
+                        cfg, "durationSeconds", "duration_seconds", 1, OBSERVE_MAX_WAIT_SECONDS);
+            }
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "WAIT config invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private static int requiredObserveSeconds(JsonNode cfg,
+                                              String camelField,
+                                              String snakeField,
+                                              int min,
+                                              int max) {
+        JsonNode value = cfg.has(camelField) ? cfg.get(camelField) : cfg.get(snakeField);
+        String displayField = "config." + camelField;
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new IllegalArgumentException(displayField + " must be an integer");
+        }
+        int parsed = value.intValue();
+        if (parsed < min || parsed > max) {
+            throw new IllegalArgumentException(
+                    displayField + " must be between " + min + " and " + max);
+        }
+        return parsed;
+    }
+
+    private static boolean hasAnyField(JsonNode cfg, String... fields) {
+        for (String field : fields) {
+            if (cfg.has(field)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private TaskCompileResult validateConditionTask(PipelineTask t) {
@@ -715,7 +819,7 @@ public class PipelineCompileService {
             }
             String assetFqn = firstText(e.getAssetFqn(), source.getTargetFqn());
             if (!StringUtils.hasText(assetFqn)
-                    && source.getTaskType().category() != TaskCategory.CONTROL) {
+                    && source.getTaskType().category() == TaskCategory.EXEC) {
                 errors.add(String.format(
                         "Edge %s cannot resolve assetFqn from edge.assetFqn or source task '%s'.targetFqn",
                         edgeId(e), source.getTaskKey()));

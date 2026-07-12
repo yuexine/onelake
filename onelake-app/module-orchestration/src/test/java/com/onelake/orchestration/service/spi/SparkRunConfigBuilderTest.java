@@ -607,6 +607,36 @@ class SparkRunConfigBuilderTest {
                 .doesNotContain("${region}");
     }
 
+    @Test
+    void mapsSensorAndWaitConfigsToBoundedObserveRuntimeFields() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        RunContext runContext = runContext("2026-07-11T16:00:00Z", "2026-07-12T16:00:00Z");
+        PipelineTask sensor = task(pipelineId, tenantId, "sensor", TaskType.SENSOR, false, """
+                {"assetFqn":"onelake.ods.orders","partition":"${bizdate}",
+                 "timeoutSeconds":60,"pollIntervalSeconds":5,"onTimeout":"skipped"}
+                """);
+        PipelineTask wait = task(pipelineId, tenantId, "wait", TaskType.WAIT, false,
+                "{\"offsetSeconds\":120}");
+
+        Map<String, Object> sensorConfig = builder.buildPerTaskOpConfig(
+                sensor, null, runContext, runContext.builtInParameters(UUID.randomUUID()));
+        Map<String, Object> waitConfig = builder.buildPerTaskOpConfig(
+                wait, null, runContext, runContext.builtInParameters(UUID.randomUUID()));
+
+        assertThat(sensorConfig)
+                .containsEntry("engine", "OBSERVE")
+                .containsEntry("sensor_asset_fqn", "onelake.ods.orders")
+                .containsEntry("sensor_partition", "2026-07-12")
+                .containsEntry("timeout_seconds", 60)
+                .containsEntry("poll_interval_seconds", 5)
+                .containsEntry("on_timeout", "SKIPPED");
+        assertThat(waitConfig)
+                .containsEntry("engine", "OBSERVE")
+                .containsEntry("wait_offset_seconds", 120)
+                .containsEntry("wait_duration_seconds", -1);
+    }
+
     private RunContext runContext(String logicalDate, String dataIntervalEnd) {
         Instant logical = Instant.parse(logicalDate);
         return new RunContext(

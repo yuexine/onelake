@@ -1680,6 +1680,12 @@ public class OrchestrationService {
         // GRAPH 模式可能同时收到节点回调和 run 终态兜底；锁住整批 task_run 后再补偿。
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(run.getId());
         Map<String, PipelineTask> snapshotTasks = snapshotTasksForRun(run);
+        if (mapped == TaskRunStatus.SUCCEEDED) {
+            // 原生 Dagster 图通过可选 Nothing 输出传播 SKIPPED；被跳过的下游不会执行，
+            // 因而也不会发送 M1 节点回调。终态补偿必须按冻结拓扑恢复这一事实，不能
+            // 因整条 Dagster run 成功而把未执行节点误标为 SUCCEEDED。
+            propagateSkippedTaskRuns(run, taskRuns);
+        }
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
         if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
             propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
@@ -1702,6 +1708,48 @@ public class OrchestrationService {
             taskRunRepo.save(tr);
         }
         return reconcileGraphRunStatusFromTaskRuns(taskRuns, terminalStatus);
+    }
+
+    private void propagateSkippedTaskRuns(JobRun run, List<TaskRun> taskRuns) {
+        Set<String> skipped = taskRuns.stream()
+                .filter(task -> task.getStatus() == TaskRunStatus.SKIPPED)
+                .map(TaskRun::getTaskKey)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (skipped.isEmpty()) {
+            return;
+        }
+        Map<String, TaskRun> runByTaskKey = taskRuns.stream()
+                .collect(Collectors.toMap(TaskRun::getTaskKey, Function.identity(), (a, b) -> a,
+                        LinkedHashMap::new));
+        List<PipelineTaskEdge> allEdges = run.getPipelineVersionId() == null
+                ? pipelineTaskEdgeRepo.findByDagId(run.getDagId())
+                : pipelineSnapshotService
+                        .loadExecutionSnapshotForRuntime(
+                                run.getPipelineVersionId(), run.getDagId(), taskRunTenantId(taskRuns))
+                        .edges();
+        if (allEdges == null) {
+            allEdges = List.of();
+        }
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (PipelineTaskEdge edge : allEdges) {
+                if (edge.getEdgeLayer() != EdgeLayer.PIPELINE || !skipped.contains(edge.getSourceKey())) {
+                    continue;
+                }
+                TaskRun downstream = runByTaskKey.get(edge.getTargetKey());
+                if (downstream == null || downstream.getStatus() != TaskRunStatus.QUEUED) {
+                    continue;
+                }
+                downstream.setStatus(TaskRunStatus.SKIPPED);
+                downstream.setFinishedAt(run.getFinishedAt() == null ? Instant.now() : run.getFinishedAt());
+                downstream.setErrorMsg("Upstream task skipped: " + edge.getSourceKey());
+                taskRunRepo.save(downstream);
+                if (skipped.add(downstream.getTaskKey())) {
+                    changed = true;
+                }
+            }
+        }
     }
 
     private TaskRunStatus mapTerminalTaskRunStatus(DagStatus terminalStatus) {
@@ -1767,7 +1815,8 @@ public class OrchestrationService {
         List<PipelineTaskEdge> allEdges = run.getPipelineVersionId() == null
                 ? pipelineTaskEdgeRepo.findByDagId(run.getDagId())
                 : pipelineSnapshotService
-                        .loadExecutionSnapshot(run.getPipelineVersionId(), run.getDagId())
+                        .loadExecutionSnapshotForRuntime(
+                                run.getPipelineVersionId(), run.getDagId(), taskRunTenantId(taskRuns))
                         .edges();
         if (allEdges == null) {
             allEdges = List.of();
@@ -1794,6 +1843,14 @@ public class OrchestrationService {
                 changed = true;
             }
         }
+    }
+
+    private UUID taskRunTenantId(List<TaskRun> taskRuns) {
+        return taskRuns.stream()
+                .map(TaskRun::getTenantId)
+                .filter(java.util.Objects::nonNull)
+                .findFirst()
+                .orElseThrow(() -> new BizException(40100, "task_run tenant identity required"));
     }
 
     private boolean isTerminalTaskRunStatus(TaskRunStatus status) {

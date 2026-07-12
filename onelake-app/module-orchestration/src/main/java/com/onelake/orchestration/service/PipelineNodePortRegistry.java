@@ -89,6 +89,13 @@ final class PipelineNodePortRegistry {
                     Map.of("out", new OutputPort("out")),
                     Set.of()
             );
+            case SENSOR, WAIT -> new NodeContract(
+                    type.name(),
+                    engine,
+                    Map.of("in", new InputPort("in", false, 0, Integer.MAX_VALUE)),
+                    Map.of("out", new OutputPort("out")),
+                    Set.of()
+            );
             default -> NodeContract.empty(type.name(), engine);
         };
     }

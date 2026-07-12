@@ -286,6 +286,53 @@ class PipelineCompileServiceTest {
     }
 
     @Test
+    void sensorAndWaitRequireBoundedObserveConfig() {
+        PipelineTask missingTarget = extensionTask("sensor_target", TaskType.SENSOR);
+        missingTarget.setConfig("{\"timeoutSeconds\":60,\"pollIntervalSeconds\":5,\"onTimeout\":\"FAILED\"}");
+        PipelineTask unboundedSensor = extensionTask("sensor_timeout", TaskType.SENSOR);
+        unboundedSensor.setConfig("""
+                {"assetFqn":"onelake.ods.orders","timeoutSeconds":86401,
+                 "pollIntervalSeconds":5,"onTimeout":"FAILED"}
+                """);
+        PipelineTask ambiguousWait = extensionTask("wait_ambiguous", TaskType.WAIT);
+        ambiguousWait.setConfig("{\"offsetSeconds\":60,\"durationSeconds\":5}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(missingTarget, unboundedSensor, ambiguousWait), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(message -> assertThat(message).contains("SENSOR").contains("assetFqn"))
+                .anySatisfy(message -> assertThat(message).contains("timeoutSeconds").contains("86400"))
+                .anySatisfy(message -> assertThat(message).contains("exactly one").contains("durationSeconds"));
+    }
+
+    @Test
+    void observeNodesCompileWithoutDeclaringAssetOutput() {
+        PipelineTask sensor = extensionTask("sensor", TaskType.SENSOR);
+        sensor.setTargetFqn(null);
+        PipelineTask wait = extensionTask("wait", TaskType.WAIT);
+        wait.setTargetFqn(null);
+        PipelineTask downstream = sparkSqlTask("downstream", "onelake.dwd.downstream");
+
+        PipelineCompileResult result = service.compile(
+                dagId,
+                tenantId,
+                List.of(sensor, wait, downstream),
+                List.of(
+                        edge("sensor", "wait", EdgeLayer.PIPELINE),
+                        edge("wait", "downstream", EdgeLayer.PIPELINE)));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(sensor.getCategory()).isEqualTo(TaskCategory.OBSERVE);
+        assertThat(wait.getCategory()).isEqualTo(TaskCategory.OBSERVE);
+        assertThat(sensor.getExecutable()).isFalse();
+        assertThat(wait.getExecutable()).isFalse();
+        assertThat(result.graphErrors()).noneSatisfy(
+                message -> assertThat(message).contains("cannot resolve assetFqn"));
+    }
+
+    @Test
     void branchMappingMustCoverDirectPipelineDownstreamTasks() {
         PipelineTask branch = extensionTask("branch", TaskType.BRANCH);
         branch.setConfig("""
@@ -622,6 +669,11 @@ class PipelineCompileServiceTest {
             case SHELL -> "{\"script\":\"echo ok\"}";
             case CONDITION -> "{\"expression\":\"true\"}";
             case BRANCH -> "{\"expression\":\"condition\",\"branches\":{\"condition\":\"condition\"}}";
+            case SENSOR -> """
+                    {"assetFqn":"onelake.ods.orders","partition":"2026-07-12",
+                     "timeoutSeconds":60,"pollIntervalSeconds":5,"onTimeout":"FAILED"}
+                    """;
+            case WAIT -> "{\"durationSeconds\":1}";
             default -> "{\"enabled\":true}";
         });
         return task;

@@ -1101,10 +1101,12 @@ class OrchestrationPipelineTriggerTest {
         version.setId(versionId);
         version.setDagId(DAG_ID);
         version.setTenantId(TENANT_ID);
-        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+        PipelineSnapshotService.ExecutionSnapshot snapshot =
                 new PipelineSnapshotService.ExecutionSnapshot(
                         version, dag, List.of(upstreamTask, downstreamTask),
-                        List.of(edge("t_upstream", "t_downstream")), List.of()));
+                        List.of(edge("t_upstream", "t_downstream")), List.of());
+        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(snapshot);
+        when(snapshotService.loadExecutionSnapshotForRuntime(versionId, DAG_ID, TENANT_ID)).thenReturn(snapshot);
 
         service.listRuns(PageRequest.of(0, 10));
 

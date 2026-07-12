@@ -136,10 +136,23 @@ public class PipelineSnapshotService {
     /** 按版本 ID 读取并重建一次运行所需的 DAG、任务、边和冻结参数。 */
     @Transactional(readOnly = true)
     public ExecutionSnapshot loadExecutionSnapshot(UUID versionId, UUID expectedDagId) {
-        UUID tenantId = requireTenant();
+        return loadExecutionSnapshotForRuntime(versionId, expectedDagId, requireTenant());
+    }
+
+    /**
+     * 内部执行器/回调按已持久化运行归属读取冻结快照，不依赖请求线程的用户上下文。
+     * 调用方必须同时提供 tenantId 和 dagId，避免内部令牌路径扩大快照读取边界。
+     */
+    @Transactional(readOnly = true)
+    ExecutionSnapshot loadExecutionSnapshotForRuntime(UUID versionId,
+                                                      UUID expectedDagId,
+                                                      UUID expectedTenantId) {
+        if (expectedTenantId == null || expectedDagId == null) {
+            throw new BizException(40100, "Pipeline runtime snapshot identity required");
+        }
         PipelineVersion version = versionRepo.findById(versionId)
-                .filter(candidate -> tenantId.equals(candidate.getTenantId()))
-                .filter(candidate -> expectedDagId == null || expectedDagId.equals(candidate.getDagId()))
+                .filter(candidate -> expectedTenantId.equals(candidate.getTenantId()))
+                .filter(candidate -> expectedDagId.equals(candidate.getDagId()))
                 .orElseThrow(() -> new BizException(40400, "Pipeline 版本不存在"));
         return decode(version);
     }

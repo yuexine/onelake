@@ -956,6 +956,46 @@ def test_native_pipeline_job_exposes_per_task_steps_and_native_dependencies(monk
     assert running[-1] == "quality_gate"
 
 
+def test_native_sensor_skip_omits_output_and_skips_downstream(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    monkeypatch.setattr(
+        definitions,
+        "_execute_observe_wait",
+        lambda *args: {"status": "SKIPPED", "message": "sensor timed out"},
+    )
+    definition = {
+        "pipeline_id": "00000000-0000-0000-0000-000000000077",
+        "task_keys": ["sensor_native", "downstream_native"],
+        "edges": [{"source_key": "sensor_native", "target_key": "downstream_native"}],
+    }
+    sensor_config = _native_node_config("sensor_native", "SENSOR")
+    sensor_config.update({
+        "target_fqn": "",
+        "sensor_asset_fqn": "onelake.ods.orders",
+        "timeout_seconds": 1,
+        "poll_interval_seconds": 1,
+        "on_timeout": "SKIPPED",
+    })
+
+    result = definitions._build_native_pipeline_job(definition).execute_in_process(run_config={
+        "ops": {
+            "sensor_native": {"config": sensor_config},
+            "downstream_native": {
+                "config": _native_node_config("downstream_native", "SYNC_REF")
+            },
+        },
+    })
+
+    assert result.success
+    assert _statuses(callbacks, "sensor_native") == ["RUNNING", "SKIPPED"]
+    assert _statuses(callbacks, "downstream_native") == []
+    skipped_steps = {
+        event.step_key for event in result.all_events
+        if event.event_type_value == "STEP_SKIPPED"
+    }
+    assert skipped_steps == {"downstream_native"}
+
+
 def test_native_pipeline_job_name_isolated_by_immutable_version():
     pipeline_job = definitions._build_native_pipeline_job({
         "pipeline_id": "00000000-0000-0000-0000-000000000001",
@@ -1113,9 +1153,7 @@ def test_graph_linear_order_and_sync_ref(monkeypatch):
     assert events.index(("spark_a", "SUCCEEDED")) < events.index(("spark_b", "RUNNING"))
 
 
-@pytest.mark.parametrize("task_type", [
-    "SENSOR", "WAIT", "SUB_PIPELINE", "NOTIFY", "ASSERTION",
-])
+@pytest.mark.parametrize("task_type", ["SUB_PIPELINE", "NOTIFY", "ASSERTION"])
 def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, task_type):
     def fail_if_called(*args):
         raise AssertionError("extension dispatch must not invoke spark-submit")
@@ -1126,6 +1164,136 @@ def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, tas
         definitions._dispatch_graph_node_command(
             _node("extension", task_type), "onelake", "local[2]",
         )
+
+
+def test_sensor_ready_releases_downstream_and_stays_observe_only(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    submit_calls = []
+    readiness_calls = []
+    sensor = _node("sensor", "SENSOR")
+    sensor.update({
+        "target_fqn": "",
+        "sensor_asset_fqn": "onelake.ods.orders",
+        "sensor_partition": "2026-07-12",
+        "timeout_seconds": 60,
+        "poll_interval_seconds": 5,
+        "on_timeout": "FAILED",
+    })
+    monkeypatch.setattr(
+        definitions,
+        "_sensor_asset_ready",
+        lambda *args: readiness_calls.append(args) or (
+            True, {"ready": True, "source": "asset_readiness"},
+        ),
+    )
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda node, *_: submit_calls.append(node["task_key"]) or _command(0),
+    )
+
+    result = _run_graph(_config(
+        [sensor, _node("downstream")], [_edge("sensor", "downstream")], max_parallel=1,
+    ))
+
+    assert result["status"] == {"sensor": "SUCCEEDED", "downstream": "SUCCEEDED"}
+    assert len(readiness_calls) == 1
+    assert submit_calls == ["downstream"]
+    assert definitions._materializes_asset(sensor) is False
+    events = [(key, payload["status"]) for key, payload in callbacks]
+    assert events.index(("sensor", "RUNNING")) < events.index(("sensor", "SUCCEEDED"))
+    assert events.index(("sensor", "SUCCEEDED")) < events.index(("downstream", "RUNNING"))
+
+
+@pytest.mark.parametrize("on_timeout,raises", [("FAILED", True), ("SKIPPED", False)])
+def test_sensor_timeout_uses_configured_terminal_status(monkeypatch, on_timeout, raises):
+    callbacks = _install_callback_collector(monkeypatch)
+    request_budgets = []
+    sensor = _node("sensor", "SENSOR")
+    sensor.update({
+        "target_fqn": "",
+        "sensor_asset_fqn": "onelake.ods.orders",
+        "sensor_partition": "2026-07-12",
+        "timeout_seconds": 1,
+        "poll_interval_seconds": 1,
+        "on_timeout": on_timeout,
+    })
+    monotonic_values = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(definitions.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        definitions,
+        "_sensor_asset_ready",
+        lambda *args: request_budgets.append(args[-1]) or (False, {"ready": False}),
+    )
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda *args: (_ for _ in ()).throw(AssertionError("downstream must not execute")),
+    )
+    config = _config(
+        [sensor, _node("downstream")], [_edge("sensor", "downstream")], max_parallel=1,
+    )
+
+    if raises:
+        with pytest.raises(RuntimeError, match="sensor"):
+            _run_graph(config)
+    else:
+        result = _run_graph(config)
+        assert result["status"] == {"sensor": "SKIPPED", "downstream": "SKIPPED"}
+
+    assert _statuses(callbacks, "sensor") == ["RUNNING", on_timeout]
+    assert request_budgets == [pytest.approx(1.0)]
+    expected_downstream = "UPSTREAM_FAILED" if raises else "SKIPPED"
+    assert _statuses(callbacks, "downstream") == [expected_downstream]
+
+
+def test_wait_duration_releases_downstream_only_after_due(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    submit_calls = []
+    wait_node = _node("wait", "WAIT")
+    wait_node.update({
+        "target_fqn": "",
+        "wait_offset_seconds": -1,
+        "wait_duration_seconds": 1,
+    })
+    monotonic_values = iter([10.0, 10.0, 11.0])
+    monkeypatch.setattr(definitions.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(definitions, "_wait_observe_interval", lambda *args: None)
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda node, *_: submit_calls.append(node["task_key"]) or _command(0),
+    )
+
+    result = _run_graph(_config(
+        [wait_node, _node("downstream")], [_edge("wait", "downstream")], max_parallel=1,
+    ))
+
+    assert result["status"] == {"wait": "SUCCEEDED", "downstream": "SUCCEEDED"}
+    assert submit_calls == ["downstream"]
+    events = [(key, payload["status"]) for key, payload in callbacks]
+    assert events.index(("wait", "RUNNING")) < events.index(("wait", "SUCCEEDED"))
+    assert events.index(("wait", "SUCCEEDED")) < events.index(("downstream", "RUNNING"))
+
+
+def test_wait_logical_date_offset_releases_when_target_is_due(monkeypatch):
+    target_epoch = definitions._parse_logical_date("2026-07-12T00:00:00Z").timestamp() + 60
+    monkeypatch.setattr(definitions.time, "time", lambda: target_epoch)
+    monkeypatch.setattr(definitions.time, "monotonic", lambda: 5.0)
+    wait_node = _node("wait", "WAIT")
+    wait_node.update({"wait_offset_seconds": 60, "wait_duration_seconds": -1})
+
+    outcome = definitions._execute_observe_wait(
+        wait_node,
+        {"logical_date": "2026-07-12T00:00:00Z"},
+        "http://api",
+        "tenant-1",
+        threading.Event(),
+        _Log(),
+    )
+
+    assert outcome["status"] == "SUCCEEDED"
+    assert "2026-07-12T00:01:00+00:00" in outcome["message"]
 
 
 @pytest.mark.parametrize("task_type", ["SPARK_SQL", "PYSPARK", "QUALITY_GATE"])

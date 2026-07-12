@@ -105,9 +105,11 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                   List<PipelineTaskEdge> pipelineEdges) {
         if (tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.TRINO_SQL
                 || task.getTaskType() == TaskType.PYTHON
-                || task.getTaskType() == TaskType.SHELL)) {
+                || task.getTaskType() == TaskType.SHELL
+                || task.getTaskType() == TaskType.SENSOR
+                || task.getTaskType() == TaskType.WAIT)) {
             throw new IllegalArgumentException(
-                    "TRINO_SQL/PYTHON/SHELL require GRAPH pipeline execution mode");
+                    "TRINO_SQL/PYTHON/SHELL/SENSOR/WAIT require GRAPH pipeline execution mode");
         }
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
@@ -333,6 +335,28 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             opConfig.put("env", scriptEnvironment(cfg.path("env")));
             opConfig.put("network_allowlist", textArray(cfg.path("network_allowlist")));
         }
+        if (TaskType.SENSOR.name().equals(taskType)) {
+            opConfig.put("engine", "OBSERVE");
+            opConfig.put("sensor_asset_fqn", ParamRenderer.render(
+                    firstConfigText(cfg, "assetFqn", "asset_fqn", "targetFqn", "target_fqn"),
+                    runContext, params));
+            opConfig.put("sensor_partition", ParamRenderer.render(
+                    firstConfigText(cfg, "partition", "batchId", "batch_id"),
+                    runContext, params));
+            opConfig.put("timeout_seconds", firstConfigInt(
+                    cfg, 300, "timeoutSeconds", "timeout_seconds"));
+            opConfig.put("poll_interval_seconds", firstConfigInt(
+                    cfg, 5, "pollIntervalSeconds", "poll_interval_seconds"));
+            opConfig.put("on_timeout", firstConfigText(cfg, "onTimeout", "on_timeout")
+                    .trim().toUpperCase(Locale.ROOT));
+        }
+        if (TaskType.WAIT.name().equals(taskType)) {
+            opConfig.put("engine", "OBSERVE");
+            opConfig.put("wait_offset_seconds", firstConfigInt(
+                    cfg, -1, "offsetSeconds", "offset_seconds"));
+            opConfig.put("wait_duration_seconds", firstConfigInt(
+                    cfg, -1, "durationSeconds", "duration_seconds"));
+        }
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
             opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task, runContext, params));
             String target = ParamRenderer.render(
@@ -490,6 +514,26 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                        int defaultValue) {
         int value = intField(config, field);
         target.put(field, value < 0 ? defaultValue : value);
+    }
+
+    private static int firstConfigInt(JsonNode config, int defaultValue, String... fields) {
+        for (String field : fields) {
+            int value = intField(config, field);
+            if (value >= 0) {
+                return value;
+            }
+        }
+        return defaultValue;
+    }
+
+    private static String firstConfigText(JsonNode config, String... fields) {
+        for (String field : fields) {
+            String value = textOrEmpty(config, field);
+            if (StringUtils.hasText(value)) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private static List<Map<String, String>> scriptEnvironment(JsonNode env) {

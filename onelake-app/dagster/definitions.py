@@ -9,19 +9,22 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothing, Shape, String, graph, job, multiprocess_executor, op, repository
+from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothing, Out, Output, Shape, String, graph, job, multiprocess_executor, op, repository
 
 
 _TASK_OUTPUTS_MARKER = "ONELAKE_OUTPUTS_JSON="
 _SPARK_SUBMIT_TASK_TYPES = frozenset({"SPARK_SQL", "PYSPARK"})
 _CONTROL_TASK_TYPES = frozenset({"BRANCH", "CONDITION"})
 _EXTENSION_DISPATCH_STUB_TYPES = frozenset({
-    "SENSOR", "WAIT",
     "SUB_PIPELINE", "NOTIFY", "ASSERTION",
 })
+_OBSERVE_WAIT_TASK_TYPES = frozenset({"SENSOR", "WAIT"})
+_OBSERVE_HARD_MAX_WAIT_SECONDS = 24 * 60 * 60
+_SENSOR_HARD_MAX_POLL_SECONDS = 5 * 60
+_OBSERVE_WAIT_SLICE_SECONDS = 60
 _SCRIPT_TASK_TYPES = frozenset({"PYTHON", "SHELL"})
 _SCRIPT_DEFAULTS = {
     "timeout_seconds": 60,
@@ -213,6 +216,207 @@ def _dispatch_graph_node_command(node, iceberg_catalog, spark_master):
             f"{task_type} graph dispatcher is reserved for a later M4 implementation step"
         )
     raise ValueError(f"unsupported pipeline task_type: {task_type}")
+
+
+def _sensor_asset_ready(base_url, tenant_id, asset_fqn, partition,
+                        request_timeout_seconds=5):
+    import requests
+
+    target_base_url = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
+    if not target_base_url:
+        raise RuntimeError("SENSOR callback base URL is empty")
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "") or os.getenv(
+        "ONELAKE_ORCHESTRATION_INTERNAL_TOKEN", ""
+    )
+    headers = {}
+    if token:
+        headers["X-Onelake-Internal-Token"] = token
+    response = requests.get(
+        target_base_url + "/api/v1/internal/orchestration/dagster/asset-readiness",
+        params={
+            "tenantId": tenant_id,
+            "assetFqn": asset_fqn,
+            **({"partition": partition} if partition else {}),
+        },
+        headers=headers,
+        timeout=max(0.001, min(5.0, float(request_timeout_seconds))),
+    )
+    response.raise_for_status()
+    body = response.json()
+    readiness = body.get("data") or {}
+    return bool(readiness.get("ready")), readiness
+
+
+def _bounded_observe_seconds(node, field, minimum, maximum):
+    value = node.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return value
+
+
+def _wait_observe_interval(cancellation_event, seconds):
+    if seconds <= 0:
+        return
+    if cancellation_event.wait(seconds):
+        raise KeyboardInterrupt("observe node cancelled")
+
+
+def _parse_logical_date(value):
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("WAIT offset mode requires runtime logical_date")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _execute_observe_wait(node, runtime_params, base_url, tenant_id,
+                          cancellation_event, log):
+    task_type = node.get("task_type")
+    if task_type == "SENSOR":
+        asset_fqn = str(node.get("sensor_asset_fqn") or "").strip()
+        partition = str(node.get("sensor_partition") or "").strip()
+        if not asset_fqn:
+            raise ValueError("SENSOR sensor_asset_fqn must not be empty")
+        timeout_seconds = _bounded_observe_seconds(
+            node, "timeout_seconds", 1, _OBSERVE_HARD_MAX_WAIT_SECONDS,
+        )
+        poll_seconds = _bounded_observe_seconds(
+            node, "poll_interval_seconds", 1, _SENSOR_HARD_MAX_POLL_SECONDS,
+        )
+        if poll_seconds > timeout_seconds:
+            raise ValueError("SENSOR poll_interval_seconds must not exceed timeout_seconds")
+        on_timeout = str(node.get("on_timeout") or "").strip().upper()
+        if on_timeout not in {"FAILED", "SKIPPED"}:
+            raise ValueError("SENSOR on_timeout must be FAILED or SKIPPED")
+
+        deadline = time.monotonic() + timeout_seconds
+        poll_count = 0
+        last_error = None
+        while True:
+            if cancellation_event.is_set():
+                raise KeyboardInterrupt("SENSOR cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            poll_count += 1
+            try:
+                ready, readiness = _sensor_asset_ready(
+                    base_url, tenant_id, asset_fqn, partition,
+                    min(5.0, remaining),
+                )
+                last_error = None
+                if ready:
+                    source = readiness.get("source") or "asset_readiness"
+                    return {
+                        "status": "SUCCEEDED",
+                        "message": (
+                            f"SENSOR ready asset={asset_fqn} "
+                            f"partition={partition or '<latest>'} source={source} "
+                            f"polls={poll_count}"
+                        ),
+                    }
+            except Exception as exc:
+                last_error = str(exc)
+                log.warning(
+                    "SENSOR readiness poll failed asset=%s partition=%s poll=%s error=%s",
+                    asset_fqn, partition or "<latest>", poll_count, exc,
+                )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _wait_observe_interval(cancellation_event, min(poll_seconds, remaining))
+
+        message = (
+            f"SENSOR timed out after {timeout_seconds}s asset={asset_fqn} "
+            f"partition={partition or '<latest>'} polls={poll_count}"
+        )
+        if last_error:
+            message += f" last_error={last_error}"
+        return {"status": on_timeout, "message": message}
+
+    if task_type == "WAIT":
+        offset_seconds = node.get("wait_offset_seconds", -1)
+        duration_seconds = node.get("wait_duration_seconds", -1)
+        if isinstance(offset_seconds, bool) or not isinstance(offset_seconds, int):
+            raise ValueError("WAIT wait_offset_seconds must be an integer")
+        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, int):
+            raise ValueError("WAIT wait_duration_seconds must be an integer")
+        has_offset = offset_seconds >= 0
+        has_duration = duration_seconds >= 0
+        if has_offset == has_duration:
+            raise ValueError("WAIT requires exactly one offset or duration")
+
+        started_monotonic = time.monotonic()
+        if has_duration:
+            if duration_seconds < 1 or duration_seconds > _OBSERVE_HARD_MAX_WAIT_SECONDS:
+                raise ValueError(
+                    f"WAIT duration must be between 1 and {_OBSERVE_HARD_MAX_WAIT_SECONDS} seconds"
+                )
+            target_monotonic = started_monotonic + duration_seconds
+            target_description = f"duration={duration_seconds}s"
+        else:
+            if offset_seconds > _OBSERVE_HARD_MAX_WAIT_SECONDS:
+                raise ValueError(
+                    f"WAIT offset must not exceed {_OBSERVE_HARD_MAX_WAIT_SECONDS} seconds"
+                )
+            logical_date = _parse_logical_date((runtime_params or {}).get("logical_date"))
+            target = logical_date + timedelta(seconds=offset_seconds)
+            remaining_wall = max(0.0, target.timestamp() - time.time())
+            if remaining_wall > _OBSERVE_HARD_MAX_WAIT_SECONDS:
+                raise ValueError(
+                    "WAIT logical_date target exceeds the 86400 second runtime hard limit"
+                )
+            target_monotonic = started_monotonic + remaining_wall
+            target_description = f"target={target.isoformat()}"
+
+        while True:
+            if cancellation_event.is_set():
+                raise KeyboardInterrupt("WAIT cancelled")
+            remaining = target_monotonic - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "status": "SUCCEEDED",
+                    "message": f"WAIT reached {target_description}",
+                }
+            _wait_observe_interval(
+                cancellation_event, min(remaining, _OBSERVE_WAIT_SLICE_SECONDS),
+            )
+
+    raise ValueError(f"unsupported observe task_type: {task_type}")
+
+
+def _run_observe_wait_with_callback(node, runtime_params, base_url, run_id,
+                                    tenant_id, task_key, attempt,
+                                    cancellation_event, log):
+    try:
+        outcome = _execute_observe_wait(
+            node, runtime_params, base_url, tenant_id, cancellation_event, log,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        outcome = {"status": "FAILED", "message": str(exc)}
+
+    message = outcome["message"]
+    log_ref = _upload_log(tenant_id, run_id, task_key, attempt, message, log)
+    payload = {
+        "status": outcome["status"],
+        "finishedAt": _now(),
+        "dagsterStepKey": task_key,
+        "attempt": attempt,
+        "logRef": log_ref,
+    }
+    if outcome["status"] == "FAILED":
+        payload["errorMsg"] = _tail(message, 3900)
+    _callback(base_url, run_id, task_key, payload, log)
+    return outcome["status"], message
 
 
 def _safe_control_eval(expression):
@@ -852,6 +1056,8 @@ def _is_trino_ctas(sql):
 
 def _materializes_asset(node):
     if node.get("task_type") in _CONTROL_TASK_TYPES:
+        return False
+    if node.get("task_type") in _OBSERVE_WAIT_TASK_TYPES:
         return False
     if node.get("task_type") in _SCRIPT_TASK_TYPES:
         return False
@@ -1577,6 +1783,16 @@ _CONTROL_NODE_CONFIG = {
 }
 
 
+_OBSERVE_NODE_CONFIG = {
+    "sensor_asset_fqn": Field(String, default_value=""),
+    "sensor_partition": Field(String, default_value=""),
+    "poll_interval_seconds": Field(Int, default_value=5),
+    "on_timeout": Field(String, default_value="FAILED"),
+    "wait_offset_seconds": Field(Int, default_value=-1),
+    "wait_duration_seconds": Field(Int, default_value=-1),
+}
+
+
 _NATIVE_NODE_CONFIG = {
     "pipeline_id": Field(String),
     "run_id": Field(String),
@@ -1609,6 +1825,7 @@ _NATIVE_NODE_CONFIG = {
     ),
     **_CONTROL_NODE_CONFIG,
     **_SCRIPT_NODE_CONFIG,
+    **_OBSERVE_NODE_CONFIG,
 }
 
 
@@ -1621,7 +1838,8 @@ def _execute_native_graph_node(context):
     """
     cfg = context.op_config
     task_key = cfg["task_key"]
-    node = _node_with_runtime_params(cfg, _runtime_params(cfg))
+    runtime_params = _runtime_params(cfg)
+    node = _node_with_runtime_params(cfg, runtime_params)
     base_url = cfg.get("callback_base_url", "")
     run_id = cfg["run_id"]
     tenant_id = cfg["tenant_id"]
@@ -1667,7 +1885,16 @@ def _execute_native_graph_node(context):
             asset_key=node.get("target_fqn") or task_key,
             description=f"pipeline node {task_key}",
         ))
-        return
+        return "SUCCEEDED"
+
+    if node["task_type"] in _OBSERVE_WAIT_TASK_TYPES:
+        observe_status, message = _run_observe_wait_with_callback(
+            node, runtime_params, base_url, run_id, tenant_id, task_key,
+            first_attempt, threading.Event(), context.log,
+        )
+        if observe_status == "FAILED":
+            raise Failure(description=message)
+        return observe_status
 
     attempts = max(1, int(node.get("max_retries", 0)) + 1)
     last_log = ""
@@ -1817,7 +2044,7 @@ def _execute_native_graph_node(context):
                         asset_key=node.get("target_fqn") or task_key,
                         description=f"pipeline node {task_key}",
                     ))
-                return
+                return "SUCCEEDED"
             context.log.warning("[%s] attempt %s failed with exit code %s", task_key, attempt, result.returncode)
         except _CallbackDeliveryError:
             # The Spark write already succeeded. Retrying the attempt could duplicate data;
@@ -1856,9 +2083,16 @@ def _make_native_task_op(task_key, upstream_count):
         return cached
     inputs = {f"upstream_{index}": In(Nothing) for index in range(upstream_count)}
 
-    @op(name=task_key, ins=inputs, config_schema=_NATIVE_NODE_CONFIG)
+    @op(
+        name=task_key,
+        ins=inputs,
+        out=Out(Nothing, is_required=False),
+        config_schema=_NATIVE_NODE_CONFIG,
+    )
     def pipeline_task(context):
-        _execute_native_graph_node(context)
+        result = _execute_native_graph_node(context)
+        if result != "SKIPPED":
+            yield Output(None)
 
     _NATIVE_TASK_OPS[task_key] = pipeline_task
     return pipeline_task
@@ -1998,6 +2232,7 @@ def _load_native_pipeline_jobs():
                 "max_retries": Field(Int, default_value=0),
                 **_CONTROL_NODE_CONFIG,
                 **_SCRIPT_NODE_CONFIG,
+                **_OBSERVE_NODE_CONFIG,
             })),
             default_value=[],
         ),
@@ -2280,6 +2515,13 @@ def run_pipeline_graph_op(context):
             materialize_success(task_key)
             return "SUCCEEDED"
 
+        if task_type in _OBSERVE_WAIT_TASK_TYPES:
+            observe_status, _ = _run_observe_wait_with_callback(
+                node, runtime_params, base_url, run_id, tenant_id, task_key,
+                first_attempt, cancellation_event, context.log,
+            )
+            return observe_status
+
         attempts = max(1, int(node.get("max_retries", 0)) + 1)
         last_log = ""
         last_log_ref = ""
@@ -2420,9 +2662,11 @@ def run_pipeline_graph_op(context):
                         status[done_key] = node_status
                         if node_status == "SUCCEEDED":
                             release_downstream(done_key, active_children)
+                        elif node_status == "SKIPPED":
+                            release_downstream(done_key, set())
                         else:
                             failures.append(done_key)
-                    if node_status != "SUCCEEDED":
+                    if node_status not in {"SUCCEEDED", "SKIPPED"}:
                         mark_downstream_failed(done_key)
                     submit_ready()
             except BaseException as exc:

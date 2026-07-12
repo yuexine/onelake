@@ -37,6 +37,8 @@ public class RuntimeContractService {
             CapabilityState.READY, null),
         new RuntimeSpec("CONTROL", "CONTROL", "onelake_pipeline_graph_run", true, true,
             CapabilityState.READY, null),
+        new RuntimeSpec("OBSERVE", "OBSERVE", "onelake_pipeline_graph_run", true, true,
+            CapabilityState.READY, null),
         new RuntimeSpec("SCRIPT", "SCRIPT", "onelake_pipeline_graph_run", true, true,
             CapabilityState.RESTRICTED,
             "脚本执行受限：目标环境必须显式启用满足 ADR-001 的隔离沙箱")
@@ -183,6 +185,9 @@ public class RuntimeContractService {
         }
         if ("BRANCH".equals(normalized) || "CONDITION".equals(normalized)) {
             return "CONTROL";
+        }
+        if ("SENSOR".equals(normalized) || "WAIT".equals(normalized)) {
+            return "OBSERVE";
         }
         return normalized;
     }

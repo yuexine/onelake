@@ -244,7 +244,8 @@ class PipelineCompileServiceTest {
                 extensionTask("notify", TaskType.NOTIFY),
                 extensionTask("assertion", TaskType.ASSERTION));
 
-        PipelineCompileResult result = service.compile(dagId, tenantId, tasks, List.of());
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, tasks, List.of(edge("branch", "condition", EdgeLayer.PIPELINE)));
 
         assertThat(result.allValidated()).isTrue();
         assertThat(tasks).allSatisfy(task -> {
@@ -266,6 +267,44 @@ class PipelineCompileServiceTest {
 
         assertThat(result.allValidated()).isFalse();
         assertThat(result.tasks().get(0).errorMessage()).contains("valid object config");
+    }
+
+    @Test
+    void conditionAndBranchRequireCompleteControlConfig() {
+        PipelineTask condition = extensionTask("condition", TaskType.CONDITION);
+        condition.setConfig("{\"enabled\":true}");
+        PipelineTask branch = extensionTask("branch", TaskType.BRANCH);
+        branch.setConfig("{\"expression\":\"${env}\"}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(condition, branch), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(message -> assertThat(message).contains("CONDITION").contains("expression"))
+                .anySatisfy(message -> assertThat(message).contains("BRANCH").contains("branches"));
+    }
+
+    @Test
+    void branchMappingMustCoverDirectPipelineDownstreamTasks() {
+        PipelineTask branch = extensionTask("branch", TaskType.BRANCH);
+        branch.setConfig("""
+                {"expression":"${env}","branches":{"prod":"prod_task"}}
+                """);
+        PipelineTask prod = sparkSqlTask("prod_task", "onelake.dwd.prod");
+        PipelineTask dev = sparkSqlTask("dev_task", "onelake.dwd.dev");
+
+        PipelineCompileResult result = service.compile(
+                dagId,
+                tenantId,
+                List.of(branch, prod, dev),
+                List.of(
+                        edge("branch", "prod_task", EdgeLayer.PIPELINE),
+                        edge("branch", "dev_task", EdgeLayer.PIPELINE)));
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.graphErrors()).anySatisfy(
+                message -> assertThat(message).contains("unmapped direct downstream").contains("dev_task"));
     }
 
     @Test
@@ -581,6 +620,8 @@ class PipelineCompileServiceTest {
             case TRINO_SQL -> "{\"sql\":\"SELECT 1\",\"catalog\":\"iceberg\",\"schema\":\"dwd\"}";
             case PYTHON -> "{\"script\":\"print('ok')\"}";
             case SHELL -> "{\"script\":\"echo ok\"}";
+            case CONDITION -> "{\"expression\":\"true\"}";
+            case BRANCH -> "{\"expression\":\"condition\",\"branches\":{\"condition\":\"condition\"}}";
             default -> "{\"enabled\":true}";
         });
         return task;

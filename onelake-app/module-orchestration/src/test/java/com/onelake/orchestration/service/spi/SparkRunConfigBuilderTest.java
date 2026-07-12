@@ -174,6 +174,69 @@ class SparkRunConfigBuilderTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void controlGraphUsesFixedExecutorAndCarriesRenderedBranchMapping() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask branch = task(pipelineId, tenantId, "route", TaskType.BRANCH, false, """
+                {
+                  "expression":"${env}",
+                  "branches":{"prod":"prod_task","dev":["dev_task"]}
+                }
+                """);
+        PipelineTask prod = task(
+                pipelineId, tenantId, "prod_task", TaskType.SPARK_SQL, true,
+                "{\"sql\":\"select 1\"}");
+        prod.setTargetFqn("onelake.dwd.prod");
+        PipelineTask dev = task(
+                pipelineId, tenantId, "dev_task", TaskType.SPARK_SQL, true,
+                "{\"sql\":\"select 2\"}");
+        dev.setTargetFqn("onelake.dwd.dev");
+        List<PipelineTask> tasks = List.of(branch, prod, dev);
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                tasks.stream().map(task -> new PipelineCompileResult.TaskCompileResult(
+                        task.getId(), task.getTaskKey(), task.getTaskType().name(),
+                        true, task.getTargetFqn(), null)).toList(),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context,
+                tasks,
+                List.of(
+                        edge("route", "prod_task", EdgeLayer.PIPELINE),
+                        edge("route", "dev_task", EdgeLayer.PIPELINE)),
+                "http://localhost:8080",
+                2,
+                Map.of(),
+                null,
+                Map.of("env", "prod"));
+
+        assertThat(config.jobName()).isEqualTo("onelake_pipeline_graph_run");
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> op = (Map<String, Object>) ops.get("run_pipeline_graph_op");
+        Map<String, Object> opConfig = (Map<String, Object>) op.get("config");
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) opConfig.get("nodes");
+        Map<String, Object> branchNode = nodes.stream()
+                .filter(node -> "route".equals(node.get("task_key")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(branchNode).containsEntry("task_type", "BRANCH").containsEntry("expression", "prod");
+        assertThat((List<Map<String, Object>>) branchNode.get("branches"))
+                .containsExactlyInAnyOrder(
+                        Map.of("value", "prod", "targets", List.of("prod_task")),
+                        Map.of("value", "dev", "targets", List.of("dev_task")));
+        assertThat(opConfig).containsEntry("max_parallel", 2);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void graphRunConfigCarriesTrinoSessionAndRendersSqlParameters() {
         UUID pipelineId = UUID.randomUUID();
         UUID tenantId = UUID.randomUUID();

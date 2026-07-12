@@ -42,10 +42,13 @@ class RuntimeContractServiceTest {
 
         List<RuntimeContractDTO> result = service.listRuntimeContracts();
 
-        assertThat(result).hasSize(4);
+        assertThat(result).hasSize(5);
         assertThat(result).filteredOn(c -> "SPARK".equals(c.engine()))
                 .allSatisfy(c -> assertThat(c.status()).isEqualTo("READY"));
         assertThat(result).filteredOn(c -> "TRINO".equals(c.engine()))
+                .singleElement()
+                .satisfies(c -> assertThat(c.status()).isEqualTo("READY"));
+        assertThat(result).filteredOn(c -> "CONTROL".equals(c.engine()))
                 .singleElement()
                 .satisfies(c -> assertThat(c.status()).isEqualTo("READY"));
         assertThat(result).filteredOn(c -> "SCRIPT".equals(c.engine()))
@@ -93,6 +96,16 @@ class RuntimeContractServiceTest {
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
             Map.of("compileTarget", "TRINO_SQL"));
+
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
+    void triggerBlockedReasonAllowsBranchOnControlGraphJob() {
+        RuntimeContractService service = restrictedService();
+
+        Optional<String> reason = service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("compileTarget", "BRANCH"));
 
         assertThat(reason).isEmpty();
     }

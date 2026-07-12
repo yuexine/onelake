@@ -1,3 +1,4 @@
+import ast
 import os
 import json
 import re
@@ -16,8 +17,9 @@ from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothin
 
 _TASK_OUTPUTS_MARKER = "ONELAKE_OUTPUTS_JSON="
 _SPARK_SUBMIT_TASK_TYPES = frozenset({"SPARK_SQL", "PYSPARK"})
+_CONTROL_TASK_TYPES = frozenset({"BRANCH", "CONDITION"})
 _EXTENSION_DISPATCH_STUB_TYPES = frozenset({
-    "BRANCH", "CONDITION", "SENSOR", "WAIT",
+    "SENSOR", "WAIT",
     "SUB_PIPELINE", "NOTIFY", "ASSERTION",
 })
 _SCRIPT_TASK_TYPES = frozenset({"PYTHON", "SHELL"})
@@ -211,6 +213,154 @@ def _dispatch_graph_node_command(node, iceberg_catalog, spark_master):
             f"{task_type} graph dispatcher is reserved for a later M4 implementation step"
         )
     raise ValueError(f"unsupported pipeline task_type: {task_type}")
+
+
+def _safe_control_eval(expression):
+    """Evaluate a small, data-only expression language without executing code."""
+    source = str(expression or "").strip()
+    if not source:
+        raise ValueError("control expression must not be empty")
+    if len(source) > 4096:
+        raise ValueError("control expression exceeds 4096 characters")
+    try:
+        parsed = ast.parse(source, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"control expression syntax is invalid: {exc.msg}") from exc
+    if sum(1 for _ in ast.walk(parsed)) > 64:
+        raise ValueError("control expression is too complex")
+
+    def evaluate(node):
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(
+                node.value, (str, int, float, bool, type(None))):
+            return node.value
+        if isinstance(node, ast.Name) and node.id.lower() in {"true", "false", "null"}:
+            return {"true": True, "false": False, "null": None}[node.id.lower()]
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            values = [evaluate(item) for item in node.elts]
+            return set(values) if isinstance(node, ast.Set) else values
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+            values = [evaluate(value) for value in node.values]
+            if not all(isinstance(value, bool) for value in values):
+                raise ValueError("boolean operators require boolean operands")
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            value = evaluate(node.operand)
+            if not isinstance(value, bool):
+                raise ValueError("not requires a boolean operand")
+            return not value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = evaluate(node.operand)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("unary +/- requires a number")
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and isinstance(
+                node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
+            left, right = evaluate(node.left), evaluate(node.right)
+            if (isinstance(left, bool) or isinstance(right, bool)
+                    or not isinstance(left, (int, float))
+                    or not isinstance(right, (int, float))):
+                raise ValueError("arithmetic operators require numbers")
+            operations = {
+                ast.Add: lambda: left + right,
+                ast.Sub: lambda: left - right,
+                ast.Mult: lambda: left * right,
+                ast.Div: lambda: left / right,
+                ast.Mod: lambda: left % right,
+            }
+            return operations[type(node.op)]()
+        if isinstance(node, ast.Compare):
+            left = evaluate(node.left)
+            for operator, comparator in zip(node.ops, node.comparators):
+                right = evaluate(comparator)
+                comparisons = {
+                    ast.Eq: lambda: left == right,
+                    ast.NotEq: lambda: left != right,
+                    ast.Lt: lambda: left < right,
+                    ast.LtE: lambda: left <= right,
+                    ast.Gt: lambda: left > right,
+                    ast.GtE: lambda: left >= right,
+                    ast.In: lambda: left in right,
+                    ast.NotIn: lambda: left not in right,
+                }
+                action = comparisons.get(type(operator))
+                if action is None:
+                    raise ValueError("comparison operator is not allowed")
+                try:
+                    matched = action()
+                except (TypeError, ValueError, ZeroDivisionError) as exc:
+                    raise ValueError(f"control comparison is invalid: {exc}") from exc
+                if not matched:
+                    return False
+                left = right
+            return True
+        raise ValueError(f"control expression element is not allowed: {type(node).__name__}")
+
+    try:
+        return evaluate(parsed)
+    except ZeroDivisionError as exc:
+        raise ValueError("control expression divides by zero") from exc
+
+
+def _branch_mapping(node):
+    raw = node.get("branches") or []
+    if isinstance(raw, dict):
+        raw = [
+            {"value": value, "targets": targets if isinstance(targets, list) else [targets]}
+            for value, targets in raw.items()
+        ]
+    mapping = {}
+    for entry in raw:
+        value = str(entry.get("value") or "").strip()
+        targets = [str(target) for target in entry.get("targets") or []]
+        if not value or not targets:
+            raise ValueError("BRANCH branches require non-empty value and targets")
+        mapping[value] = targets
+    if not mapping:
+        raise ValueError("BRANCH branches must not be empty")
+    return mapping
+
+
+def _branch_selector(expression):
+    source = str(expression or "").strip()
+    try:
+        value = _safe_control_eval(source)
+    except ValueError:
+        # Parameter rendering commonly turns ${env} into an unquoted token such as prod.
+        # Treat only a single inert token as a string; calls, attributes and operators fail.
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", source):
+            raise
+        value = source
+    if isinstance(value, (list, tuple, set, dict)) or value is None:
+        raise ValueError("BRANCH expression must resolve to a scalar value")
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _control_targets(node, downstream_keys):
+    task_type = node.get("task_type")
+    children = set(downstream_keys or [])
+    if task_type == "CONDITION":
+        result = _safe_control_eval(node.get("expression"))
+        if not isinstance(result, bool):
+            raise ValueError("CONDITION expression must resolve to boolean")
+        return (children if result else set()), {"conditionResult": result}
+    if task_type == "BRANCH":
+        selector = _branch_selector(node.get("expression"))
+        mapping = _branch_mapping(node)
+        if selector not in mapping:
+            raise ValueError(f"BRANCH expression selected unmapped value: {selector}")
+        selected = set(mapping[selector])
+        unknown = selected - children
+        if unknown:
+            raise ValueError(
+                "BRANCH selected targets are not direct downstream tasks: "
+                + ", ".join(sorted(unknown))
+            )
+        return selected, {"selectedBranch": selector, "selectedTargets": sorted(selected)}
+    raise ValueError(f"unsupported control task_type: {task_type}")
 
 
 def _bounded_int(node, key):
@@ -701,6 +851,8 @@ def _is_trino_ctas(sql):
 
 
 def _materializes_asset(node):
+    if node.get("task_type") in _CONTROL_TASK_TYPES:
+        return False
     if node.get("task_type") in _SCRIPT_TASK_TYPES:
         return False
     if node.get("task_type") == "TRINO_SQL":
@@ -947,6 +1099,7 @@ def _apply_runtime_params(text, params):
 def _node_with_runtime_params(node, params):
     enriched = dict(node)
     enriched["sql_or_script"] = _apply_runtime_params(enriched.get("sql_or_script", ""), params)
+    enriched["expression"] = _apply_runtime_params(enriched.get("expression", ""), params)
     return enriched
 
 
@@ -1183,7 +1336,8 @@ def _callback(base_url, run_id, task_key, payload, log):
     import requests
 
     payload = _normalize_callback_payload(payload)
-    requires_ack = payload.get("status") == "SUCCEEDED"
+    terminal_status = payload.get("status")
+    requires_ack = terminal_status in {"SUCCEEDED", "SKIPPED"}
     target_base_url = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
     if not target_base_url:
         message = f"callback base URL is empty for run={run_id} task={task_key}"
@@ -1209,9 +1363,10 @@ def _callback(base_url, run_id, task_key, payload, log):
             if requires_ack:
                 response_body = resp.json()
                 current_status = (response_body.get("data") or {}).get("currentStatus")
-                if current_status != "SUCCEEDED":
+                if current_status != terminal_status:
                     raise RuntimeError(
-                        f"SUCCEEDED callback was not applied; authoritative status={current_status}"
+                        f"{terminal_status} callback was not applied; "
+                        f"authoritative status={current_status}"
                     )
             return
         except Exception as exc:
@@ -1224,12 +1379,13 @@ def _callback(base_url, run_id, task_key, payload, log):
                 time.sleep(0.2 * attempt)
     if requires_ack:
         raise _CallbackDeliveryError(
-            f"SUCCEEDED callback was not acknowledged for run={run_id} task={task_key}"
+            f"{terminal_status} callback was not acknowledged "
+            f"for run={run_id} task={task_key}"
         ) from last_error
 
 
 class _CallbackDeliveryError(RuntimeError):
-    """A successful task must not release downstream steps before outputs are persisted."""
+    """A success-like terminal state must be persisted before graph scheduling continues."""
 
 
 def _normalize_callback_payload(payload):
@@ -1409,6 +1565,18 @@ _SCRIPT_NODE_CONFIG = {
 }
 
 
+_CONTROL_NODE_CONFIG = {
+    "expression": Field(String, default_value=""),
+    "branches": Field(
+        Array(Shape({
+            "value": Field(String),
+            "targets": Field(Array(String)),
+        })),
+        default_value=[],
+    ),
+}
+
+
 _NATIVE_NODE_CONFIG = {
     "pipeline_id": Field(String),
     "run_id": Field(String),
@@ -1439,6 +1607,7 @@ _NATIVE_NODE_CONFIG = {
         Array(Shape({"key": Field(String), "value": Field(String, default_value="")})),
         default_value=[],
     ),
+    **_CONTROL_NODE_CONFIG,
     **_SCRIPT_NODE_CONFIG,
 }
 
@@ -1475,6 +1644,18 @@ def _execute_native_graph_node(context):
             "dagsterStepKey": task_key, "errorMsg": _tail(message, 3900), "logRef": log_ref,
         }, context.log)
         raise Failure(description=message) from exc
+
+    if node["task_type"] in _CONTROL_TASK_TYPES:
+        message = (
+            f"{node['task_type']} requires the control graph executor "
+            "onelake_pipeline_graph_run"
+        )
+        log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, message, context.log)
+        _callback(base_url, run_id, task_key, {
+            "status": "FAILED", "finishedAt": _now(), "attempt": first_attempt,
+            "dagsterStepKey": task_key, "errorMsg": message, "logRef": log_ref,
+        }, context.log)
+        raise Failure(description=message)
 
     if node["task_type"] == "SYNC_REF":
         log_ref = _upload_log(tenant_id, run_id, task_key, first_attempt, "SYNC_REF completed", context.log)
@@ -1815,6 +1996,7 @@ def _load_native_pipeline_jobs():
                 ),
                 "base_attempt": Field(Int, default_value=1),
                 "max_retries": Field(Int, default_value=0),
+                **_CONTROL_NODE_CONFIG,
                 **_SCRIPT_NODE_CONFIG,
             })),
             default_value=[],
@@ -1849,6 +2031,8 @@ def run_pipeline_graph_op(context):
             indegree[target] += 1
 
     status = {key: "QUEUED" for key in nodes}
+    original_indegree = dict(indegree)
+    activated_incoming = {key: 0 for key in nodes}
     lock = threading.Lock()
     process_lock = threading.Lock()
     active_processes = set()
@@ -2002,6 +2186,34 @@ def run_pipeline_graph_op(context):
             }, context.log)
             stack.extend(downstream.get(task_key, []))
 
+    def mark_skipped(task_key, reason):
+        status[task_key] = "SKIPPED"
+        attempt = base_attempt(task_key)
+        log_ref = _upload_log(tenant_id, run_id, task_key, attempt, reason, context.log)
+        _callback(base_url, run_id, task_key, {
+            "status": "SKIPPED",
+            "finishedAt": _now(),
+            "dagsterStepKey": task_key,
+            "logRef": log_ref,
+            "attempt": attempt,
+        }, context.log)
+
+    def release_downstream(root_key, active_children=None):
+        """Release active edges and propagate intentional skips through inactive-only paths."""
+        pending = [(root_key, active_children)]
+        while pending:
+            parent, selected = pending.pop()
+            for child in downstream.get(parent, []):
+                indegree[child] -= 1
+                if selected is None or child in selected:
+                    activated_incoming[child] += 1
+                if (indegree[child] == 0
+                        and status.get(child) == "QUEUED"
+                        and original_indegree.get(child, 0) > 0
+                        and activated_incoming[child] == 0):
+                    mark_skipped(child, f"branch not selected upstream of {child}")
+                    pending.append((child, set()))
+
     def run_node(task_key):
         node = _node_with_runtime_params(nodes[task_key], runtime_params)
         task_type = node["task_type"]
@@ -2023,6 +2235,37 @@ def run_pipeline_graph_op(context):
                 "dagsterStepKey": task_key, "errorMsg": _tail(message, 3900), "logRef": log_ref,
             }, context.log)
             return "FAILED"
+
+        if task_type in _CONTROL_TASK_TYPES:
+            try:
+                selected, outputs = _control_targets(node, downstream.get(task_key, []))
+                message = (
+                    f"{task_type} selected downstream: "
+                    + (", ".join(sorted(selected)) if selected else "<none>")
+                )
+                log_ref = _upload_log(
+                    tenant_id, run_id, task_key, first_attempt, message, context.log,
+                )
+                _callback(base_url, run_id, task_key, {
+                    "status": "SUCCEEDED",
+                    "finishedAt": _now(),
+                    "dagsterStepKey": task_key,
+                    "outputs": outputs,
+                    "logRef": log_ref,
+                    "attempt": first_attempt,
+                }, context.log)
+                return {"status": "SUCCEEDED", "active_children": selected}
+            except Exception as exc:
+                message = str(exc)
+                log_ref = _upload_log(
+                    tenant_id, run_id, task_key, first_attempt, message, context.log,
+                )
+                _callback(base_url, run_id, task_key, {
+                    "status": "FAILED", "finishedAt": _now(), "attempt": first_attempt,
+                    "dagsterStepKey": task_key, "errorMsg": _tail(message, 3900),
+                    "logRef": log_ref,
+                }, context.log)
+                return "FAILED"
 
         if task_type == "SYNC_REF":
             # SYNC_REF 是图内可观测节点但不提交 Spark，同样要用累计 attempt 保持 task_run 单调。
@@ -2169,14 +2412,17 @@ def run_pipeline_graph_op(context):
 
                     future = futures.pop(done_key)
                     result = future.result()
+                    node_status = result.get("status") if isinstance(result, dict) else result
+                    active_children = (
+                        result.get("active_children") if isinstance(result, dict) else None
+                    )
                     with lock:
-                        status[done_key] = result
-                        if result == "SUCCEEDED":
-                            for child in downstream.get(done_key, []):
-                                indegree[child] -= 1
+                        status[done_key] = node_status
+                        if node_status == "SUCCEEDED":
+                            release_downstream(done_key, active_children)
                         else:
                             failures.append(done_key)
-                    if result != "SUCCEEDED":
+                    if node_status != "SUCCEEDED":
                         mark_downstream_failed(done_key)
                     submit_ready()
             except BaseException as exc:

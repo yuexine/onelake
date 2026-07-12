@@ -304,6 +304,37 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void graphRefreshTreatsIntentionalSkippedTasksAsSuccessfulRun() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(dag.getId());
+        run.setStatus(DagStatus.RUNNING);
+        TaskRun condition = taskRun("condition", TaskRunStatus.SUCCEEDED);
+        TaskRun selected = taskRun("selected", TaskRunStatus.SUCCEEDED);
+        TaskRun skipped = taskRun("not_selected", TaskRunStatus.SKIPPED);
+        Instant startedAt = Instant.parse("2026-07-12T02:00:00Z");
+        Instant finishedAt = Instant.parse("2026-07-12T02:03:00Z");
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(
+                argThat(ids -> ids != null && ids.contains(DAG_ID)),
+                eq(pageable)
+        )).thenReturn(new PageImpl<>(List.of(run), pageable, 1));
+        when(dagster.getRunStatus("dagster-run-1"))
+                .thenReturn(new DagsterClient.RunStatus(
+                        "dagster-run-1", "SUCCEEDED", startedAt, finishedAt));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID))
+                .thenReturn(List.of(condition, selected, skipped));
+
+        Page<JobRunDTO> page = service.listRuns(pageable);
+
+        assertThat(page.getContent().get(0).status()).isEqualTo("SUCCEEDED");
+        assertThat(run.getStatus()).isEqualTo(DagStatus.SUCCEEDED);
+        assertThat(skipped.getStatus()).isEqualTo(TaskRunStatus.SKIPPED);
+        verify(taskRunRepo, never()).save(any(TaskRun.class));
+    }
+
+    @Test
     void graphRefreshReconcilesFinishedRunWhenDagsterStillReportsStarted() {
         ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
         Dag dag = dag();
@@ -939,6 +970,41 @@ class OrchestrationServiceTest {
     }
 
     @Test
+    void rerunTaskOmitsBusinessTaskSelectionForFixedControlGraphJob() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        Dag dag = dag();
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.FAILED);
+        PipelineTask conditionTask = pipelineTask("condition");
+        conditionTask.setTaskType(TaskType.CONDITION);
+        conditionTask.setExecutable(false);
+        conditionTask.setConfig("{\"expression\":\"true\"}");
+        TaskRun condition = taskRun("condition", TaskRunStatus.FAILED);
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByIdAndDagIdIn(RUN_ID, Set.of(DAG_ID))).thenReturn(Optional.of(run));
+        when(taskRunRepo.findByJobRunIdForUpdate(RUN_ID)).thenReturn(List.of(condition));
+        when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(conditionTask));
+        when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
+                .thenReturn(List.of(conditionTask));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
+        when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(), anyString(), anyInt(),
+                anyMap(), any(RunContext.class), anyMap()))
+                .thenReturn(new DagsterRunConfig(
+                        "onelake_pipeline_graph_run", Map.of("ops", Map.of())));
+        when(dagster.launch(eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), eq(List.of()))).thenReturn("dagster-control-rerun");
+
+        var result = service.rerunTask(
+                DAG_ID, RUN_ID, "condition", "SINGLE");
+
+        assertThat(result.dagsterRunId()).isEqualTo("dagster-control-rerun");
+        assertThat(run.getDagsterJob()).isEqualTo("onelake_pipeline_graph_run");
+        verify(dagster).launch(
+                eq("onelake_pipeline_graph_run"), eq("onelake"), eq("onelake-loc"),
+                anyMap(), anyList(), eq(List.of()));
+    }
+
+    @Test
     void rerunTaskUsesTheJobRunsBoundSnapshot() {
         ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
         UUID versionId = UUID.randomUUID();
@@ -1547,6 +1613,39 @@ class OrchestrationServiceTest {
         assertThat(downstream.getFinishedAt()).isNotNull();
         verify(taskRunRepo).save(failed);
         verify(taskRunRepo).save(downstream);
+    }
+
+    @Test
+    void applyTaskRunCallbackKeepsIntentionalSkipDistinctFromUpstreamFailure() {
+        JobRun run = jobRun(DAG_ID);
+        run.setStatus(DagStatus.RUNNING);
+        TaskRun skipped = taskRun("not_selected", TaskRunStatus.QUEUED);
+        TaskRun downstream = taskRun("join", TaskRunStatus.QUEUED);
+        when(runRepo.findById(RUN_ID)).thenReturn(Optional.of(run));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag()));
+        when(taskRunRepo.findByJobRunIdAndTaskKeyForUpdate(RUN_ID, "not_selected"))
+                .thenReturn(Optional.of(skipped));
+
+        TaskRunCallbackResult result = service.applyTaskRunCallback(RUN_ID, "not_selected",
+                new TaskRunCallbackRequest(
+                        TaskRunStatus.SKIPPED,
+                        null,
+                        Instant.parse("2026-07-12T01:02:00Z"),
+                        null,
+                        null,
+                        null,
+                        null,
+                        "s3://logs/run/not_selected.log",
+                        1,
+                        "not_selected",
+                        null));
+
+        assertThat(result.applied()).isTrue();
+        assertThat(skipped.getStatus()).isEqualTo(TaskRunStatus.SKIPPED);
+        assertThat(downstream.getStatus()).isEqualTo(TaskRunStatus.QUEUED);
+        verify(taskRunRepo).save(skipped);
+        verify(taskRunRepo, never()).findByJobRunIdForUpdate(RUN_ID);
+        verify(pipelineTaskEdgeRepo, never()).findByDagId(DAG_ID);
     }
 
     @Test

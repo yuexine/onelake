@@ -46,6 +46,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
     private static final String JOB_NAME = "onelake_pipeline_run";
     private static final String OP_NAME = "run_spark_task_op";
+    private static final String CONTROL_GRAPH_JOB_NAME = "onelake_pipeline_graph_run";
+    private static final String CONTROL_GRAPH_OP_NAME = "run_pipeline_graph_op";
     private static final String GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
 
     private final ParamResolver paramResolver;
@@ -216,6 +218,31 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             nodes.add(node);
         }
 
+        if (tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.BRANCH
+                || task.getTaskType() == TaskType.CONDITION)) {
+            List<Map<String, String>> edges = (pipelineEdges == null
+                    ? List.<PipelineTaskEdge>of() : pipelineEdges).stream()
+                    .filter(edge -> edge.getEdgeLayer() == EdgeLayer.PIPELINE)
+                    .map(edge -> Map.of(
+                            "source_key", edge.getSourceKey(),
+                            "target_key", edge.getTargetKey()))
+                    .toList();
+            Map<String, Object> opConfig = new LinkedHashMap<>();
+            opConfig.put("pipeline_id", ctx.pipelineId().toString());
+            opConfig.put("run_id", ctx.runId().toString());
+            opConfig.put("tenant_id", ctx.tenantId().toString());
+            opConfig.put("iceberg_catalog", "onelake");
+            opConfig.put("execution_mode", "GRAPH");
+            opConfig.put("callback_base_url", callbackBaseUrl == null ? "" : callbackBaseUrl);
+            opConfig.put("runtime_params", runtimeParamEntries(runtimeParams));
+            opConfig.put("max_parallel", Math.max(1, maxParallel));
+            opConfig.put("nodes", nodes);
+            opConfig.put("edges", edges);
+            return new DagsterRunConfig(CONTROL_GRAPH_JOB_NAME, Map.of(
+                    "ops", Map.of(CONTROL_GRAPH_OP_NAME, Map.of("config", opConfig))
+            ));
+        }
+
         // GRAPH job 在 Dagster code location 重载时按 pipelineId 生成真实 op 图。
         // 每个 task_key 都是一个 op 名，从而 Dagster step_key 与 task_key 一致；
         // Java 仍然是每个 op 的 runConfig 唯一构造方。
@@ -318,11 +345,33 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                     StringUtils.hasText(script) ? script : sql, runContext, params));
             opConfig.put("from_tables", textArray(cfg.path("from_tables")));
         }
+        if (TaskType.CONDITION.name().equals(taskType)
+                || TaskType.BRANCH.name().equals(taskType)) {
+            opConfig.put("expression", ParamRenderer.render(
+                    textOrEmpty(cfg, "expression"), runContext, params));
+        }
+        if (TaskType.BRANCH.name().equals(taskType)) {
+            opConfig.put("branches", branchEntries(cfg.path("branches")));
+        }
 
         Map<String, Object> profile = resourceProfile != null ? resourceProfile : resourceProfile(cfg);
         opConfig.put("resource_profile", profile);
 
         return opConfig;
+    }
+
+    private static List<Map<String, Object>> branchEntries(JsonNode branches) {
+        if (branches == null || !branches.isObject()) {
+            return List.of();
+        }
+        List<Map<String, Object>> entries = new ArrayList<>();
+        branches.fields().forEachRemaining(entry -> {
+            List<String> targets = entry.getValue().isTextual()
+                    ? List.of(entry.getValue().asText())
+                    : textArray(entry.getValue());
+            entries.add(Map.of("value", entry.getKey(), "targets", targets));
+        });
+        return entries;
     }
 
     private Map<String, Map<String, String>> resolveUserParameters(

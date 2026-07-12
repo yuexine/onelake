@@ -172,6 +172,7 @@ public class PipelineCompileService {
 
         // 2. 图级校验：环路、悬空边、反向跨引擎边等。
         List<String> graphErrors = new ArrayList<>(validateGraph(tasks, edges, taskByKey));
+        graphErrors.addAll(validateBranchMappings(tasks, edges, taskByKey));
         graphErrors.addAll(validateUpstreamReferences(tasks, edges));
 
         // 3. 按 PIPELINE 边做拓扑排序。
@@ -212,9 +213,68 @@ public class PipelineCompileService {
             case SPARK_SQL, PYSPARK -> validateSparkTask(t);
             case TRINO_SQL -> validateTrinoTask(t);
             case PYTHON, SHELL -> validateScriptTask(t, tenantId);
-            case BRANCH, CONDITION, SENSOR, WAIT,
-                    SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
+            case CONDITION -> validateConditionTask(t);
+            case BRANCH -> validateBranchTask(t);
+            case SENSOR, WAIT, SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
         };
+    }
+
+    private TaskCompileResult validateConditionTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "CONDITION task requires valid object config");
+        }
+        if (!StringUtils.hasText(textOrEmpty(cfg, "expression"))) {
+            return fail(t, "CONDITION task requires non-empty config.expression");
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "CONDITION parameter expression invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private TaskCompileResult validateBranchTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "BRANCH task requires valid object config");
+        }
+        if (!StringUtils.hasText(textOrEmpty(cfg, "expression"))) {
+            return fail(t, "BRANCH task requires non-empty config.expression");
+        }
+        JsonNode branches = cfg.path("branches");
+        if (!branches.isObject() || branches.isEmpty()) {
+            return fail(t, "BRANCH task requires non-empty object config.branches");
+        }
+        var fields = branches.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            if (!StringUtils.hasText(entry.getKey()) || !validBranchTargets(entry.getValue())) {
+                return fail(t, "BRANCH config.branches values must be taskKey or non-empty taskKey arrays");
+            }
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "BRANCH parameter expression invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private static boolean validBranchTargets(JsonNode value) {
+        if (value.isTextual()) {
+            return StringUtils.hasText(value.asText());
+        }
+        if (!value.isArray() || value.isEmpty()) {
+            return false;
+        }
+        for (JsonNode target : value) {
+            if (!target.isTextual() || !StringUtils.hasText(target.asText())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Trino 只接受固定 Iceberg 会话中的只读查询或声明目标资产的 CTAS。 */
@@ -654,7 +714,8 @@ public class PipelineCompileService {
                         targetContract.inputPorts().keySet()));
             }
             String assetFqn = firstText(e.getAssetFqn(), source.getTargetFqn());
-            if (!StringUtils.hasText(assetFqn)) {
+            if (!StringUtils.hasText(assetFqn)
+                    && source.getTaskType().category() != TaskCategory.CONTROL) {
                 errors.add(String.format(
                         "Edge %s cannot resolve assetFqn from edge.assetFqn or source task '%s'.targetFqn",
                         edgeId(e), source.getTaskKey()));
@@ -687,6 +748,60 @@ public class PipelineCompileService {
                             task.getTaskKey(), contract.taskType(), inputPort.name(),
                             inputPort.maxCount(), count));
                 }
+            }
+        }
+        return errors;
+    }
+
+    private List<String> validateBranchMappings(List<PipelineTask> tasks,
+                                                List<PipelineTaskEdge> edges,
+                                                Map<String, PipelineTask> taskByKey) {
+        Map<String, Set<String>> directDownstream = new LinkedHashMap<>();
+        for (PipelineTaskEdge edge : edges) {
+            if (edge.getEdgeLayer() == EdgeLayer.PIPELINE) {
+                directDownstream.computeIfAbsent(edge.getSourceKey(), ignored -> new LinkedHashSet<>())
+                        .add(edge.getTargetKey());
+            }
+        }
+        List<String> errors = new ArrayList<>();
+        for (PipelineTask task : tasks) {
+            if (task.getTaskType() != TaskType.BRANCH) {
+                continue;
+            }
+            JsonNode cfg = parseSafeJson(task.getConfig());
+            JsonNode branches = cfg == null ? null : cfg.path("branches");
+            if (branches == null || !branches.isObject()) {
+                continue;
+            }
+            Set<String> expected = directDownstream.getOrDefault(task.getTaskKey(), Set.of());
+            Set<String> mapped = new LinkedHashSet<>();
+            branches.forEach(value -> {
+                if (value.isTextual()) {
+                    mapped.add(value.asText());
+                } else if (value.isArray()) {
+                    value.forEach(target -> {
+                        if (target.isTextual()) mapped.add(target.asText());
+                    });
+                }
+            });
+            if (expected.isEmpty()) {
+                errors.add("BRANCH task " + task.getTaskKey() + " requires at least one PIPELINE downstream");
+                continue;
+            }
+            for (String target : mapped) {
+                if (!taskByKey.containsKey(target)) {
+                    errors.add("BRANCH task " + task.getTaskKey()
+                            + " maps missing task: " + target);
+                } else if (!expected.contains(target)) {
+                    errors.add("BRANCH task " + task.getTaskKey()
+                            + " maps non-direct downstream task: " + target);
+                }
+            }
+            Set<String> missing = new LinkedHashSet<>(expected);
+            missing.removeAll(mapped);
+            if (!missing.isEmpty()) {
+                errors.add("BRANCH task " + task.getTaskKey()
+                        + " has unmapped direct downstream tasks: " + missing);
             }
         }
         return errors;

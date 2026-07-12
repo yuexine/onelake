@@ -486,9 +486,9 @@ public class OrchestrationService {
             dagster.reloadRepositoryLocation("onelake-loc");
         }
         if (!dryRun) {
+            // 保留原有 fail-fast：原生图缺失时不得进入编译或 JobRun 建档。
             validatePipelineRuntimeContract(dag, activeJobName);
         }
-
         // 1. 编译流水线。
         List<PipelineTask> tasks;
         List<PipelineTaskEdge> pipelineEdges;
@@ -513,6 +513,11 @@ public class OrchestrationService {
                     + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
         validateTaskExecutionMode(tasks, tenantId);
+        String compiledJobName = activePipelineDagsterJob(dagId, selectedVersionId, tasks);
+        if (!dryRun && !compiledJobName.equals(activeJobName)) {
+            validatePipelineRuntimeContract(dag, compiledJobName);
+        }
+        activeJobName = compiledJobName;
         // 2. 就绪检查：至少需要一个真实执行节点；SYNC_REF/QUALITY_GATE 等观测节点仍会生成 task_run 供 UI 展示。
         long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
         if (executableCount == 0) {
@@ -603,6 +608,7 @@ public class OrchestrationService {
                     selectedVersionId
             );
             DagsterRunConfig runConfig = buildPipelineRunConfig(ctx, tasks, pipelineEdges, runContext);
+            run.setDagsterJob(runConfig.jobName());
             List<Map<String, String>> tags = pipelineRunTags(dagId, tenantId, run, trigger, tasks);
             String dagsterRunId = dagster.launch(
                     runConfig.jobName(), "onelake", "onelake-loc",
@@ -806,12 +812,16 @@ public class OrchestrationService {
                 baseAttempts,
                 rerunContext,
                 rerunContext.builtInParameters(run.getId()));
+        run.setDagsterJob(runConfig.jobName());
 
         try {
+            List<String> solidSelection = PIPELINE_GRAPH_JOB_NAME.equals(runConfig.jobName())
+                    ? List.of()
+                    : new ArrayList<>(subgraph);
             String dagsterRunId = dagster.launch(
                     runConfig.jobName(), "onelake", "onelake-loc",
                     runConfig.opConfig(), pipelineRerunTags(dag, run, taskKey, mode, subgraphTasks),
-                    new ArrayList<>(subgraph));
+                    solidSelection);
             run.setDagsterRunId(dagsterRunId);
             run.setStatus(DagStatus.RUNNING);
             run.setUpdatedAt(Instant.now());
@@ -1114,6 +1124,18 @@ public class OrchestrationService {
                 : PIPELINE_JOB_NAME;
     }
 
+    private String activePipelineDagsterJob(UUID dagId,
+                                            UUID versionId,
+                                            List<PipelineTask> tasks) {
+        if (isGraphPipelineExecutionMode()
+                && tasks != null
+                && tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.BRANCH
+                        || task.getTaskType() == TaskType.CONDITION)) {
+            return PIPELINE_GRAPH_JOB_NAME;
+        }
+        return activePipelineDagsterJob(dagId, versionId);
+    }
+
     private void validatePipelineRuntimeContract(Dag dag, String activeJobName) {
         // 先校验当前开关真正会 launch 的 job，避免 GRAPH job 缺失时先写入 JobRun/TaskRun 再失败。
         @SuppressWarnings("unchecked")
@@ -1386,7 +1408,7 @@ public class OrchestrationService {
         taskRunRepo.save(taskRun);
 
         if (shouldShortCircuitDownstream(requested)) {
-            // 失败/跳过类终态一到达，就以当前节点为种子实时短路仍在 QUEUED 的下游。
+            // 失败类终态一到达，就以当前节点为种子实时短路仍在 QUEUED 的下游。
             propagateUpstreamFailures(run, lockedTaskRuns, new HashSet<>(Set.of(taskKey)));
         }
         return new TaskRunCallbackResult(true, taskRun.getStatus());
@@ -1699,17 +1721,16 @@ public class OrchestrationService {
         if (terminalStatus == DagStatus.CANCELLED) {
             return DagStatus.CANCELLED;
         }
-        boolean allSucceeded = true;
+        boolean allSucceededOrSkipped = true;
         boolean hasCancelled = false;
         for (TaskRun tr : taskRuns) {
             TaskRunStatus status = tr.getStatus();
-            if (status != TaskRunStatus.SUCCEEDED) {
-                allSucceeded = false;
+            if (status != TaskRunStatus.SUCCEEDED && status != TaskRunStatus.SKIPPED) {
+                allSucceededOrSkipped = false;
             }
             // 子图重跑成功只代表本次提交的子图完成，旧的失败/上游失败节点仍决定整条运行失败。
             if (status == TaskRunStatus.FAILED
-                    || status == TaskRunStatus.UPSTREAM_FAILED
-                    || status == TaskRunStatus.SKIPPED) {
+                    || status == TaskRunStatus.UPSTREAM_FAILED) {
                 return DagStatus.FAILED;
             }
             if (status == TaskRunStatus.CANCELLED) {
@@ -1719,7 +1740,7 @@ public class OrchestrationService {
         if (hasCancelled) {
             return DagStatus.CANCELLED;
         }
-        if (terminalStatus == DagStatus.SUCCEEDED && allSucceeded) {
+        if (terminalStatus == DagStatus.SUCCEEDED && allSucceededOrSkipped) {
             return DagStatus.SUCCEEDED;
         }
         return terminalStatus;
@@ -1729,8 +1750,7 @@ public class OrchestrationService {
         Set<String> keys = new HashSet<>();
         for (TaskRun tr : taskRuns) {
             if (tr.getStatus() == TaskRunStatus.FAILED
-                    || tr.getStatus() == TaskRunStatus.UPSTREAM_FAILED
-                    || tr.getStatus() == TaskRunStatus.SKIPPED) {
+                    || tr.getStatus() == TaskRunStatus.UPSTREAM_FAILED) {
                 keys.add(tr.getTaskKey());
             }
         }
@@ -1803,8 +1823,7 @@ public class OrchestrationService {
 
     private boolean shouldShortCircuitDownstream(TaskRunStatus status) {
         return status == TaskRunStatus.FAILED
-                || status == TaskRunStatus.UPSTREAM_FAILED
-                || status == TaskRunStatus.SKIPPED;
+                || status == TaskRunStatus.UPSTREAM_FAILED;
     }
 
     private void applyTaskRunCallbackFields(JobRun run, TaskRun taskRun, TaskRunStatus requested,

@@ -348,6 +348,41 @@ def test_succeeded_callback_accepts_idempotent_succeeded_status(monkeypatch):
     )
 
 
+def test_skipped_callback_retries_until_authoritative_skip_is_acknowledged(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            current_status = "QUEUED" if len(calls) < 3 else "SKIPPED"
+            return {"data": {"applied": current_status == "SKIPPED",
+                             "currentStatus": current_status}}
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response()
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    monkeypatch.setattr(definitions.time, "sleep", lambda *_: None)
+
+    definitions._callback(
+        "http://api", "run-1", "not_selected", {"status": "SKIPPED"}, _Log()
+    )
+
+    assert len(calls) == 3
+
+
+def test_skipped_callback_fails_closed_without_backend_url(monkeypatch):
+    monkeypatch.delenv("ONELAKE_CALLBACK_BASE_URL", raising=False)
+
+    with pytest.raises(definitions._CallbackDeliveryError, match="base URL is empty"):
+        definitions._callback(
+            "", "run-1", "not_selected", {"status": "SKIPPED"}, _Log()
+        )
+
+
 def test_extract_task_outputs_uses_last_valid_marker_and_validates_rows_written():
     stdout = """
 noise
@@ -1079,8 +1114,7 @@ def test_graph_linear_order_and_sync_ref(monkeypatch):
 
 
 @pytest.mark.parametrize("task_type", [
-    "BRANCH", "CONDITION", "SENSOR", "WAIT",
-    "SUB_PIPELINE", "NOTIFY", "ASSERTION",
+    "SENSOR", "WAIT", "SUB_PIPELINE", "NOTIFY", "ASSERTION",
 ])
 def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, task_type):
     def fail_if_called(*args):
@@ -1109,6 +1143,80 @@ def test_graph_existing_spark_backed_types_keep_submit_dispatch(monkeypatch, tas
 
     assert command == (["spark-submit"], [])
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("enabled, expected", [
+    ("true", "SUCCEEDED"),
+    ("false", "SKIPPED"),
+])
+def test_graph_condition_true_and_false_paths(monkeypatch, enabled, expected):
+    callbacks = _install_callback_collector(monkeypatch)
+    submit_calls = []
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda node, *_: submit_calls.append(node["task_key"]) or _command(0),
+    )
+    condition = _node("condition", "CONDITION")
+    condition["expression"] = "${enabled}"
+    config = _config(
+        [condition, _node("downstream")],
+        [_edge("condition", "downstream")],
+        max_parallel=1,
+    )
+    config["runtime_params"] = [{"key": "enabled", "value": enabled}]
+
+    result = _run_graph(config)
+
+    assert result["status"]["condition"] == "SUCCEEDED"
+    assert result["status"]["downstream"] == expected
+    assert submit_calls == (["downstream"] if enabled == "true" else [])
+    assert _statuses(callbacks, "downstream")[-1] == expected
+
+
+def test_graph_branch_runs_only_selected_path_and_releases_join(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    submit_calls = []
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda node, *_: submit_calls.append(node["task_key"]) or _command(0),
+    )
+    branch = _node("route", "BRANCH")
+    branch.update({
+        "expression": "${env}",
+        "branches": [
+            {"value": "prod", "targets": ["prod_task"]},
+            {"value": "dev", "targets": ["dev_task"]},
+        ],
+    })
+    config = _config(
+        [branch, _node("prod_task"), _node("dev_task"), _node("join")],
+        [
+            _edge("route", "prod_task"),
+            _edge("route", "dev_task"),
+            _edge("prod_task", "join"),
+            _edge("dev_task", "join"),
+        ],
+        max_parallel=1,
+    )
+    config["runtime_params"] = [{"key": "env", "value": "prod"}]
+
+    result = _run_graph(config)
+
+    assert result["status"] == {
+        "route": "SUCCEEDED",
+        "prod_task": "SUCCEEDED",
+        "dev_task": "SKIPPED",
+        "join": "SUCCEEDED",
+    }
+    assert submit_calls == ["prod_task", "join"]
+    assert _statuses(callbacks, "dev_task") == ["SKIPPED"]
+
+
+def test_control_expression_rejects_arbitrary_code():
+    with pytest.raises(ValueError, match="not allowed"):
+        definitions._safe_control_eval("__import__('os').system('id')")
 
 
 def test_graph_trino_node_uses_callback_log_retry_and_releases_downstream(monkeypatch):

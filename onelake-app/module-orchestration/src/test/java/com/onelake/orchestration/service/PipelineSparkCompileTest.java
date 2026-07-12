@@ -99,6 +99,25 @@ class PipelineSparkCompileTest {
     }
 
     @Test
+    void validatesTrinoOutputConsumedBySpark() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        PipelineTask trino = trinoTask("trino_mid", "iceberg.dwd.trino_mid");
+        trino.setEngine(null);
+        PipelineTask spark = sparkTask("spark_consume", "iceberg.dwd.trino_mid");
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of(trino, spark));
+        when(edgeRepo.findByDagId(dagId)).thenReturn(List.of(edge("trino_mid", "spark_consume", "in", "mid")));
+
+        PipelineCompileResult result = service.compile(dagId);
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(result.graphErrors()).isEmpty();
+        assertThat(trino.getExecutable()).isTrue();
+        assertThat(spark.getExecutable()).isTrue();
+        assertThat(PipelineNodePortRegistry.contractFor(trino).engine()).isEqualTo("TRINO");
+    }
+
+    @Test
     void sparkTaskWithScriptCompilesAsExecutable() {
         Dag dag = pipelineDag();
         when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
@@ -488,6 +507,21 @@ class PipelineSparkCompileTest {
         t.setEngine("SPARK_SQL");
         t.setTargetFqn("iceberg.dwd.spark_" + key);
         t.setConfig("{\"sql\":\"SELECT count(*) FROM " + fromTableFqn + "\",\"from_tables\":[\"" + fromTableFqn + "\"]}");
+        return t;
+    }
+
+    private PipelineTask trinoTask(String key, String targetFqn) {
+        PipelineTask t = new PipelineTask();
+        t.setId(UUID.randomUUID());
+        t.setTenantId(tenantId);
+        t.setDagId(dagId);
+        t.setTaskKey(key);
+        t.setTaskType(TaskType.TRINO_SQL);
+        t.setName(key);
+        t.setEngine("TRINO");
+        t.setTargetFqn(targetFqn);
+        t.setConfig("{\"sql\":\"CREATE TABLE dwd.trino_mid AS SELECT 1 AS id\","
+                + "\"catalog\":\"iceberg\",\"schema\":\"dwd\"}");
         return t;
     }
 

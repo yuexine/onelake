@@ -61,6 +61,13 @@ final class PipelineNodePortRegistry {
             );
         }
         return switch (type) {
+            case TRINO_SQL -> new NodeContract(
+                    type.name(),
+                    engine,
+                    Map.of("in", new InputPort("in", false, 0, Integer.MAX_VALUE)),
+                    Map.of("out", new OutputPort("out")),
+                    Set.of()
+            );
             case SYNC_REF -> new NodeContract(
                     type.name(),
                     engine,
@@ -83,6 +90,7 @@ final class PipelineNodePortRegistry {
         return switch (type) {
             case SPARK_SQL -> "SPARK_SQL";
             case PYSPARK -> "PYSPARK";
+            case TRINO_SQL -> "TRINO";
             default -> "SPARK_SQL";
         };
     }

@@ -8,6 +8,8 @@ import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.DomainEventHandler;
 import com.onelake.common.outbox.OutboxEvent;
 import com.onelake.orchestration.domain.entity.AssetReadiness;
+import com.onelake.orchestration.domain.entity.AssetQualityState;
+import com.onelake.orchestration.domain.entity.AssetQualityStateId;
 import com.onelake.orchestration.domain.entity.AssetTriggerReceipt;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineSubscription;
@@ -17,6 +19,7 @@ import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.AssetReadinessRepository;
+import com.onelake.orchestration.repository.AssetQualityStateRepository;
 import com.onelake.orchestration.repository.AssetTriggerReceiptRepository;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineSubscriptionRepository;
@@ -70,10 +73,14 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     private static final String POLICY_LATEST = "LATEST";
     private static final String POLICY_SAME_BATCH = "SAME_BATCH";
     private static final String POLICY_SAME_FRESHNESS_WINDOW = "SAME_FRESHNESS_WINDOW";
+    private static final String CONDITION_UPDATE_AND_QUALITY_PASS =
+            "ON_UPDATE_AND_QUALITY_PASS";
+    private static final String QUALITY_LOCK_PREFIX = "asset-quality:";
 
     private final DagRepository dagRepo;
     private final PipelineSubscriptionRepository subscriptionRepo;
     private final AssetReadinessRepository readinessRepo;
+    private final AssetQualityStateRepository qualityStateRepo;
     private final AssetTriggerReceiptRepository triggerReceiptRepo;
     private final SchedulerLockRepository schedulerLockRepo;
     private final PipelineSnapshotService pipelineSnapshotService;
@@ -87,7 +94,9 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
     public Set<String> eventTypes() {
         return Set.of(
                 DomainEvents.INTEGRATION_TABLE_LOADED,
-                DomainEvents.PIPELINE_TASK_LOADED);
+                DomainEvents.PIPELINE_TASK_LOADED,
+                DomainEvents.QUALITY_CHECK_COMPLETED,
+                DomainEvents.QUALITY_CHECK_FAILED);
     }
 
     /**
@@ -113,33 +122,29 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                         event.getId(), tenantIdRaw);
                 return;
             }
-            Instant logicalDate = instant(payload, "logicalDate", event.getId());
-            EventAsset eventAsset = new EventAsset(
-                    event.getId(),
-                    tenantId,
-                    assetFqn,
-                    firstText(payload, "batchId", "batch_id"),
-                    text(payload, "runId"),
-                    logicalDate,
-                    freshnessWindow(payload, logicalDate),
-                    text(payload, "pipelineId"),
-                    event.getEventType(),
-                    event.getOccurredAt() == null ? Instant.now() : event.getOccurredAt());
-
             // Outbox 在线程池中执行；触发服务依赖 TenantContext，因此必须显式恢复并还原。
             UUID previousTenant = TenantContext.getTenantId();
             try {
                 TenantContext.setTenantId(tenantId);
-                List<ReadyCandidate> candidates = publishedCandidates(eventAsset);
-                if (candidates.isEmpty()) {
-                    log.debug("PipelineSyncRefTriggerHandler：没有已发布流水线订阅资产 {}", assetFqn);
+                if (isQualityEvent(event.getEventType())) {
+                    handleQualityEvent(event, payload, tenantId, assetFqn);
                 } else {
-                    for (ReadyCandidate candidate : candidates) {
-                        triggerPipeline(candidate, eventAsset);
+                    Instant logicalDate = instant(payload, "logicalDate", event.getId());
+                    EventAsset eventAsset = new EventAsset(
+                            event.getId(),
+                            tenantId,
+                            assetFqn,
+                            firstText(payload, "batchId", "batch_id"),
+                            text(payload, "runId"),
+                            logicalDate,
+                            freshnessWindow(payload, logicalDate),
+                            text(payload, "pipelineId"),
+                            event.getEventType(),
+                            event.getOccurredAt() == null ? Instant.now() : event.getOccurredAt());
+                    handleAssetUpdate(eventAsset);
+                    if (DomainEvents.INTEGRATION_TABLE_LOADED.equals(event.getEventType())) {
+                        legacySyncRunHandler.handle(event);
                     }
-                }
-                if (DomainEvents.INTEGRATION_TABLE_LOADED.equals(event.getEventType())) {
-                    legacySyncRunHandler.handle(event);
                 }
             } finally {
                 if (previousTenant == null) {
@@ -153,6 +158,89 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                     event.getId(), e.getMessage(), e);
             throw new RuntimeException(e);
         }
+    }
+
+    private boolean isQualityEvent(String eventType) {
+        return DomainEvents.QUALITY_CHECK_COMPLETED.equals(eventType)
+                || DomainEvents.QUALITY_CHECK_FAILED.equals(eventType);
+    }
+
+    private void handleAssetUpdate(EventAsset eventAsset) {
+        List<ReadyCandidate> candidates = publishedCandidates(eventAsset);
+        if (candidates.isEmpty()) {
+            log.debug("PipelineSyncRefTriggerHandler：没有已发布流水线订阅资产 {}",
+                    eventAsset.assetFqn());
+            return;
+        }
+        if (candidates.stream().noneMatch(ReadyCandidate::qualityGateRequired)) {
+            candidates.forEach(candidate -> triggerPipeline(candidate, eventAsset));
+            return;
+        }
+        withAssetQualityLock(eventAsset.tenantId(), eventAsset.assetFqn(), () -> {
+            AssetQualityState state = recordAssetUpdate(eventAsset);
+            QualityDecision decision = qualityDecision(state);
+            for (ReadyCandidate candidate : candidates) {
+                if (!candidate.qualityGateRequired()) {
+                    triggerPipeline(candidate, eventAsset);
+                } else if (decision == QualityDecision.PASS) {
+                    triggerPipeline(candidate, eventAsset);
+                } else if (decision == QualityDecision.FAIL) {
+                    log.info("PipelineSyncRefTriggerHandler：资产 {} 更新 {} 的最近对应质检失败，"
+                                    + "抑制流水线 {} 触发，坏数据不下传",
+                            eventAsset.assetFqn(), eventAsset.eventId(), candidate.liveDag().getId());
+                } else {
+                    log.info("PipelineSyncRefTriggerHandler：资产 {} 更新 {} 尚无对应通过质检，"
+                                    + "等待质量事件后再判定流水线 {}",
+                            eventAsset.assetFqn(), eventAsset.eventId(), candidate.liveDag().getId());
+                }
+            }
+        });
+    }
+
+    private void handleQualityEvent(OutboxEvent event,
+                                    JsonNode payload,
+                                    UUID tenantId,
+                                    String assetFqn) {
+        if (payload.has("assetQualityFinal") && !payload.path("assetQualityFinal").asBoolean()) {
+            log.debug("PipelineSyncRefTriggerHandler：忽略资产 {} 的规则级非最终质量事件 {}",
+                    assetFqn, event.getId());
+            return;
+        }
+        withAssetQualityLock(tenantId, assetFqn, () -> {
+            AssetQualityState state = qualityStateRepo.findById(
+                            new AssetQualityStateId(tenantId, assetFqn))
+                    .orElseGet(() -> newQualityState(tenantId, assetFqn));
+            state.setQualityEventId(event.getId());
+            state.setQualityPassed(DomainEvents.QUALITY_CHECK_COMPLETED.equals(event.getEventType()));
+            state.setQualityCorrelationKey(qualityCorrelationKey(payload));
+            state.setQualityCheckedAt(event.getOccurredAt() == null ? Instant.now() : event.getOccurredAt());
+            state.setQualityAppliedUpdateEventId(null);
+            if (correspondsToCurrentUpdate(state)) {
+                state.setQualityAppliedUpdateEventId(state.getUpdateEventId());
+            }
+            state.setUpdatedAt(Instant.now());
+            AssetQualityState saved = qualityStateRepo.saveAndFlush(state);
+            if (saved.getUpdateEventId() == null) {
+                log.info("PipelineSyncRefTriggerHandler：已记录资产 {} 的质量态 {}，等待资产更新事件",
+                        assetFqn, Boolean.TRUE.equals(saved.getQualityPassed()) ? "通过" : "失败");
+                return;
+            }
+            if (!saved.getUpdateEventId().equals(saved.getQualityAppliedUpdateEventId())) {
+                log.info("PipelineSyncRefTriggerHandler：资产 {} 的质检与最新更新关联键不一致，暂不触发",
+                        assetFqn);
+                return;
+            }
+            if (!Boolean.TRUE.equals(saved.getQualityPassed())) {
+                log.info("PipelineSyncRefTriggerHandler：资产 {} 更新 {} 的对应质检失败，"
+                                + "抑制下游触发，坏数据不下传",
+                        assetFqn, saved.getUpdateEventId());
+                return;
+            }
+            EventAsset update = eventAsset(saved);
+            publishedCandidates(update).stream()
+                    .filter(ReadyCandidate::qualityGateRequired)
+                    .forEach(candidate -> triggerPipeline(candidate, update));
+        });
     }
 
     private List<ReadyCandidate> publishedCandidates(EventAsset eventAsset) {
@@ -219,7 +307,8 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                             Map.copyOf(readyInputs),
                             Set.copyOf(sourceMatches),
                             List.copyOf(dagSubscriptions),
-                            Set.copyOf(matchedSubscriptionInputs)));
+                            Set.copyOf(matchedSubscriptionInputs),
+                            explicit.stream().anyMatch(this::requiresQualityPass)));
                 }
             } catch (BizException ex) {
                 log.warn("PipelineSyncRefTriggerHandler：加载 dag {} 已发布版本失败：{}",
@@ -263,6 +352,171 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
                         + "|" + subscription.getSourceRef()
                     : subscription.getId().toString();
             target.putIfAbsent(key, subscription);
+        }
+    }
+
+    private boolean requiresQualityPass(PipelineSubscription subscription) {
+        return subscription.getCondition() != null
+                && CONDITION_UPDATE_AND_QUALITY_PASS.equalsIgnoreCase(
+                        subscription.getCondition().trim());
+    }
+
+    private AssetQualityState recordAssetUpdate(EventAsset eventAsset) {
+        AssetQualityState state = qualityStateRepo.findById(
+                        new AssetQualityStateId(eventAsset.tenantId(), eventAsset.assetFqn()))
+                .orElseGet(() -> newQualityState(eventAsset.tenantId(), eventAsset.assetFqn()));
+        state.setUpdateEventId(eventAsset.eventId());
+        state.setUpdateEventType(eventAsset.eventType());
+        state.setUpdateBatchId(eventAsset.normalizedBatchId());
+        state.setUpdateRunId(limit(eventAsset.runId(), 128));
+        state.setUpdateLogicalDate(eventAsset.logicalDate());
+        state.setUpdateFreshnessWindow(eventAsset.normalizedFreshnessWindow());
+        state.setUpdatePipelineId(limit(eventAsset.pipelineId(), 128));
+        state.setUpdateOccurredAt(eventAsset.occurredAt());
+        if (correspondsToCurrentUpdate(state)) {
+            state.setQualityAppliedUpdateEventId(eventAsset.eventId());
+        }
+        state.setUpdatedAt(Instant.now());
+        return qualityStateRepo.saveAndFlush(state);
+    }
+
+    private AssetQualityState newQualityState(UUID tenantId, String assetFqn) {
+        AssetQualityState state = new AssetQualityState();
+        state.setTenantId(tenantId);
+        state.setAssetFqn(assetFqn);
+        return state;
+    }
+
+    /**
+     * 对应性优先使用两侧共有的业务关联键；旧事件缺键时，一个质量结果只与一个最新更新配对。
+     */
+    private boolean correspondsToCurrentUpdate(AssetQualityState state) {
+        if (state.getUpdateEventId() == null || state.getQualityEventId() == null) {
+            return false;
+        }
+        String updateKey = updateCorrelationKey(state);
+        String qualityKey = state.getQualityCorrelationKey();
+        for (String prefix : List.of("batch:", "freshness:", "run:")) {
+            String updateValue = correlationPart(updateKey, prefix);
+            String qualityValue = correlationPart(qualityKey, prefix);
+            if (updateValue != null && qualityValue != null) {
+                return updateValue.equals(qualityValue);
+            }
+        }
+        return state.getQualityAppliedUpdateEventId() == null
+                || state.getUpdateEventId().equals(state.getQualityAppliedUpdateEventId());
+    }
+
+    private QualityDecision qualityDecision(AssetQualityState state) {
+        if (state.getUpdateEventId() == null
+                || !state.getUpdateEventId().equals(state.getQualityAppliedUpdateEventId())) {
+            return QualityDecision.WAITING;
+        }
+        return Boolean.TRUE.equals(state.getQualityPassed())
+                ? QualityDecision.PASS
+                : QualityDecision.FAIL;
+    }
+
+    private String updateCorrelationKey(AssetQualityState state) {
+        List<String> parts = new ArrayList<>();
+        if (state.getUpdateBatchId() != null && !state.getUpdateBatchId().isBlank()) {
+            parts.add("batch:" + state.getUpdateBatchId());
+        }
+        if (state.getUpdateFreshnessWindow() != null
+                && !state.getUpdateFreshnessWindow().isBlank()) {
+            parts.add("freshness:" + state.getUpdateFreshnessWindow());
+        }
+        if (state.getUpdateRunId() != null && !state.getUpdateRunId().isBlank()) {
+            parts.add("run:" + state.getUpdateRunId());
+        }
+        return String.join("|", parts);
+    }
+
+    private String qualityCorrelationKey(JsonNode payload) {
+        List<String> parts = new ArrayList<>();
+        String batchId = firstText(payload, "batchId", "batch_id");
+        if (!batchId.isBlank()) {
+            parts.add("batch:" + limit(batchId, 128));
+        }
+        String freshness = firstText(payload, "freshnessWindow", "freshness_window");
+        if (freshness.isBlank()) {
+            freshness = text(payload, "logicalDate");
+        }
+        if (!freshness.isBlank()) {
+            parts.add("freshness:" + limit(freshness, 64));
+        }
+        String runId = firstText(payload, "sourceRunId", "runId");
+        if (runId.isBlank()) {
+            runId = text(payload, "modelRunId");
+        }
+        if (!runId.isBlank()) {
+            parts.add("run:" + limit(runId, 128));
+        }
+        return String.join("|", parts);
+    }
+
+    private String correlationPart(String correlation, String prefix) {
+        if (correlation == null || correlation.isBlank()) {
+            return null;
+        }
+        for (String part : correlation.split("\\|")) {
+            if (part.startsWith(prefix)) {
+                return part.substring(prefix.length());
+            }
+        }
+        return null;
+    }
+
+    private EventAsset eventAsset(AssetQualityState state) {
+        return new EventAsset(
+                state.getUpdateEventId(),
+                state.getTenantId(),
+                state.getAssetFqn(),
+                valueOrEmpty(state.getUpdateBatchId()),
+                valueOrEmpty(state.getUpdateRunId()),
+                state.getUpdateLogicalDate(),
+                valueOrEmpty(state.getUpdateFreshnessWindow()),
+                valueOrEmpty(state.getUpdatePipelineId()),
+                state.getUpdateEventType(),
+                state.getUpdateOccurredAt() == null ? Instant.now() : state.getUpdateOccurredAt());
+    }
+
+    private String valueOrEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private String limit(String value, int maxLength) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    private void withAssetQualityLock(UUID tenantId, String assetFqn, Runnable work) {
+        String lockKey = QUALITY_LOCK_PREFIX
+                + sha256(tenantId + "|" + assetFqn).substring(0, 48);
+        String holder = UUID.randomUUID().toString();
+        boolean acquired;
+        try {
+            acquired = schedulerLockRepo.acquire(
+                    lockKey, holder, Instant.now().plus(LOCK_TTL)) == 1;
+        } catch (RuntimeException e) {
+            throw new AssetTriggerRetryableException(
+                    "资产 " + assetFqn + " 获取质量配对锁失败", e);
+        }
+        if (!acquired) {
+            throw new AssetTriggerRetryableException(
+                    "资产 " + assetFqn + " 正由其他副本处理质量配对");
+        }
+        try {
+            work.run();
+        } finally {
+            try {
+                schedulerLockRepo.release(lockKey, holder);
+            } catch (RuntimeException e) {
+                log.warn("PipelineSyncRefTriggerHandler：资产 {} 释放质量配对锁失败：{}",
+                        assetFqn, e.getMessage());
+            }
         }
     }
 
@@ -646,7 +900,8 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
             Map<String, String> readyInputs,
             Set<SourceMatch> sourceMatches,
             List<PipelineSubscription> subscriptions,
-            Set<String> matchedSubscriptionInputs) {}
+            Set<String> matchedSubscriptionInputs,
+            boolean qualityGateRequired) {}
 
     /** 一个真实目标节点或显式订阅虚拟目标的多输入 barrier。 */
     private record BarrierGroup(String key, Set<String> taskKeys, Set<String> policies) {}
@@ -655,6 +910,12 @@ public class PipelineSyncRefTriggerHandler implements DomainEventHandler {
         READY,
         WAITING,
         MISMATCH
+    }
+
+    private enum QualityDecision {
+        WAITING,
+        PASS,
+        FAIL
     }
 
     private record BarrierDecision(boolean ready, Set<String> taskKeys) {

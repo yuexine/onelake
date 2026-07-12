@@ -38,6 +38,11 @@ public class QualityCheckEventHandler implements DomainEventHandler {
     public void handle(OutboxEvent event) {
         try {
             JsonNode payload = objectMapper.readTree(event.getPayload() == null ? "{}" : event.getPayload());
+            if (payload.has("assetQualityFinal")
+                    && !payload.path("assetQualityFinal").asBoolean()) {
+                log.debug("QualityCheckEventHandler skipped rule-level non-final event {}", event.getId());
+                return;
+            }
             String tenantIdRaw = payload.path("tenantId").asText("");
             String targetFqn = payload.path("targetFqn").asText("");
             if (tenantIdRaw.isBlank() || targetFqn.isBlank()) {

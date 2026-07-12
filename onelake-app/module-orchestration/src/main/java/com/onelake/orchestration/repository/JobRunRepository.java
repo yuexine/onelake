@@ -108,20 +108,15 @@ public interface JobRunRepository extends JpaRepository<JobRun, UUID> {
             """, nativeQuery = true)
     List<UUID> findRetryCandidateIds(@Param("now") Instant now, Pageable pageable);
 
-    /**
-     * 后台需要主动同步的非终态运行；DEV 也需要收口远端状态，但不会进入下方自动重跑候选。
-     */
-    @Query("""
+    /** 后台需要主动同步的全部非终态 Dagster 运行，包括未配置自动重跑的 EVENT 运行。 */
+    @Query(value = """
             select jr.id
-            from JobRun jr, Dag d
-            where jr.status in :statuses
-              and jr.dagsterRunId is not null
-              and d.id = jr.dagId
-              and d.runRetryCount > 0
-              and jr.runRetryAttempt <= d.runRetryCount
-            order by jr.startedAt, jr.id
-            """)
-    List<UUID> findRetryWatchRunIds(@Param("statuses") Collection<DagStatus> statuses);
+            from orchestration.job_run jr
+            where jr.status in ('QUEUED', 'RUNNING')
+              and jr.dagster_run_id is not null
+            order by coalesce(jr.updated_at, jr.started_at), jr.id
+            """, nativeQuery = true)
+    List<UUID> findActiveDagsterRunIds(Pageable pageable);
 
     /**
      * 查询需要 SLA/超时巡检的非终态运行；DEV 只保留 timeout 保护，不产生生产 SLA 告警。

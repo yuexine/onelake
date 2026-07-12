@@ -250,6 +250,9 @@ public class QualityService {
         payload.put("passed", result.getPassed());
         payload.put("passRate", result.getPassRate());
         payload.put("failedRows", result.getFailedRows());
+        if (result.getJobRunId() != null) {
+            payload.put("runId", result.getJobRunId().toString());
+        }
         outboxPublisher.publish(Boolean.TRUE.equals(result.getPassed())
             ? DomainEvents.QUALITY_CHECK_COMPLETED
             : DomainEvents.QUALITY_CHECK_FAILED, rule.getId().toString(), payload);

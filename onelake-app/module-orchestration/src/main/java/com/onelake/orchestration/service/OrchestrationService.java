@@ -1545,6 +1545,7 @@ public class OrchestrationService {
                     run.setStatus(reconciled);
                 }
             }
+            run.setUpdatedAt(Instant.now());
             runRepo.save(run);
 
             // V2 流水线首次进入终态时发布 pipeline.run.succeeded/failed。
@@ -1557,6 +1558,13 @@ public class OrchestrationService {
                 publishPipelineRunEventsIfTerminal(run, reconciled);
             }
         } catch (RuntimeException e) {
+            run.setUpdatedAt(Instant.now());
+            try {
+                runRepo.save(run);
+            } catch (RuntimeException saveError) {
+                log.warn("记录 Dagster run 状态同步时间失败 {}：{}",
+                        run.getDagsterRunId(), saveError.getMessage());
+            }
             log.warn("刷新 Dagster run 状态失败 {}：{}", run.getDagsterRunId(), e.getMessage());
         }
         return run;

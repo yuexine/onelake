@@ -35,7 +35,7 @@ public class PipelineSubscription {
     private String sourceType;
 
     /** 资产 FQN 或上游流水线 ID。 */
-    @Column(nullable = false, length = 256)
+    @Column(nullable = false, length = 512)
     private String sourceRef;
 
     /** ON_UPDATE 或 ON_UPDATE_AND_QUALITY_PASS。 */

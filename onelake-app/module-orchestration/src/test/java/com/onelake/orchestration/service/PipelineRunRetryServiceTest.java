@@ -10,8 +10,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -32,6 +34,17 @@ class PipelineRunRetryServiceTest {
     @Mock private JobRunRepository runRepo;
     @Mock private DagRepository dagRepo;
     @Mock private OrchestrationService orchestrationService;
+
+    @Test
+    void activeRunScanIncludesAllNonTerminalDagsterRuns() {
+        UUID eventRunId = UUID.randomUUID();
+        when(runRepo.findActiveDagsterRunIds(PageRequest.of(0, 100)))
+                .thenReturn(List.of(eventRunId));
+        PipelineRunRetryService service = new PipelineRunRetryService(
+                runRepo, dagRepo, orchestrationService);
+
+        assertThat(service.activeRunIds()).containsExactly(eventRunId);
+    }
 
     @Test
     void automaticRetryStopsAtDagRetryLimit() {

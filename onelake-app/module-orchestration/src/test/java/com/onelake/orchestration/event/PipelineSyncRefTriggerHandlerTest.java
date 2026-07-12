@@ -6,6 +6,7 @@ import com.onelake.common.exception.BizException;
 import com.onelake.common.outbox.DomainEvents;
 import com.onelake.common.outbox.OutboxEvent;
 import com.onelake.orchestration.domain.entity.AssetReadiness;
+import com.onelake.orchestration.domain.entity.AssetQualityState;
 import com.onelake.orchestration.domain.entity.AssetTriggerReceipt;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineSubscription;
@@ -16,6 +17,7 @@ import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.repository.AssetReadinessRepository;
+import com.onelake.orchestration.repository.AssetQualityStateRepository;
 import com.onelake.orchestration.repository.AssetTriggerReceiptRepository;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineSubscriptionRepository;
@@ -37,6 +39,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -65,6 +68,7 @@ class PipelineSyncRefTriggerHandlerTest {
     @Mock private DagRepository dagRepo;
     @Mock private PipelineSubscriptionRepository subscriptionRepo;
     @Mock private AssetReadinessRepository readinessRepo;
+    @Mock private AssetQualityStateRepository qualityStateRepo;
     @Mock private AssetTriggerReceiptRepository triggerReceiptRepo;
     @Mock private SchedulerLockRepository schedulerLockRepo;
     @Mock private PipelineSnapshotService pipelineSnapshotService;
@@ -73,6 +77,7 @@ class PipelineSyncRefTriggerHandlerTest {
 
     private PipelineSyncRefTriggerHandler handler;
     private List<AssetReadiness> readinessState;
+    private AssetQualityState qualityState;
 
     @BeforeEach
     void setup() {
@@ -81,6 +86,7 @@ class PipelineSyncRefTriggerHandlerTest {
                 dagRepo,
                 subscriptionRepo,
                 readinessRepo,
+                qualityStateRepo,
                 triggerReceiptRepo,
                 schedulerLockRepo,
                 pipelineSnapshotService,
@@ -96,6 +102,12 @@ class PipelineSyncRefTriggerHandlerTest {
                 .thenReturn(false);
         lenient().when(triggerReceiptRepo.saveAllAndFlush(any())).thenAnswer(
                 invocation -> invocation.getArgument(0));
+        lenient().when(qualityStateRepo.findById(any())).thenAnswer(
+                invocation -> Optional.ofNullable(qualityState));
+        lenient().when(qualityStateRepo.saveAndFlush(any())).thenAnswer(invocation -> {
+            qualityState = invocation.getArgument(0);
+            return qualityState;
+        });
         lenient().when(readinessRepo.saveAllAndFlush(any())).thenAnswer(invocation -> {
             List<AssetReadiness> updates = invocation.getArgument(0);
             for (AssetReadiness update : updates) {
@@ -140,7 +152,9 @@ class PipelineSyncRefTriggerHandlerTest {
         assertThat(handler.eventTypes())
                 .isEqualTo(Set.of(
                         DomainEvents.INTEGRATION_TABLE_LOADED,
-                        DomainEvents.PIPELINE_TASK_LOADED));
+                        DomainEvents.PIPELINE_TASK_LOADED,
+                        DomainEvents.QUALITY_CHECK_COMPLETED,
+                        DomainEvents.QUALITY_CHECK_FAILED));
     }
 
     @Test
@@ -158,6 +172,83 @@ class PipelineSyncRefTriggerHandlerTest {
         // 触发期间会设置租户上下文，触发后必须恢复为空。
         assertThat(TenantContext.getTenantId()).isNull();
         verify(legacySyncRunHandler).handle(any(OutboxEvent.class));
+    }
+
+    @Test
+    void qualityPassBeforeUpdateTriggersConditionedSubscription() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        String assetFqn = "iceberg.dwd.orders";
+        String runId = UUID.randomUUID().toString();
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(
+                dag, List.of(sparkTask(tenantId, dagId, "consume_orders")), List.of());
+        PipelineSubscription subscription = subscription(
+                tenantId, dagId, "ASSET", assetFqn);
+        subscription.setCondition("ON_UPDATE_AND_QUALITY_PASS");
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", assetFqn)).thenReturn(List.of(subscription));
+
+        handler.handle(qualityEvent(
+                DomainEvents.QUALITY_CHECK_COMPLETED, tenantId, assetFqn, runId, true));
+        handler.handle(tableLoadedEventWithRunId(tenantId, assetFqn, runId));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
+    }
+
+    @Test
+    void qualityFailureSuppressesConditionedSubscription() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        String assetFqn = "iceberg.dwd.orders";
+        String runId = UUID.randomUUID().toString();
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        stubPublishedPipeline(
+                dag, List.of(sparkTask(tenantId, dagId, "consume_orders")), List.of());
+        PipelineSubscription subscription = subscription(
+                tenantId, dagId, "ASSET", assetFqn);
+        subscription.setCondition("ON_UPDATE_AND_QUALITY_PASS");
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", assetFqn)).thenReturn(List.of(subscription));
+
+        handler.handle(qualityEvent(
+                DomainEvents.QUALITY_CHECK_FAILED, tenantId, assetFqn, runId, true));
+        handler.handle(tableLoadedEventWithRunId(tenantId, assetFqn, runId));
+
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any(), anyString());
+    }
+
+    @Test
+    void updateBeforeQualityPassWaitsThenTriggersConditionedSubscription() {
+        UUID tenantId = UUID.randomUUID();
+        UUID dagId = UUID.randomUUID();
+        String assetFqn = "iceberg.dwd.orders";
+        String runId = UUID.randomUUID().toString();
+        Dag dag = pipelineDag(tenantId, dagId, "PUBLISHED", true);
+        UUID versionId = stubPublishedPipeline(
+                dag, List.of(sparkTask(tenantId, dagId, "consume_orders")), List.of());
+        PipelineSubscription subscription = subscription(
+                tenantId, dagId, "ASSET", assetFqn);
+        subscription.setCondition("ON_UPDATE_AND_QUALITY_PASS");
+        when(subscriptionRepo.findByTenantIdAndSourceTypeAndSourceRefAndEnabledTrue(
+                tenantId, "ASSET", assetFqn)).thenReturn(List.of(subscription));
+
+        handler.handle(tableLoadedEventWithRunId(tenantId, assetFqn, runId));
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any(), anyString());
+
+        handler.handle(qualityEvent(
+                DomainEvents.QUALITY_CHECK_COMPLETED, tenantId, assetFqn, runId, false));
+        verify(orchestrationService, never()).triggerPipelineRun(
+                any(), any(), any(RunContext.class), any(), anyString());
+
+        handler.handle(qualityEvent(
+                DomainEvents.QUALITY_CHECK_COMPLETED, tenantId, assetFqn, runId, true));
+
+        verify(orchestrationService).triggerPipelineRun(
+                eq(dagId), eq(TriggerType.EVENT), any(RunContext.class), eq(versionId), anyString());
     }
 
     @Test
@@ -548,6 +639,7 @@ class PipelineSyncRefTriggerHandlerTest {
                 dagRepo,
                 subscriptionRepo,
                 readinessRepo,
+                qualityStateRepo,
                 triggerReceiptRepo,
                 schedulerLockRepo,
                 pipelineSnapshotService,
@@ -738,6 +830,47 @@ class PipelineSyncRefTriggerHandlerTest {
         e.setEventType(DomainEvents.INTEGRATION_TABLE_LOADED);
         e.setOccurredAt(Instant.now());
         return e;
+    }
+
+    private OutboxEvent tableLoadedEventWithRunId(UUID tenantId,
+                                                  String targetTable,
+                                                  String runId) {
+        OutboxEvent event = new OutboxEvent();
+        event.setId(UUID.randomUUID());
+        try {
+            event.setPayload(new ObjectMapper().writeValueAsString(Map.of(
+                    "tenantId", tenantId.toString(),
+                    "targetTable", targetTable,
+                    "runId", runId,
+                    "status", "SUCCEEDED")));
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+        event.setEventType(DomainEvents.INTEGRATION_TABLE_LOADED);
+        event.setOccurredAt(Instant.now());
+        return event;
+    }
+
+    private OutboxEvent qualityEvent(String eventType,
+                                     UUID tenantId,
+                                     String targetFqn,
+                                     String runId,
+                                     boolean assetQualityFinal) {
+        OutboxEvent event = new OutboxEvent();
+        event.setId(UUID.randomUUID());
+        try {
+            event.setPayload(new ObjectMapper().writeValueAsString(Map.of(
+                    "tenantId", tenantId.toString(),
+                    "targetFqn", targetFqn,
+                    "runId", runId,
+                    "assetQualityFinal", assetQualityFinal,
+                    "passed", DomainEvents.QUALITY_CHECK_COMPLETED.equals(eventType))));
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+        event.setEventType(eventType);
+        event.setOccurredAt(Instant.now());
+        return event;
     }
 
     private OutboxEvent pipelineTaskLoadedEvent(UUID tenantId,

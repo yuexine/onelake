@@ -92,8 +92,74 @@ class DwdModelQualityEventHandlerTest {
             assertThat(result.getFailedRows()).isZero();
         });
         verify(alertRepo, never()).save(any());
-        verify(outboxPublisher, org.mockito.Mockito.times(3))
-            .publish(eq(DomainEvents.QUALITY_CHECK_COMPLETED), anyString(), any(Map.class));
+        ArgumentCaptor<Map<String, Object>> qualityPayloadCaptor = ArgumentCaptor.forClass(Map.class);
+        ArgumentCaptor<String> aggregateIdCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxPublisher, org.mockito.Mockito.times(4))
+            .publish(eq(DomainEvents.QUALITY_CHECK_COMPLETED), aggregateIdCaptor.capture(),
+                qualityPayloadCaptor.capture());
+        assertThat(qualityPayloadCaptor.getAllValues()).allSatisfy(
+            payload -> assertThat(payload).containsEntry("runId", RUN_ID.toString()));
+        assertThat(qualityPayloadCaptor.getAllValues())
+            .filteredOn(payload -> Boolean.TRUE.equals(payload.get("assetQualityFinal")))
+            .singleElement()
+            .satisfies(payload -> assertThat(payload)
+                .containsEntry("ruleType", "ASSET_AGGREGATE")
+                .containsEntry("passed", true)
+                .containsEntry("passRate", new java.math.BigDecimal("100.00")));
+        int aggregateIndex = qualityPayloadCaptor.getAllValues().stream()
+            .map(payload -> Boolean.TRUE.equals(payload.get("assetQualityFinal")))
+            .toList().indexOf(true);
+        assertThat(aggregateIdCaptor.getAllValues().get(aggregateIndex))
+            .isEqualTo(RUN_ID.toString())
+            .hasSizeLessThanOrEqualTo(128);
+    }
+
+    @Test
+    void publishesFailedAssetAggregateWhenAnyRuleFails() {
+        handler.handle(event(DomainEvents.MODELING_MODEL_LOADED, Map.of(
+            "tenantId", TENANT_ID.toString(),
+            "runId", RUN_ID.toString(),
+            "status", "SUCCEEDED",
+            "targetFqn", "dwd.dwd_trade_orders_df",
+            "qualityChecks", List.of(
+                Map.of("uniqueId", "test.failed", "name", "not_null_order_id",
+                    "status", "fail", "failures", 2),
+                Map.of("uniqueId", "test.passed", "name", "unique_order_id",
+                    "status", "pass", "failures", 0)
+            )
+        )));
+
+        ArgumentCaptor<Map<String, Object>> failedPayloads = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher, org.mockito.Mockito.times(2))
+            .publish(eq(DomainEvents.QUALITY_CHECK_FAILED), anyString(), failedPayloads.capture());
+        assertThat(failedPayloads.getAllValues())
+            .filteredOn(payload -> Boolean.TRUE.equals(payload.get("assetQualityFinal")))
+            .singleElement()
+            .satisfies(payload -> assertThat(payload)
+                .containsEntry("passed", false)
+                .containsEntry("passRate", java.math.BigDecimal.ZERO)
+                .containsEntry("failedRows", 2L));
+    }
+
+    @Test
+    void boundsAggregateIdWhenRunIdIsMissingAndFqnIsLong() {
+        String longFqn = "catalog.schema." + "asset_name_".repeat(30);
+        handler.handle(event(DomainEvents.MODELING_MODEL_LOADED, Map.of(
+            "tenantId", TENANT_ID.toString(),
+            "status", "SUCCEEDED",
+            "targetFqn", longFqn
+        )));
+
+        ArgumentCaptor<String> aggregateIds = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, Object>> payloads = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher, org.mockito.Mockito.times(2))
+            .publish(eq(DomainEvents.QUALITY_CHECK_COMPLETED), aggregateIds.capture(), payloads.capture());
+        int finalIndex = payloads.getAllValues().stream()
+            .map(payload -> Boolean.TRUE.equals(payload.get("assetQualityFinal")))
+            .toList().indexOf(true);
+        assertThat(aggregateIds.getAllValues().get(finalIndex))
+            .hasSizeLessThanOrEqualTo(128)
+            .isNotEqualTo(longFqn);
     }
 
     @Test
@@ -118,7 +184,8 @@ class DwdModelQualityEventHandlerTest {
         assertThat(alertCaptor.getValue().getLevel()).isEqualTo("CRITICAL");
         assertThat(alertCaptor.getValue().getMessage()).contains("DWD 质量门禁未通过", "dbt test failed");
 
-        verify(outboxPublisher).publish(eq(DomainEvents.QUALITY_CHECK_FAILED), anyString(), any(Map.class));
+        verify(outboxPublisher, org.mockito.Mockito.times(2))
+            .publish(eq(DomainEvents.QUALITY_CHECK_FAILED), anyString(), any(Map.class));
     }
 
     @Test

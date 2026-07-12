@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -76,6 +77,7 @@ public class DwdModelQualityEventHandler implements DomainEventHandler {
                 }
                 publishQualityEvent(rule, result);
             }
+            publishAggregateQualityEvent(tenantId, targetFqn, runId, checks);
             log.info("DwdModelQualityEventHandler: recorded {} quality result(s) for {}", checks.size(), targetFqn);
         } catch (Exception e) {
             log.error("DwdModelQualityEventHandler failed for event {}: {}", event.getId(), e.getMessage(), e);
@@ -174,9 +176,45 @@ public class DwdModelQualityEventHandler implements DomainEventHandler {
         payload.put("passed", result.getPassed());
         payload.put("passRate", result.getPassRate());
         payload.put("failedRows", result.getFailedRows());
+        payload.put("assetQualityFinal", false);
+        if (result.getJobRunId() != null) {
+            // 与 pipeline.task.loaded.runId 对齐，供编排 E3 在乱序事件中识别同一次资产更新。
+            payload.put("runId", result.getJobRunId().toString());
+        }
         outboxPublisher.publish(Boolean.TRUE.equals(result.getPassed())
             ? DomainEvents.QUALITY_CHECK_COMPLETED
             : DomainEvents.QUALITY_CHECK_FAILED, rule.getId().toString(), payload);
+    }
+
+    private void publishAggregateQualityEvent(UUID tenantId,
+                                              String targetFqn,
+                                              UUID runId,
+                                              List<CheckOutcome> checks) {
+        boolean passed = checks.stream().allMatch(CheckOutcome::passed);
+        long failedRows = checks.stream().mapToLong(CheckOutcome::failedRows).sum();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("tenantId", tenantId.toString());
+        payload.put("targetFqn", targetFqn);
+        payload.put("ruleType", "ASSET_AGGREGATE");
+        payload.put("passed", passed);
+        payload.put("passRate", passed ? new BigDecimal("100.00") : BigDecimal.ZERO);
+        payload.put("failedRows", failedRows);
+        payload.put("assetQualityFinal", true);
+        if (runId != null) {
+            payload.put("runId", runId.toString());
+        }
+        outboxPublisher.publish(passed
+            ? DomainEvents.QUALITY_CHECK_COMPLETED
+            : DomainEvents.QUALITY_CHECK_FAILED,
+            aggregateQualityEventId(tenantId, targetFqn, runId), payload);
+    }
+
+    private String aggregateQualityEventId(UUID tenantId, String targetFqn, UUID runId) {
+        if (runId != null) {
+            return runId.toString();
+        }
+        return UUID.nameUUIDFromBytes(
+            (tenantId + "|" + targetFqn).getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     private List<Map<String, Object>> sampleOf(JsonNode payload, CheckOutcome check) {

@@ -69,6 +69,19 @@ class QualityCheckEventHandlerTest {
     }
 
     @Test
+    void ignoresRuleLevelNonFinalQualityEvent() {
+        handler.handle(event(DomainEvents.QUALITY_CHECK_COMPLETED, Map.of(
+            "tenantId", TENANT_ID.toString(),
+            "targetFqn", "ods.customers",
+            "passRate", "100.00",
+            "assetQualityFinal", false
+        )));
+
+        verify(assetRepo, never()).findByTenantIdAndOmFqn(any(), any());
+        verify(assetRepo, never()).save(any());
+    }
+
+    @Test
     void skipsInvalidPayload() {
         handler.handle(event(DomainEvents.QUALITY_CHECK_FAILED, Map.of(
             "tenantId", TENANT_ID.toString(),

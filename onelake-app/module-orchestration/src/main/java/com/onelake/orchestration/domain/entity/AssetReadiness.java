@@ -30,7 +30,7 @@ public class AssetReadiness {
     @Column(nullable = false, length = 128)
     private String taskKey;
 
-    @Column(nullable = false, length = 256)
+    @Column(nullable = false, length = 512)
     private String assetFqn;
 
     @Column(length = 128)

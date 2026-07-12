@@ -32,6 +32,7 @@ public class PipelineRunRetryService {
 
     private static final List<DagStatus> ACTIVE_RUN_STATUSES =
             List.of(DagStatus.QUEUED, DagStatus.RUNNING);
+    private static final int ACTIVE_SCAN_BATCH_SIZE = 100;
     private static final int RETRY_SCAN_BATCH_SIZE = 100;
 
     private final JobRunRepository runRepo;
@@ -46,10 +47,10 @@ public class PipelineRunRetryService {
                 PageRequest.of(0, RETRY_SCAN_BATCH_SIZE));
     }
 
-    /** 返回需要后台主动同步 Dagster 终态的运行。 */
+    /** 返回全部需要后台主动同步 Dagster 终态的运行。 */
     @Transactional(readOnly = true)
-    public List<UUID> retryWatchRunIds() {
-        return runRepo.findRetryWatchRunIds(ACTIVE_RUN_STATUSES);
+    public List<UUID> activeRunIds() {
+        return runRepo.findActiveDagsterRunIds(PageRequest.of(0, ACTIVE_SCAN_BATCH_SIZE));
     }
 
     /**

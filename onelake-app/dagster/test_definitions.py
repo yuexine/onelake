@@ -465,6 +465,22 @@ def test_native_pipeline_jobs_reuse_same_task_op_definition_across_pipelines():
         definitions._NATIVE_TASK_OPS.update(original_ops)
 
 
+def test_native_task_op_cache_expands_when_fan_in_grows():
+    original_ops = dict(definitions._NATIVE_TASK_OPS)
+    definitions._NATIVE_TASK_OPS.clear()
+    try:
+        narrow = definitions._make_native_task_op("shared_fan_in", 1)
+        wide = definitions._make_native_task_op("shared_fan_in", 3)
+        reused = definitions._make_native_task_op("shared_fan_in", 2)
+
+        assert len(narrow.input_defs) == 1
+        assert len(wide.input_defs) == 3
+        assert reused is wide
+    finally:
+        definitions._NATIVE_TASK_OPS.clear()
+        definitions._NATIVE_TASK_OPS.update(original_ops)
+
+
 def test_native_node_forwards_termination_to_spark_process_group(monkeypatch):
     callbacks = _install_callback_collector(monkeypatch)
     killed = []
@@ -560,6 +576,39 @@ def test_graph_linear_order_and_sync_ref(monkeypatch):
     events = [(key, payload["status"]) for key, payload in callbacks]
     assert events.index(("sync", "SUCCEEDED")) < events.index(("spark_a", "RUNNING"))
     assert events.index(("spark_a", "SUCCEEDED")) < events.index(("spark_b", "RUNNING"))
+
+
+@pytest.mark.parametrize("task_type", [
+    "TRINO_SQL", "PYTHON", "SHELL", "BRANCH", "CONDITION", "SENSOR", "WAIT",
+    "SUB_PIPELINE", "NOTIFY", "ASSERTION",
+])
+def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, task_type):
+    def fail_if_called(*args):
+        raise AssertionError("extension dispatch must not invoke spark-submit")
+
+    monkeypatch.setattr(definitions, "_build_spark_submit", fail_if_called)
+
+    with pytest.raises(NotImplementedError, match=f"{task_type} graph dispatcher"):
+        definitions._dispatch_graph_node_command(
+            _node("extension", task_type), "onelake", "local[2]",
+        )
+
+
+@pytest.mark.parametrize("task_type", ["SPARK_SQL", "PYSPARK", "QUALITY_GATE"])
+def test_graph_existing_spark_backed_types_keep_submit_dispatch(monkeypatch, task_type):
+    calls = []
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda *args: calls.append(args) or (["spark-submit"], []),
+    )
+
+    command = definitions._dispatch_graph_node_command(
+        _node("existing", task_type), "onelake", "local[2]",
+    )
+
+    assert command == (["spark-submit"], [])
+    assert len(calls) == 1
 
 
 def test_graph_failure_short_circuits_downstream(monkeypatch):

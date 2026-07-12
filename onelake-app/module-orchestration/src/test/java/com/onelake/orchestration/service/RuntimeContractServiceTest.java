@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
 /**
- * 运行契约测试：统一流水线只暴露 Spark 作为可运行引擎。
+ * 运行契约测试：按 M4 能力矩阵区分 Spark、Trino 与受限脚本引擎。
  */
 @ExtendWith(MockitoExtension.class)
 class RuntimeContractServiceTest {
@@ -24,21 +24,25 @@ class RuntimeContractServiceTest {
     private DagsterClient dagster;
 
     @Test
-    void listRuntimeContractsMarksSparkReady() {
+    void listRuntimeContractsReflectsEngineCapabilityMatrix() {
         RuntimeContractService service = new RuntimeContractService(dagster);
         when(dagster.listJobs("onelake", "onelake-loc"))
             .thenReturn(List.of("onelake_pipeline_run", "onelake_pipeline_graph_run"));
 
         List<RuntimeContractDTO> result = service.listRuntimeContracts();
 
-        assertThat(result).extracting(RuntimeContractDTO::dagsterJob)
-            .containsExactly("onelake_pipeline_run", "onelake_pipeline_graph_run");
-
-        assertThat(result).allSatisfy(c -> {
-                assertThat(c.status()).isEqualTo("READY");
-                assertThat(c.compileTarget()).isEqualTo("SPARK");
-                assertThat(c.graphExecutionSupported()).isTrue();
-            });
+        assertThat(result).hasSize(4);
+        assertThat(result).filteredOn(c -> "SPARK".equals(c.engine()))
+                .allSatisfy(c -> assertThat(c.status()).isEqualTo("READY"));
+        assertThat(result).filteredOn(c -> "TRINO".equals(c.engine()))
+                .singleElement()
+                .satisfies(c -> assertThat(c.status()).isEqualTo("READY"));
+        assertThat(result).filteredOn(c -> "SCRIPT".equals(c.engine()))
+                .singleElement()
+                .satisfies(c -> {
+                    assertThat(c.status()).isEqualTo("RESTRICTED");
+                    assertThat(c.blockedReason()).contains("隔离沙箱");
+                });
     }
 
     @Test
@@ -62,25 +66,35 @@ class RuntimeContractServiceTest {
     }
 
     @Test
-    void triggerBlockedReasonRejectsNonSparkOnPipelineJob() {
+    void triggerBlockedReasonRejectsUnknownEngineOnPipelineJob() {
         RuntimeContractService service = new RuntimeContractService(dagster);
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_run",
             Map.of("compileTarget", "LEGACY", "engine", "LEGACY"));
 
         assertThat(reason).isPresent();
-        assertThat(reason.get()).contains("Spark");
+        assertThat(reason.get()).contains("未在运行契约中注册");
     }
 
     @Test
-    void triggerBlockedReasonRejectsNonSparkOnGraphPipelineJob() {
+    void triggerBlockedReasonAllowsTrinoOnGraphPipelineJob() {
         RuntimeContractService service = new RuntimeContractService(dagster);
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
-            Map.of("compileTarget", "LEGACY", "engine", "LEGACY"));
+            Map.of("compileTarget", "TRINO_SQL"));
+
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
+    void triggerBlockedReasonKeepsScriptEngineRestricted() {
+        RuntimeContractService service = new RuntimeContractService(dagster);
+
+        Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
+            Map.of("engine", "PYTHON"));
 
         assertThat(reason).isPresent();
-        assertThat(reason.get()).contains("Spark");
+        assertThat(reason.get()).contains("受限").contains("隔离沙箱");
     }
 
     @Test

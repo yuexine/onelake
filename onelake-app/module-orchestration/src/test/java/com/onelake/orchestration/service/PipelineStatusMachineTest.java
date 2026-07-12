@@ -291,6 +291,29 @@ class PipelineStatusMachineTest {
     }
 
     @Test
+    void createsTrinoExtensionTaskWithServerOwnedCategoryAndEngine() {
+        Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "trino_orders")).thenReturn(Optional.empty());
+        when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> {
+            PipelineTask task = inv.getArgument(0);
+            task.setId(UUID.randomUUID());
+            return task;
+        });
+
+        var created = service.createTask(dagId, new PipelineTaskRequest(
+                "trino_orders", "TRINO_SQL", "Trino orders", null, null,
+                null, null, java.util.Map.of("sql", "SELECT 1"), null, null));
+
+        assertThat(created.taskType())
+                .isEqualTo(com.onelake.orchestration.domain.enums.TaskType.TRINO_SQL);
+        assertThat(created.category())
+                .isEqualTo(com.onelake.orchestration.domain.enums.TaskCategory.EXEC);
+        assertThat(created.engine()).isEqualTo("TRINO");
+        verify(dagRepo).markPublishedDagChanged(dagId, tenantId);
+    }
+
+    @Test
     void editingPublishedTaskAlwaysSerializesWithPublishEvenWhenAlreadyMarked() {
         Dag dag = dag("PUBLISHED");
         dag.setHasUnpublishedChanges(true);

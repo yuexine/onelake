@@ -2,6 +2,7 @@ package com.onelake.orchestration.dto;
 
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.enums.TaskCompileStatus;
+import com.onelake.orchestration.domain.enums.TaskCategory;
 import com.onelake.orchestration.domain.enums.TaskType;
 
 import java.time.Instant;
@@ -15,6 +16,9 @@ import java.util.UUID;
  * @param dagId 所属流水线
  * @param taskKey 流水线内稳定节点键，也是 GRAPH 模式的 Dagster step key
  * @param taskType 节点类型
+ * @param category 节点执行语义分类
+ * @param operatorRef 算子市场稳定引用
+ * @param operatorVersion 锁定的算子版本
  * @param name 展示名称
  * @param engine 执行引擎
  * @param targetFqn 输出表全限定名
@@ -34,6 +38,9 @@ public record PipelineTaskDTO(
         UUID dagId,
         String taskKey,
         TaskType taskType,
+        TaskCategory category,
+        String operatorRef,
+        String operatorVersion,
         String name,
         String engine,
         String targetFqn,
@@ -59,6 +66,9 @@ public record PipelineTaskDTO(
                 t.getDagId(),
                 t.getTaskKey(),
                 t.getTaskType(),
+                t.getCategory(),
+                t.getOperatorRef(),
+                t.getOperatorVersion(),
                 t.getName(),
                 t.getEngine(),
                 t.getTargetFqn(),

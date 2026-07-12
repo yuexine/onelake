@@ -7,6 +7,7 @@ import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskCompileStatus;
+import com.onelake.orchestration.domain.enums.TaskCategory;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.repository.DagRepository;
@@ -229,6 +230,44 @@ class PipelineCompileServiceTest {
     }
 
     @Test
+    void extensionTaskTypesPassBaselineValidationAndReceiveServerCategory() {
+        List<PipelineTask> tasks = List.of(
+                extensionTask("trino", TaskType.TRINO_SQL),
+                extensionTask("python", TaskType.PYTHON),
+                extensionTask("shell", TaskType.SHELL),
+                extensionTask("branch", TaskType.BRANCH),
+                extensionTask("condition", TaskType.CONDITION),
+                extensionTask("sensor", TaskType.SENSOR),
+                extensionTask("wait", TaskType.WAIT),
+                extensionTask("sub_pipeline", TaskType.SUB_PIPELINE),
+                extensionTask("notify", TaskType.NOTIFY),
+                extensionTask("assertion", TaskType.ASSERTION));
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, tasks, List.of());
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(tasks).allSatisfy(task -> {
+            assertThat(task.getCompileStatus()).isEqualTo(TaskCompileStatus.VALIDATED);
+            assertThat(task.getCategory()).isEqualTo(task.getTaskType().category());
+            assertThat(task.getExecutable()).isEqualTo(task.getCategory() == TaskCategory.EXEC);
+        });
+        assertThat(TaskType.BRANCH.category()).isEqualTo(TaskCategory.CONTROL);
+        assertThat(TaskType.SENSOR.category()).isEqualTo(TaskCategory.OBSERVE);
+        assertThat(TaskType.QUALITY_GATE.category()).isEqualTo(TaskCategory.EXEC);
+    }
+
+    @Test
+    void extensionTaskRequiresNonEmptyObjectConfig() {
+        PipelineTask task = extensionTask("trino", TaskType.TRINO_SQL);
+        task.setConfig("{}");
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage()).contains("non-empty config");
+    }
+
+    @Test
     void rejectsWhenPipelineNotFound() {
         when(dagRepo.findByIdAndTenantId(any(), any())).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.compile(dagId))
@@ -333,6 +372,19 @@ class PipelineCompileServiceTest {
         t.setConfig("{\"sql\":\"select * from source\"}");
         t.setTargetFqn(targetFqn);
         return t;
+    }
+
+    private PipelineTask extensionTask(String key, TaskType type) {
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey(key);
+        task.setTaskType(type);
+        task.setName(key);
+        task.setEngine(type.name());
+        task.setConfig("{\"enabled\":true}");
+        return task;
     }
 
     private PipelineTaskEdge edge(String src, String tgt, EdgeLayer layer) {

@@ -2115,7 +2115,8 @@ public class OrchestrationService {
         }
         return switch (task.getTaskType()) {
             case SPARK_SQL, PYSPARK, QUALITY_GATE -> true;
-            case SYNC_REF -> false;
+            case SYNC_REF, TRINO_SQL, PYTHON, SHELL, BRANCH, CONDITION, SENSOR, WAIT,
+                    SUB_PIPELINE, NOTIFY, ASSERTION -> false;
         };
     }
 

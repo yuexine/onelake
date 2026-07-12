@@ -13,6 +13,11 @@ from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothin
 
 
 _TASK_OUTPUTS_MARKER = "ONELAKE_OUTPUTS_JSON="
+_SPARK_SUBMIT_TASK_TYPES = frozenset({"SPARK_SQL", "PYSPARK"})
+_EXTENSION_DISPATCH_STUB_TYPES = frozenset({
+    "TRINO_SQL", "PYTHON", "SHELL", "BRANCH", "CONDITION", "SENSOR", "WAIT",
+    "SUB_PIPELINE", "NOTIFY", "ASSERTION",
+})
 
 @op(
     name="reconcile_sync_task_schedule",
@@ -150,6 +155,21 @@ spark.stop()
     ]
     cmd.extend(app_args)
     return cmd, temp_paths
+
+
+def _dispatch_graph_node_command(node, iceberg_catalog, spark_master):
+    """Resolve a graph node to its M4 execution adapter without weakening old behavior."""
+    task_type = node["task_type"]
+    if task_type in _SPARK_SUBMIT_TASK_TYPES:
+        return _build_spark_submit(node, iceberg_catalog, spark_master)
+    if task_type == "QUALITY_GATE":
+        # QUALITY_GATE was Spark-backed before M4 and remains so for rollback compatibility.
+        return _build_spark_submit(node, iceberg_catalog, spark_master)
+    if task_type in _EXTENSION_DISPATCH_STUB_TYPES:
+        raise NotImplementedError(
+            f"{task_type} graph dispatcher is reserved for a later M4 implementation step"
+        )
+    raise ValueError(f"unsupported pipeline task_type: {task_type}")
 
 
 def _extract_task_outputs(stdout):
@@ -844,7 +864,11 @@ def _execute_native_graph_node(context):
 
 def _make_native_task_op(task_key, upstream_count):
     cached = _NATIVE_TASK_OPS.get(task_key)
-    if cached is not None:
+    # A repository reload can observe the same business taskKey with a wider fan-in
+    # than a previous load. Reuse is safe only when the cached op already exposes
+    # enough Nothing inputs; otherwise rebuild and replace it before constructing
+    # the new repository snapshot.
+    if cached is not None and len(cached.input_defs) >= upstream_count:
         return cached
     inputs = {f"upstream_{index}": In(Nothing) for index in range(upstream_count)}
 
@@ -1173,7 +1197,9 @@ def run_pipeline_graph_op(context):
             temp_paths = []
             process = None
             try:
-                cmd, temp_paths = _build_spark_submit(node, iceberg_catalog, spark_master)
+                cmd, temp_paths = _dispatch_graph_node_command(
+                    node, iceberg_catalog, spark_master,
+                )
                 context.log.info(
                     "[%s] attempt %s (local %s/%s) spark-submit cmd: %s",
                     task_key,

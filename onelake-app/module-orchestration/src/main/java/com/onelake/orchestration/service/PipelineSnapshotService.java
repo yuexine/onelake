@@ -26,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -288,6 +289,9 @@ public class PipelineSnapshotService {
         put(node, "dagId", task.getDagId());
         put(node, "taskKey", task.getTaskKey());
         put(node, "taskType", task.getTaskType() == null ? null : task.getTaskType().name());
+        put(node, "category", task.getCategory() == null ? null : task.getCategory().name());
+        put(node, "operatorRef", task.getOperatorRef());
+        put(node, "operatorVersion", task.getOperatorVersion());
         put(node, "name", task.getName());
         put(node, "engine", task.getEngine());
         put(node, "targetFqn", task.getTargetFqn());
@@ -401,6 +405,12 @@ public class PipelineSnapshotService {
             task.setDagId(version.getDagId());
             task.setTaskKey(text(node, "taskKey"));
             task.setTaskType(TaskType.valueOf(text(node, "taskType")));
+            String category = text(node, "category");
+            task.setCategory(StringUtils.hasText(category)
+                    ? com.onelake.orchestration.domain.enums.TaskCategory.valueOf(category)
+                    : task.getTaskType().category());
+            task.setOperatorRef(text(node, "operatorRef"));
+            task.setOperatorVersion(text(node, "operatorVersion"));
             task.setName(text(node, "name"));
             task.setEngine(text(node, "engine"));
             task.setTargetFqn(text(node, "targetFqn"));

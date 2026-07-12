@@ -26,14 +26,18 @@ public class RuntimeContractService {
 
     private static final String REPOSITORY = "onelake";
     private static final String LOCATION = "onelake-loc";
-    private static final Set<String> PIPELINE_JOBS = Set.of("onelake_pipeline_run", "onelake_pipeline_graph_run");
     private static final String PIPELINE_GRAPH_JOB_PREFIX = "onelake_pipeline_graph_";
 
     private static final List<RuntimeSpec> SPECS = List.of(
         new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_run", true, true,
-            "SPARK 已接入 Dagster onelake_pipeline_run / run_spark_task_op"),
+            CapabilityState.READY, null),
         new RuntimeSpec("SPARK", "SPARK", "onelake_pipeline_graph_run", true, true,
-            "SPARK 已接入 Dagster onelake_pipeline_graph_run / run_pipeline_graph_op")
+            CapabilityState.READY, null),
+        new RuntimeSpec("TRINO", "TRINO", "onelake_pipeline_graph_run", true, true,
+            CapabilityState.READY, null),
+        new RuntimeSpec("SCRIPT", "SCRIPT", "onelake_pipeline_graph_run", true, false,
+            CapabilityState.RESTRICTED,
+            "脚本执行受限：目标环境必须显式启用满足 ADR-001 的隔离沙箱")
     );
 
     private final DagsterClient dagster;
@@ -51,21 +55,16 @@ public class RuntimeContractService {
      */
     public Optional<String> triggerBlockedReason(String dagsterJob, Map<String, Object> definition) {
         Map<String, Object> safeDefinition = definition == null ? Map.of() : definition;
-        String requestedTarget = normalizeTarget(firstText(
-                text(safeDefinition.get("compileTarget")), text(safeDefinition.get("engine"))));
-        if (StringUtils.hasText(requestedTarget)
-                && !"SPARK".equals(requestedTarget)
-                && isPipelineJob(dagsterJob)) {
-            return Optional.of("流水线运行时已收敛为 Spark 引擎，不再支持 " + requestedTarget);
-        }
         RuntimeSpec spec = specFor(dagsterJob, safeDefinition).orElse(null);
         if (spec == null) {
             return Optional.of("Dagster 作业未在运行契约中注册: " + dagsterJob);
         }
-        if (spec.graphExecutionSupported()) {
-            return Optional.empty();
+        if (spec.state() != CapabilityState.READY) {
+            return Optional.of(spec.blockedReason());
         }
-        return Optional.of(spec.blockedReason());
+        return spec.graphExecutionSupported()
+                ? Optional.empty()
+                : Optional.of(spec.blockedReason());
     }
 
     /**
@@ -94,8 +93,8 @@ public class RuntimeContractService {
     private RuntimeContractDTO toDTO(RuntimeSpec spec, boolean dagsterJobAvailable) {
         String status;
         String blockedReason = null;
-        if (!spec.graphExecutionSupported()) {
-            status = "CONTRACT_ONLY";
+        if (spec.state() != CapabilityState.READY) {
+            status = spec.state().name();
             blockedReason = spec.blockedReason();
         } else if (dagsterJobAvailable) {
             status = "READY";
@@ -116,16 +115,6 @@ public class RuntimeContractService {
     }
 
     private Optional<RuntimeSpec> specFor(String dagsterJob, Map<String, Object> definition) {
-        // 触发前校验必须优先尊重调用方实际选择的 Dagster job；compileTarget 只作为旧数据的兜底推断。
-        Optional<RuntimeSpec> byJob = SPECS.stream()
-            .filter(spec -> spec.dagsterJob().equals(dagsterJob))
-            .findFirst();
-        if (byJob.isPresent()) {
-            return byJob;
-        }
-        if (dagsterJob != null && dagsterJob.startsWith(PIPELINE_GRAPH_JOB_PREFIX)) {
-            return SPECS.stream().filter(spec -> "onelake_pipeline_graph_run".equals(spec.dagsterJob())).findFirst();
-        }
         String compileTarget = firstText(text(definition.get("compileTarget")), text(definition.get("engine")));
         if (!StringUtils.hasText(compileTarget) && definition.get("operatorGraph") instanceof Map<?, ?> rawGraph) {
             compileTarget = firstText(text(rawGraph.get("compileTarget")), text(rawGraph.get("engine")));
@@ -134,17 +123,25 @@ public class RuntimeContractService {
         if (StringUtils.hasText(normalizedTarget)) {
             Optional<RuntimeSpec> byTarget = SPECS.stream()
                 .filter(spec -> spec.compileTarget().equals(normalizedTarget) || spec.engine().equals(normalizedTarget))
+                .filter(spec -> supportsJob(spec, dagsterJob))
                 .findFirst();
             if (byTarget.isPresent()) {
                 return byTarget;
             }
+            return Optional.empty();
         }
-        return Optional.empty();
+        // 旧定义未声明 compileTarget 时，继续按实际 Dagster job 回退到 Spark 契约。
+        return SPECS.stream()
+                .filter(spec -> "SPARK".equals(spec.engine()))
+                .filter(spec -> supportsJob(spec, dagsterJob))
+                .findFirst();
     }
 
-    private boolean isPipelineJob(String dagsterJob) {
-        return PIPELINE_JOBS.contains(dagsterJob)
-                || (dagsterJob != null && dagsterJob.startsWith(PIPELINE_GRAPH_JOB_PREFIX));
+    private boolean supportsJob(RuntimeSpec spec, String dagsterJob) {
+        return spec.dagsterJob().equals(dagsterJob)
+                || (dagsterJob != null
+                && dagsterJob.startsWith(PIPELINE_GRAPH_JOB_PREFIX)
+                && "onelake_pipeline_graph_run".equals(spec.dagsterJob()));
     }
 
     private String normalizeTarget(String value) {
@@ -154,6 +151,12 @@ public class RuntimeContractService {
         String normalized = value.trim().toUpperCase(Locale.ROOT);
         if ("SPARK_SQL".equals(normalized) || "PYSPARK".equals(normalized)) {
             return "SPARK";
+        }
+        if ("TRINO_SQL".equals(normalized)) {
+            return "TRINO";
+        }
+        if ("PYTHON".equals(normalized) || "SHELL".equals(normalized)) {
+            return "SCRIPT";
         }
         return normalized;
     }
@@ -173,7 +176,13 @@ public class RuntimeContractService {
         String dagsterJob,
         boolean manifestSupported,
         boolean graphExecutionSupported,
+        CapabilityState state,
         String blockedReason
     ) {
+    }
+
+    private enum CapabilityState {
+        READY,
+        RESTRICTED
     }
 }

@@ -7,6 +7,7 @@ import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
+import com.onelake.orchestration.domain.enums.TaskCategory;
 import com.onelake.orchestration.domain.enums.TaskCompileStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -138,11 +139,31 @@ public class PipelineCompileService {
     /** 按节点类型分派最小运行契约校验。 */
     private TaskCompileResult validateTask(PipelineTask t, UUID tenantId) {
         TaskType type = t.getTaskType();
+        t.setCategory(type.category());
         return switch (type) {
             case QUALITY_GATE -> validateQualityGate(t);
             case SYNC_REF -> validateSyncRef(t);
             case SPARK_SQL, PYSPARK -> validateSparkTask(t);
+            case TRINO_SQL, PYTHON, SHELL, BRANCH, CONDITION, SENSOR, WAIT,
+                    SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
         };
+    }
+
+    /** M4 后续步骤会补充类型专属规则；基线阶段只要求存在结构化配置。 */
+    private TaskCompileResult validateExtensionTask(PipelineTask t) {
+        if (!StringUtils.hasText(t.getConfig()) || "{}".equals(t.getConfig().trim())) {
+            return fail(t, t.getTaskType().name() + " task requires non-empty config");
+        }
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, t.getTaskType().name() + " task requires valid object config");
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, t.getTaskType().name() + " parameter expression invalid: " + ex.getMessage());
+        }
+        return ok(t);
     }
 
     /** 校验质量门禁规则集合和目标资产。 */
@@ -308,7 +329,7 @@ public class PipelineCompileService {
             t.setExecutable(false);
             return;
         }
-        boolean executable = t.getTaskType() != TaskType.SYNC_REF;
+        boolean executable = t.getTaskType().category() == TaskCategory.EXEC;
         t.setCompileStatus(TaskCompileStatus.VALIDATED);
         t.setCompileError(null);
         t.setExecutable(executable);

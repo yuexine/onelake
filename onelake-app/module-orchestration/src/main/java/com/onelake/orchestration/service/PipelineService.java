@@ -39,6 +39,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -65,9 +66,9 @@ public class PipelineService {
     private static final String DEFAULT_RESOURCE_GROUP = "spark-default";
     private static final String DEFAULT_COMPUTE_PROFILE = "spark-small";
 
-    private static final Set<String> VALID_TASK_TYPES = Set.of(
-            TaskType.QUALITY_GATE.name(), TaskType.SYNC_REF.name(),
-            TaskType.SPARK_SQL.name(), TaskType.PYSPARK.name());
+    private static final Set<String> VALID_TASK_TYPES = Arrays.stream(TaskType.values())
+            .map(TaskType::name)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     private final DagRepository dagRepo;
     private final PipelineTaskRepository taskRepo;
@@ -313,6 +314,7 @@ public class PipelineService {
         t.setDagId(dagId);
         t.setTaskKey(req.taskKey());
         t.setTaskType(TaskType.valueOf(req.taskType()));
+        t.setCategory(t.getTaskType().category());
         t.setName(req.name() == null ? req.taskKey() : req.name());
         t.setEngine(normalizeTaskEngine(req.taskType(), req.engine()));
         t.setTargetFqn(req.targetFqn());
@@ -650,14 +652,19 @@ public class PipelineService {
     }
 
     private String normalizeTaskEngine(String taskType, String requestedEngine) {
-        if (TaskType.PYSPARK.name().equals(taskType)) {
-            return PYSPARK_ENGINE;
-        }
-        return SPARK_SQL_ENGINE;
+        TaskType type = TaskType.valueOf(taskType);
+        return switch (type) {
+            case PYSPARK -> PYSPARK_ENGINE;
+            case TRINO_SQL -> "TRINO";
+            case PYTHON, SHELL -> "SCRIPT";
+            case BRANCH, CONDITION, SUB_PIPELINE -> "CONTROL";
+            case SYNC_REF, SENSOR, WAIT, NOTIFY, ASSERTION -> "OBSERVE";
+            case QUALITY_GATE, SPARK_SQL -> SPARK_SQL_ENGINE;
+        };
     }
 
     private String defaultTaskEngine(TaskType type) {
-        return type == TaskType.PYSPARK ? PYSPARK_ENGINE : SPARK_SQL_ENGINE;
+        return normalizeTaskEngine(type.name(), null);
     }
 
     private String sinkDataflowConfig(String sourceAlias, String select) {

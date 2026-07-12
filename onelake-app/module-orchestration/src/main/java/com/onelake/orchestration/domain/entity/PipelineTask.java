@@ -1,6 +1,7 @@
 package com.onelake.orchestration.domain.entity;
 
 import com.onelake.orchestration.domain.enums.TaskCompileStatus;
+import com.onelake.orchestration.domain.enums.TaskCategory;
 import com.onelake.orchestration.domain.enums.TaskType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -49,6 +50,19 @@ public class PipelineTask {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 32)
     private TaskType taskType;
+
+    /** 节点执行语义分类；由 taskType 的服务端映射决定。 */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private TaskCategory category = TaskCategory.EXEC;
+
+    /** 从算子市场生成节点时使用的稳定算子引用。 */
+    @Column(length = 128)
+    private String operatorRef;
+
+    /** 发布或运行时锁定的算子版本。 */
+    @Column(length = 32)
+    private String operatorVersion;
 
     /** 画布展示名称。 */
     @Column(nullable = false, length = 256)

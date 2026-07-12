@@ -11,7 +11,7 @@ package com.onelake.orchestration.dto;
  * @param manifestSupported 是否支持该 Manifest 目标
  * @param graphExecutionSupported 是否支持图级执行
  * @param dagsterJobAvailable 运行时是否发现目标作业
- * @param status READY 或 BLOCKED
+ * @param status READY、RESTRICTED 或 MISSING_DAGSTER_JOB
  * @param blockedReason 阻断原因
  */
 public record RuntimeContractDTO(

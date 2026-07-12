@@ -51,6 +51,7 @@ import {
   SettingOutlined,
   CloudUploadOutlined,
   HistoryOutlined,
+  ThunderboltOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import { PageHeader } from '../../../components';
@@ -65,6 +66,7 @@ import { BackfillWizard } from './BackfillWizard';
 import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
 import { PipelineParamDrawer } from './PipelineParamDrawer';
 import { PipelineVersionDrawer } from './PipelineVersionDrawer';
+import { PipelineAutomationDrawer } from './PipelineAutomationDrawer';
 
 const { Text } = Typography;
 
@@ -436,6 +438,7 @@ export default function UnifiedPipelineEditor() {
   const [schedulingOpen, setSchedulingOpen] = useState(false);
   const [paramDrawerOpen, setParamDrawerOpen] = useState(false);
   const [versionDrawerOpen, setVersionDrawerOpen] = useState(false);
+  const [automationDrawerOpen, setAutomationDrawerOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
 
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
@@ -916,6 +919,9 @@ export default function UnifiedPipelineEditor() {
             <Button icon={<ControlOutlined />} onClick={() => setParamDrawerOpen(true)}>
               参数管理
             </Button>
+            <Button icon={<ThunderboltOutlined />} onClick={() => setAutomationDrawerOpen(true)}>
+              自动化
+            </Button>
             <Button
               icon={<HistoryOutlined />}
               onClick={() => setVersionDrawerOpen(true)}
@@ -1002,6 +1008,12 @@ export default function UnifiedPipelineEditor() {
         open={paramDrawerOpen}
         onClose={() => setParamDrawerOpen(false)}
         onChanged={editor.reload}
+      />
+
+      <PipelineAutomationDrawer
+        dagId={dagId}
+        open={automationDrawerOpen}
+        onClose={() => setAutomationDrawerOpen(false)}
       />
 
       <PipelineVersionDrawer

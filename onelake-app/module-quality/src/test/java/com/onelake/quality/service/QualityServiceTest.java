@@ -26,6 +26,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -117,7 +119,133 @@ class QualityServiceTest {
         assertThat(payloadCaptor.getValue())
             .containsEntry("targetFqn", "ods.customers")
             .containsEntry("targetColumn", "amount")
-            .containsEntry("failedRows", 32L);
+            .containsEntry("failedRows", 32L)
+            .containsEntry("assetQualityFinal", false);
+    }
+
+    @Test
+    void recordResultPublishesRuleAndAggregateEventsWithUpstreamRunCorrelation() {
+        UUID ruleId = UUID.randomUUID();
+        UUID jobRunId = UUID.randomUUID();
+        Rule rule = new Rule();
+        rule.setId(ruleId);
+        rule.setTenantId(TENANT_ID);
+        rule.setTargetFqn("iceberg.dwd.orders");
+        rule.setRuleType("NOT_NULL");
+        rule.setExpression("order_id IS NOT NULL");
+        rule.setSeverity("BLOCK");
+        rule.setEnabled(true);
+        when(ruleRepo.findById(ruleId)).thenReturn(Optional.of(rule));
+        when(ruleRepo.findByTenantIdAndTargetFqnAndEnabledTrueOrderByIdAsc(
+            TENANT_ID, "iceberg.dwd.orders")).thenReturn(List.of(rule));
+        when(resultRepo.saveAndFlush(any(RunResult.class))).thenAnswer(invocation -> {
+            RunResult saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+
+        RunResult input = new RunResult();
+        input.setRuleId(ruleId);
+        input.setJobRunId(jobRunId);
+        input.setPassed(true);
+        input.setPassRate(java.math.BigDecimal.valueOf(100));
+        input.setFailedRows(0L);
+        when(resultRepo.findByJobRunIdAndRuleIdIn(jobRunId, List.of(ruleId)))
+            .thenReturn(List.of(input));
+
+        QualityRunResultDTO result = service.recordResult(input);
+
+        assertThat(result.jobRunId()).isEqualTo(jobRunId);
+        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher, times(2)).publish(
+            eq(DomainEvents.QUALITY_CHECK_COMPLETED),
+            any(String.class),
+            payloadCaptor.capture());
+        assertThat(payloadCaptor.getAllValues())
+            .anySatisfy(payload -> assertThat(payload)
+                .containsEntry("targetFqn", "iceberg.dwd.orders")
+                .containsEntry("runId", jobRunId.toString())
+                .containsEntry("assetQualityFinal", false))
+            .anySatisfy(payload -> assertThat(payload)
+                .containsEntry("ruleType", "ASSET_AGGREGATE")
+                .containsEntry("runId", jobRunId.toString())
+                .containsEntry("passed", true)
+                .containsEntry("assetQualityFinal", true));
+    }
+
+    @Test
+    void recordResultWaitsForEveryEnabledRuleThenPublishesFailedAggregate() {
+        UUID firstRuleId = UUID.randomUUID();
+        UUID secondRuleId = UUID.randomUUID();
+        UUID jobRunId = UUID.randomUUID();
+        Rule firstRule = new Rule();
+        firstRule.setId(firstRuleId);
+        firstRule.setTenantId(TENANT_ID);
+        firstRule.setTargetFqn("iceberg.dwd.orders");
+        firstRule.setRuleType("NOT_NULL");
+        firstRule.setExpression("order_id IS NOT NULL");
+        firstRule.setSeverity("BLOCK");
+        firstRule.setEnabled(true);
+        Rule secondRule = new Rule();
+        secondRule.setId(secondRuleId);
+        secondRule.setTenantId(TENANT_ID);
+        secondRule.setTargetFqn("iceberg.dwd.orders");
+        secondRule.setRuleType("UNIQUE");
+        secondRule.setExpression("order_id");
+        secondRule.setSeverity("BLOCK");
+        secondRule.setEnabled(true);
+        when(ruleRepo.findById(firstRuleId)).thenReturn(Optional.of(firstRule));
+        when(ruleRepo.findById(secondRuleId)).thenReturn(Optional.of(secondRule));
+        when(ruleRepo.findByTenantIdAndTargetFqnAndEnabledTrueOrderByIdAsc(
+            TENANT_ID, "iceberg.dwd.orders")).thenReturn(List.of(firstRule, secondRule));
+        when(resultRepo.saveAndFlush(any(RunResult.class))).thenAnswer(invocation -> {
+            RunResult saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+
+        RunResult input = new RunResult();
+        input.setRuleId(firstRuleId);
+        input.setJobRunId(jobRunId);
+        input.setPassed(true);
+        input.setPassRate(java.math.BigDecimal.valueOf(100));
+        input.setFailedRows(0L);
+        RunResult failed = new RunResult();
+        failed.setRuleId(secondRuleId);
+        failed.setJobRunId(jobRunId);
+        failed.setPassed(false);
+        failed.setPassRate(java.math.BigDecimal.ZERO);
+        failed.setFailedRows(3L);
+        when(resultRepo.findByJobRunIdAndRuleIdIn(
+            jobRunId, List.of(firstRuleId, secondRuleId)))
+            .thenReturn(List.of(input), List.of(input, failed));
+
+        service.recordResult(input);
+
+        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher).publish(
+            eq(DomainEvents.QUALITY_CHECK_COMPLETED),
+            eq(firstRuleId.toString()),
+            payloadCaptor.capture());
+        assertThat(payloadCaptor.getValue()).containsEntry("assetQualityFinal", false);
+
+        clearInvocations(outboxPublisher);
+        service.recordResult(failed);
+
+        ArgumentCaptor<Map<String, Object>> finalPayloads = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher, times(2)).publish(
+            eq(DomainEvents.QUALITY_CHECK_FAILED),
+            any(String.class),
+            finalPayloads.capture());
+        assertThat(finalPayloads.getAllValues())
+            .anySatisfy(payload -> assertThat(payload)
+                .containsEntry("assetQualityFinal", false)
+                .containsEntry("failedRows", 3L))
+            .anySatisfy(payload -> assertThat(payload)
+                .containsEntry("ruleType", "ASSET_AGGREGATE")
+                .containsEntry("assetQualityFinal", true)
+                .containsEntry("passed", false)
+                .containsEntry("failedRows", 3L));
     }
 
     @Test

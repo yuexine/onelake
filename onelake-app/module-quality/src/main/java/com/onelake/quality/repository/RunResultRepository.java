@@ -9,4 +9,5 @@ import java.util.UUID;
 public interface RunResultRepository extends JpaRepository<RunResult, UUID> {
     List<RunResult> findByRuleIdOrderByCheckedAtDesc(UUID ruleId);
     List<RunResult> findTop1ByRuleIdOrderByCheckedAtDesc(UUID ruleId);
+    List<RunResult> findByJobRunIdAndRuleIdIn(UUID jobRunId, List<UUID> ruleIds);
 }

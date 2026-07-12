@@ -518,6 +518,33 @@ export interface PipelineVersionDiff {
   params: PipelineVersionCollectionDiff;
 }
 
+export type PipelineSubscriptionSourceType = 'ASSET' | 'PIPELINE';
+export type PipelineSubscriptionCondition = 'ON_UPDATE' | 'ON_UPDATE_AND_QUALITY_PASS';
+export type PipelineSubscriptionFreshnessPolicy =
+  | 'LATEST'
+  | 'SAME_BATCH'
+  | 'SAME_FRESHNESS_WINDOW';
+
+/** 资产或上游流水线触发当前流水线的自动化订阅。 */
+export interface PipelineSubscription {
+  id: UUID;
+  tenantId: UUID;
+  dagId: UUID;
+  sourceType: PipelineSubscriptionSourceType;
+  sourceRef: string;
+  condition: PipelineSubscriptionCondition;
+  freshnessPolicy: PipelineSubscriptionFreshnessPolicy;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface CreatePipelineSubscriptionRequest {
+  sourceType: PipelineSubscriptionSourceType;
+  sourceRef: string;
+  condition: PipelineSubscriptionCondition;
+  freshnessPolicy: PipelineSubscriptionFreshnessPolicy;
+}
+
 export interface OperatorPort {
   name: string;
   cardinality: 'ONE' | 'MANY' | string;

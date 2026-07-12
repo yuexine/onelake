@@ -75,7 +75,28 @@ public class QualityService {
 
     @Transactional
     public QualityRunResultDTO recordResult(RunResult r) {
-        return toResultDTO(resultRepo.save(r));
+        if (r == null || r.getRuleId() == null) {
+            throw new BizException(40000, "质量规则不能为空");
+        }
+        Rule rule = getOwnedRule(r.getRuleId());
+        List<Rule> enabledRules = ruleRepo
+            .findByTenantIdAndTargetFqnAndEnabledTrueOrderByIdAsc(
+                rule.getTenantId(), rule.getTargetFqn());
+        if (r.getPassed() == null) {
+            throw new BizException(40000, "质量结果不能为空");
+        }
+        if (r.getCheckedAt() == null) {
+            r.setCheckedAt(Instant.now());
+        }
+        r.setId(null);
+        RunResult saved = resultRepo.saveAndFlush(r);
+        if (!Boolean.TRUE.equals(saved.getPassed())) {
+            raiseAlert(rule.getId(), "BLOCK".equalsIgnoreCase(rule.getSeverity()) ? "CRITICAL" : "WARN",
+                "质量规则未通过：" + rule.getTargetFqn() + " / " + rule.getRuleType());
+        }
+        publishResult(rule, saved);
+        publishAggregateResultIfComplete(rule, saved, enabledRules);
+        return toResultDTO(saved);
     }
 
     @Transactional(readOnly = true)
@@ -250,12 +271,63 @@ public class QualityService {
         payload.put("passed", result.getPassed());
         payload.put("passRate", result.getPassRate());
         payload.put("failedRows", result.getFailedRows());
+        payload.put("assetQualityFinal", false);
         if (result.getJobRunId() != null) {
             payload.put("runId", result.getJobRunId().toString());
         }
         outboxPublisher.publish(Boolean.TRUE.equals(result.getPassed())
             ? DomainEvents.QUALITY_CHECK_COMPLETED
             : DomainEvents.QUALITY_CHECK_FAILED, rule.getId().toString(), payload);
+    }
+
+    private void publishAggregateResultIfComplete(Rule rule,
+                                                  RunResult current,
+                                                  List<Rule> enabledRules) {
+        if (current.getJobRunId() == null || enabledRules == null || enabledRules.isEmpty()) {
+            return;
+        }
+        if (enabledRules.stream().noneMatch(active -> active.getId().equals(rule.getId()))) {
+            return;
+        }
+        List<UUID> ruleIds = enabledRules.stream().map(Rule::getId).toList();
+        List<RunResult> results = resultRepo.findByJobRunIdAndRuleIdIn(
+            current.getJobRunId(), ruleIds);
+        Map<UUID, RunResult> latestByRule = new LinkedHashMap<>();
+        for (RunResult result : results) {
+            RunResult previous = latestByRule.get(result.getRuleId());
+            if (previous == null || checkedAt(result).isAfter(checkedAt(previous))) {
+                latestByRule.put(result.getRuleId(), result);
+            }
+        }
+        if (latestByRule.size() != ruleIds.size() || !latestByRule.keySet().containsAll(ruleIds)) {
+            return;
+        }
+
+        boolean passed = ruleIds.stream()
+            .allMatch(ruleId -> Boolean.TRUE.equals(latestByRule.get(ruleId).getPassed()));
+        long failedRows = ruleIds.stream()
+            .map(latestByRule::get)
+            .map(RunResult::getFailedRows)
+            .filter(java.util.Objects::nonNull)
+            .mapToLong(Long::longValue)
+            .sum();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("tenantId", rule.getTenantId().toString());
+        payload.put("targetFqn", rule.getTargetFqn());
+        payload.put("ruleType", "ASSET_AGGREGATE");
+        payload.put("passed", passed);
+        payload.put("passRate", passed ? new BigDecimal("100.00") : BigDecimal.ZERO);
+        payload.put("failedRows", failedRows);
+        payload.put("assetQualityFinal", true);
+        payload.put("runId", current.getJobRunId().toString());
+        outboxPublisher.publish(passed
+            ? DomainEvents.QUALITY_CHECK_COMPLETED
+            : DomainEvents.QUALITY_CHECK_FAILED,
+            current.getJobRunId().toString(), payload);
+    }
+
+    private Instant checkedAt(RunResult result) {
+        return result.getCheckedAt() == null ? Instant.EPOCH : result.getCheckedAt();
     }
 
     private String required(String value, String message) {

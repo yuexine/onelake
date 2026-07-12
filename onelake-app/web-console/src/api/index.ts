@@ -74,6 +74,8 @@ import type {
   PipelineVersionDetail,
   PipelineVersionDiff,
   PipelineVersionSummary,
+  PipelineSubscription,
+  CreatePipelineSubscriptionRequest,
 } from '../types';
 
 export interface PageResult<T> {
@@ -509,6 +511,16 @@ export const PipelineVersionAPI = {
     })),
   rollback: (dagId: string, version: number) =>
     unwrap<void>(http.post(`/orchestration/pipelines/${dagId}/versions/${version}/rollback`)),
+};
+
+/** 流水线资产感知自动化：读取、创建和删除触发订阅。 */
+export const SubscriptionAPI = {
+  list: (dagId: string) =>
+    unwrap<PipelineSubscription[]>(http.get(`/orchestration/pipelines/${dagId}/subscriptions`)),
+  create: (dagId: string, payload: CreatePipelineSubscriptionRequest) =>
+    unwrap<PipelineSubscription>(http.post(`/orchestration/pipelines/${dagId}/subscriptions`, payload)),
+  delete: (dagId: string, subscriptionId: string) =>
+    unwrap<void>(http.delete(`/orchestration/pipelines/${dagId}/subscriptions/${subscriptionId}`)),
 };
 
 export const OperatorAPI = {

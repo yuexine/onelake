@@ -1,6 +1,6 @@
 # 全局事件契约：Outbox 总线、事件清单与订阅
 
-> 修订日期：2026-07-09
+> 修订日期：2026-07-12
 >
 > 当前代码已落地 `Outbox -> Redis Stream -> consumer group -> consumed_event` 的可靠域事件通道。事件常量集中在 `module-common/.../DomainEvents.java`。
 
@@ -32,9 +32,9 @@
 | Catalog | `catalog.asset.registered`、`catalog.lineage.updated` |
 | Modeling | `modeling.model.published`、`modeling.model.loaded`、`modeling.model.failed`、`modeling.transform.completed`、`modeling.term.*`、`modeling.codebook.*` |
 | Quality | `quality.check.completed`、`quality.check.failed` |
-| Security | `security.classification.assigned`、`security.pii.detected`、`security.masking_policy.updated`、`security.access.changed` |
+| Security | `security.classification.assigned`、`security.pii.detected`、`security.masking_policy.updated`、`security.access.changed`、`security.approval.decided` |
 | DataService | `dataservice.api.published`、`dataservice.api.offline`、`dataservice.subscription.approved`、`dataservice.subscription.revoked` |
-| Orchestration/Pipeline | `orchestration.job.bound`、`pipeline.published`、`pipeline.run.succeeded`、`pipeline.run.failed`、`pipeline.task.loaded` |
+| Orchestration/Pipeline | `orchestration.job.bound`、`pipeline.published`、`pipeline.rolled_back`、`pipeline.publish-approval.requested`、`pipeline.run.succeeded`、`pipeline.run.failed`、`pipeline.run.sla_missed`、`pipeline.run.timeout`、`pipeline.task.loaded` |
 | Analytics | `analytics.dashboard.published`、`analytics.notebook.run-submitted`、`analytics.notebook.run-status-changed`、`analytics.notebook.timeout`、`analytics.notebook.artifact-published`、`analytics.query.slow` |
 
 ## 3. 主要发布订阅
@@ -46,9 +46,13 @@
 | `integration.sync.failed` | Integration | Catalog、Common alert | 已实现 |
 | `integration.schema.drift` | Integration | Modeling/Quality/Catalog 后续治理 | 生产端已实现，消费增强中 |
 | `security.pii.detected` | Security | Catalog | 已实现，合并字段级 PII 标签 |
-| `quality.check.completed/failed` | Quality | Catalog、告警/门禁 | 局部实现，生产策略增强中 |
+| `quality.check.completed/failed` | Quality | Catalog、Orchestration 质量门 | 已实现；资产更新与对应质检支持乱序汇合，失败抑制下游自动触发 |
 | `modeling.model.loaded/failed` | Modeling/Orchestration 相关链路 | Catalog/Quality | 需按 Spark pipeline 当前主线继续校准 |
 | `pipeline.task.loaded` | Orchestration | Catalog | 已实现相关 handler |
+| `pipeline.publish-approval.requested` | Orchestration | Security | 已实现；按 DAG + snapshotChecksum 复用待审批申请 |
+| `security.approval.decided` | Security | Orchestration | 已实现；审批通过且 checksum 仍匹配时发布，拒绝或陈旧审批不发布 |
+| `pipeline.published` | Orchestration | Catalog 及兼容消费者 | 已实现；payload 含不可变 `versionId` 与目标资产列表 |
+| `pipeline.rolled_back` | Orchestration | 审计及后续消费者 | 生产端已实现；表示历史版本恢复为 DEV 草稿，不改变生产发布指针 |
 | `dataservice.api.published/offline` | DataService | Catalog/监控后续扩展 | 事件常量已存在，消费侧按需扩展 |
 | `analytics.*` | Analytics | Catalog/通知/监控后续扩展 | 事件常量已存在，需补事件矩阵验证 |
 
@@ -77,6 +81,17 @@ SKIPPED
 ```
 
 消费方对历史 `SUCCESS` 做 normalize：`SUCCESS -> SUCCEEDED`。
+
+### 4.1 M3 版本与审批事件载荷
+
+| 事件 | 必要业务字段 |
+| --- | --- |
+| `pipeline.publish-approval.requested` | `tenantId`、`targetRef`、`applicantId`、`pipelineName`、`dagVersion`、`snapshotChecksum`、`snapshotBytes`、`taskCount` |
+| `security.approval.decided` | `tenantId`、`requestType=PUBLISH`、`targetRef`、`status`、`snapshotChecksum`、`approverId`、`comment` |
+| `pipeline.published` | `pipelineId`、`tenantId`、`version`、`versionId`、`pipelineKind`、`publishedBy`、`publishedAt`、`targetFqns`、`taskCount` |
+| `pipeline.rolled_back` | `pipelineId`、`tenantId`、`targetVersion`、`targetVersionId`、`targetChecksum`、`publishedVersionId`、`hasUnpublishedChanges=true`、`rolledBackBy`、`rolledBackAt` |
+
+`pipeline.rolled_back` 只描述草稿恢复动作。消费者不得据此切换生产版本；只有后续新的 `pipeline.published` 才代表生产指针变化。
 
 ## 5. 新增事件 checklist
 

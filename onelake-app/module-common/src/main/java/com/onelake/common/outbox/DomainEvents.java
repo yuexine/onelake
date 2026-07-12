@@ -58,6 +58,8 @@ public final class DomainEvents {
      * Replace cross-schema JDBC writes from orchestration → modeling/catalog/quality/security.
      */
     public static final String PIPELINE_PUBLISHED = "pipeline.published";
+    /** 已发布历史版本被恢复为 DEV 草稿；生产发布指针保持不变。 */
+    public static final String PIPELINE_ROLLED_BACK = "pipeline.rolled_back";
     /** 流水线发布审批申请，由 security 模块消费并创建 PUBLISH 审批单。 */
     public static final String PIPELINE_PUBLISH_APPROVAL_REQUESTED = "pipeline.publish-approval.requested";
     public static final String PIPELINE_RUN_SUCCEEDED = "pipeline.run.succeeded";

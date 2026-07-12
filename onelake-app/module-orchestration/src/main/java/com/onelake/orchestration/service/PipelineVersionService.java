@@ -3,6 +3,8 @@ package com.onelake.orchestration.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.context.TenantContext;
 import com.onelake.common.exception.BizException;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineParam;
 import com.onelake.orchestration.domain.entity.PipelineTask;
@@ -15,11 +17,15 @@ import com.onelake.orchestration.repository.PipelineParamRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
@@ -30,6 +36,7 @@ import java.util.function.Function;
 /** Pipeline 发布版本的查询、结构化对比与草稿回滚。 */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class PipelineVersionService {
 
     private static final Set<String> TECHNICAL_FIELDS = Set.of("id", "tenantId", "dagId");
@@ -42,6 +49,7 @@ public class PipelineVersionService {
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
     private final PipelineParamRepository paramRepo;
+    private final ObjectProvider<OutboxPublisher> outboxPublisher;
 
     @Transactional(readOnly = true)
     public List<PipelineVersionSummaryDTO> listVersions(UUID dagId) {
@@ -107,6 +115,30 @@ public class PipelineVersionService {
         List<UUID> paramSnapshotIds = draftParams.stream().map(PipelineParam::getId).toList();
         List<PipelineParam> savedParams = paramRepo.saveAllAndFlush(draftParams);
         restoreParamSnapshotIds(tenantId, dagId, paramSnapshotIds, savedParams);
+        emitPipelineRolledBack(current, target);
+    }
+
+    private void emitPipelineRolledBack(Dag dag,
+                                        PipelineSnapshotService.ExecutionSnapshot target) {
+        OutboxPublisher publisher = outboxPublisher.getIfAvailable();
+        if (publisher == null) {
+            log.warn("OutboxPublisher 不可用，跳过 pipeline.rolled_back 事件，pipelineId={}",
+                    dag.getId());
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("pipelineId", dag.getId().toString());
+        payload.put("tenantId", dag.getTenantId().toString());
+        payload.put("targetVersion", target.version().getVersion());
+        payload.put("targetVersionId", target.version().getId().toString());
+        payload.put("targetChecksum", target.version().getChecksum());
+        payload.put("publishedVersionId", dag.getPublishedVersionId() == null
+                ? null : dag.getPublishedVersionId().toString());
+        payload.put("hasUnpublishedChanges", true);
+        payload.put("rolledBackBy", TenantContext.getUserId() == null
+                ? null : TenantContext.getUserId().toString());
+        payload.put("rolledBackAt", java.time.Instant.now().toString());
+        publisher.publish(DomainEvents.PIPELINE_ROLLED_BACK, dag.getId().toString(), payload);
     }
 
     private void restoreTaskSnapshotIds(UUID dagId,

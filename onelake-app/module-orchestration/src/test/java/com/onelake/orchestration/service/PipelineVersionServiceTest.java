@@ -1,6 +1,8 @@
 package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
+import com.onelake.common.outbox.DomainEvents;
+import com.onelake.common.outbox.OutboxPublisher;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineParam;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Instant;
 import java.util.List;
@@ -30,6 +33,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -45,13 +50,16 @@ class PipelineVersionServiceTest {
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
     @Mock private PipelineParamRepository paramRepo;
+    @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
+    @Mock private OutboxPublisher outboxPublisher;
 
     private PipelineVersionService service;
 
     @BeforeEach
     void setUp() {
         TenantContext.setTenantId(TENANT_ID);
-        service = new PipelineVersionService(snapshotService, dagRepo, taskRepo, edgeRepo, paramRepo);
+        service = new PipelineVersionService(
+                snapshotService, dagRepo, taskRepo, edgeRepo, paramRepo, outboxProvider);
     }
 
     @AfterEach
@@ -161,6 +169,7 @@ class PipelineVersionServiceTest {
                 TENANT_ID, DAG_ID, savedPipelineParam.getId(), pipelineParamSnapshotId)).thenReturn(1);
         when(paramRepo.restoreSnapshotId(
                 TENANT_ID, DAG_ID, savedTaskParam.getId(), taskParamSnapshotId)).thenReturn(1);
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
 
         service.rollback(DAG_ID, 1);
 
@@ -188,6 +197,14 @@ class PipelineVersionServiceTest {
                 TENANT_ID, DAG_ID, savedPipelineParam.getId(), pipelineParamSnapshotId);
         verify(paramRepo).restoreSnapshotId(
                 TENANT_ID, DAG_ID, savedTaskParam.getId(), taskParamSnapshotId);
+        verify(outboxPublisher).publish(
+                eq(DomainEvents.PIPELINE_ROLLED_BACK),
+                eq(DAG_ID.toString()),
+                argThat(payload -> Integer.valueOf(1).equals(payload.get("targetVersion"))
+                        && historical.getId().toString().equals(payload.get("targetVersionId"))
+                        && historical.getChecksum().equals(payload.get("targetChecksum"))
+                        && PUBLISHED_VERSION_ID.toString().equals(payload.get("publishedVersionId"))
+                        && Boolean.TRUE.equals(payload.get("hasUnpublishedChanges"))));
         assertThat(historical.getVersion()).isEqualTo(1);
         assertThat(historical.getSnapshot()).isEqualTo("immutable-snapshot");
     }

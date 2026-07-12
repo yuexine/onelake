@@ -46,7 +46,8 @@ class PipelineSparkCompileTest {
 
     @BeforeEach
     void setup() {
-        service = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
+        service = new PipelineCompileService(
+                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"));
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);

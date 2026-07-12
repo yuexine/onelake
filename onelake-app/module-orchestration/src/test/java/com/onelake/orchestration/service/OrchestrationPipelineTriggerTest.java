@@ -39,6 +39,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -89,6 +90,7 @@ class OrchestrationPipelineTriggerTest {
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
     @Mock private PipelineLogStorage pipelineLogStorage;
+    @Mock private ScriptSandboxPolicy scriptSandboxPolicy;
 
     private OrchestrationService service;
 
@@ -96,7 +98,10 @@ class OrchestrationPipelineTriggerTest {
     void setup() {
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
-                sparkBuilder, outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
+                sparkBuilder, outboxProvider, pipelineLogStorage, new DataIntervalCalculator(),
+                scriptSandboxPolicy);
+        org.mockito.Mockito.lenient().when(scriptSandboxPolicy.blockedReason(any()))
+                .thenReturn("PYTHON/SHELL 沙箱能力默认关闭，请设置 ONELAKE_SCRIPT_SANDBOX_ENABLED=true");
         TenantContext.setTenantId(TENANT_ID);
         TenantContext.setUserId(UUID.randomUUID());
 
@@ -172,6 +177,67 @@ class OrchestrationPipelineTriggerTest {
         // C4 校验：不通过 JdbcTemplate 写 modeling.* 表。
         verify(jdbc, never()).update(anyString(), any(Object[].class));
         verify(jdbc, never()).update(anyString(), any(Object.class));
+    }
+
+    @Test
+    void rejectsTrinoPipelineBeforeRunCreationWhenLegacyModeIsActive() {
+        Dag dag = pipelineDag();
+        PipelineTask trino = task("trino_validate", true);
+        trino.setTaskType(TaskType.TRINO_SQL);
+        trino.setEngine("TRINO");
+        trino.setTargetFqn(null);
+        trino.setConfig("{\"sql\":\"SELECT 1\",\"catalog\":\"iceberg\",\"schema\":\"default\"}");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("trino_validate"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(trino));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("TRINO_SQL")
+                .hasMessageContaining("GRAPH");
+
+        verify(runRepo, never()).save(any(JobRun.class));
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
+    }
+
+    @Test
+    void rejectsScriptPipelineBeforeRunCreationWhenSandboxCapabilityIsDisabled() {
+        Dag dag = pipelineDag();
+        PipelineTask script = task("python_safe", true);
+        script.setTaskType(TaskType.PYTHON);
+        script.setEngine("SCRIPT");
+        script.setTargetFqn(null);
+        script.setConfig("{\"script\":\"print('ok')\"}");
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(compileService.compile(DAG_ID)).thenReturn(validPlan("python_safe"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(script));
+
+        assertThatThrownBy(() -> service.triggerPipelineRun(
+                DAG_ID, TriggerType.MANUAL, RunEnvironment.DEV))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("PYTHON/SHELL")
+                .hasMessageContaining("默认关闭")
+                .hasMessageContaining("ONELAKE_SCRIPT_SANDBOX_ENABLED=true");
+
+        verify(runRepo, never()).save(any(JobRun.class));
+        verify(dagster, never()).launch(anyString(), anyString(), anyString(), any(), anyList());
+    }
+
+    @Test
+    void trinoMaterializationRequiresCtasAndDeclaredTarget() {
+        PipelineTask validation = task("trino_validate", true);
+        validation.setTaskType(TaskType.TRINO_SQL);
+        validation.setTargetFqn("iceberg.dwd.checked_table");
+        validation.setConfig("{\"sql\":\"SELECT * FROM dwd.checked_table\"}");
+        PipelineTask ctas = task("trino_ctas", true);
+        ctas.setTaskType(TaskType.TRINO_SQL);
+        ctas.setTargetFqn("iceberg.dwd.trino_ctas");
+        ctas.setConfig("{\"sql\":\"CREATE TABLE dwd.trino_ctas AS SELECT 1\"}");
+
+        assertThat(service.isMaterializingTask(validation)).isFalse();
+        assertThat(service.isMaterializingTask(ctas)).isTrue();
     }
 
     @Test
@@ -879,6 +945,71 @@ class OrchestrationPipelineTriggerTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void terminalLoadedEventUsesBoundSnapshotInsteadOfEditedDraft() {
+        Dag dag = pipelineDag();
+        UUID runId = UUID.randomUUID();
+        UUID versionId = UUID.randomUUID();
+        JobRun run = new JobRun();
+        run.setId(runId);
+        run.setDagId(DAG_ID);
+        run.setPipelineVersionId(versionId);
+        run.setDagsterRunId("dagster-trino-success");
+        run.setTriggerType(TriggerType.MANUAL);
+        run.setStatus(DagStatus.RUNNING);
+        run.setStartedAt(Instant.parse("2026-07-12T01:00:00Z"));
+
+        PipelineTask snapshotTask = task("trino_task", true);
+        snapshotTask.setTaskType(TaskType.TRINO_SQL);
+        snapshotTask.setEngine("TRINO");
+        snapshotTask.setTargetFqn("iceberg.dwd.snapshot_table");
+        snapshotTask.setConfig("""
+            {"sql":"CREATE TABLE dwd.snapshot_table AS SELECT 1",
+             "catalog":"iceberg","schema":"dwd"}
+            """);
+        TaskRun taskRun = new TaskRun();
+        taskRun.setId(UUID.randomUUID());
+        taskRun.setTenantId(TENANT_ID);
+        taskRun.setJobRunId(runId);
+        taskRun.setTaskKey("trino_task");
+        taskRun.setStatus(TaskRunStatus.QUEUED);
+
+        PipelineVersion version = new PipelineVersion();
+        version.setId(versionId);
+        version.setDagId(DAG_ID);
+        version.setTenantId(TENANT_ID);
+        when(snapshotService.loadExecutionSnapshot(versionId, DAG_ID)).thenReturn(
+                new PipelineSnapshotService.ExecutionSnapshot(
+                        version, dag, List.of(snapshotTask), List.of(), List.of()));
+        when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
+        when(dagRepo.findById(DAG_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByDagIdInOrderByStartedAtDesc(any(), any()))
+                .thenReturn(new PageImpl<>(List.of(run), PageRequest.of(0, 10), 1));
+        when(dagster.getRunStatus("dagster-trino-success"))
+                .thenReturn(new DagsterClient.RunStatus(
+                        "dagster-trino-success", "SUCCESS",
+                        run.getStartedAt(), Instant.parse("2026-07-12T01:01:00Z")));
+        when(taskRunRepo.findByJobRunId(runId)).thenReturn(List.of(taskRun));
+        when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
+        when(jdbc.query(anyString(), any(PreparedStatementSetter.class), any(ResultSetExtractor.class)))
+                .thenReturn(1L);
+
+        service.listRuns(PageRequest.of(0, 10));
+
+        ArgumentCaptor<String> typeCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(outboxPublisher, org.mockito.Mockito.atLeastOnce())
+                .publish(typeCaptor.capture(), anyString(), payloadCaptor.capture());
+        int loadedIndex = typeCaptor.getAllValues().indexOf("pipeline.task.loaded");
+        assertThat(loadedIndex).isGreaterThanOrEqualTo(0);
+        assertThat(payloadCaptor.getAllValues().get(loadedIndex))
+                .containsEntry("targetFqn", "iceberg.dwd.snapshot_table")
+                .containsEntry("engine", "TRINO")
+                .containsEntry("artifactPath", "table:dwd.snapshot_table");
+        verify(taskRepo, never()).findByDagIdAndTaskKey(DAG_ID, "trino_task");
+    }
+
+    @Test
     void terminalRunDoesNotPublishLoadedEventForObservationOnlyTask() {
         Dag dag = pipelineDag();
         UUID runId = UUID.randomUUID();
@@ -966,8 +1097,6 @@ class OrchestrationPipelineTriggerTest {
                         Instant.parse("2026-06-25T01:00:00Z"),
                         Instant.parse("2026-06-25T01:01:00Z")));
         when(taskRunRepo.findByJobRunId(runId)).thenReturn(List.of(upstream, downstream));
-        when(taskRepo.findByDagIdAndTaskKey(DAG_ID, "t_upstream")).thenReturn(Optional.of(upstreamTask));
-        when(taskRepo.findByDagIdAndTaskKey(DAG_ID, "t_downstream")).thenReturn(Optional.of(downstreamTask));
         PipelineVersion version = new PipelineVersion();
         version.setId(versionId);
         version.setDagId(DAG_ID);

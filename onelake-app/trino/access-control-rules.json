@@ -1,0 +1,76 @@
+{
+  "catalogs": [
+    {
+      "user": "onelake_pipeline",
+      "catalog": "iceberg",
+      "allow": "all"
+    },
+    {
+      "user": "onelake_pipeline",
+      "catalog": ".*",
+      "allow": "none"
+    },
+    {
+      "catalog": ".*",
+      "allow": "all"
+    }
+  ],
+  "schemas": [
+    {
+      "user": "onelake_pipeline",
+      "catalog": "iceberg",
+      "schema": "default|ods|dwd",
+      "owner": true
+    },
+    {
+      "user": "onelake_pipeline",
+      "owner": false
+    },
+    {
+      "owner": true
+    }
+  ],
+  "tables": [
+    {
+      "user": "onelake_pipeline",
+      "catalog": "iceberg",
+      "schema": "default|ods|dwd",
+      "table": ".*",
+      "privileges": ["SELECT", "INSERT", "OWNERSHIP"]
+    },
+    {
+      "user": "onelake_pipeline",
+      "privileges": []
+    },
+    {
+      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]
+    }
+  ],
+  "queries": [
+    {
+      "user": "onelake_pipeline",
+      "allow": ["execute"]
+    },
+    {
+      "allow": ["execute", "view", "kill"]
+    }
+  ],
+  "system_session_properties": [
+    {
+      "user": "onelake_pipeline",
+      "allow": false
+    },
+    {
+      "allow": true
+    }
+  ],
+  "catalog_session_properties": [
+    {
+      "user": "onelake_pipeline",
+      "allow": false
+    },
+    {
+      "allow": true
+    }
+  ]
+}

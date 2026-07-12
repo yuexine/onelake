@@ -3,9 +3,11 @@ package com.onelake.orchestration.service;
 import com.onelake.orchestration.client.DagsterClient;
 import com.onelake.orchestration.dto.RuntimeContractDTO;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import com.onelake.common.context.TenantContext;
 
 import java.util.List;
 import java.util.Map;
@@ -23,9 +25,18 @@ class RuntimeContractServiceTest {
     @Mock
     private DagsterClient dagster;
 
+    private RuntimeContractService restrictedService() {
+        return new RuntimeContractService(dagster, new ScriptSandboxPolicy(false, ""));
+    }
+
+    @AfterEach
+    void clearTenant() {
+        TenantContext.clear();
+    }
+
     @Test
     void listRuntimeContractsReflectsEngineCapabilityMatrix() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
         when(dagster.listJobs("onelake", "onelake-loc"))
             .thenReturn(List.of("onelake_pipeline_run", "onelake_pipeline_graph_run"));
 
@@ -41,13 +52,13 @@ class RuntimeContractServiceTest {
                 .singleElement()
                 .satisfies(c -> {
                     assertThat(c.status()).isEqualTo("RESTRICTED");
-                    assertThat(c.blockedReason()).contains("隔离沙箱");
+                    assertThat(c.blockedReason()).contains("默认关闭");
                 });
     }
 
     @Test
     void triggerBlockedReasonAllowsSparkWhenPipelineJobIsUsed() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_run",
             Map.of("compileTarget", "SPARK", "engine", "SPARK"));
@@ -57,7 +68,7 @@ class RuntimeContractServiceTest {
 
     @Test
     void triggerBlockedReasonAllowsSparkWhenGraphPipelineJobIsUsed() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
             Map.of("compileTarget", "SPARK", "engine", "SPARK"));
@@ -67,7 +78,7 @@ class RuntimeContractServiceTest {
 
     @Test
     void triggerBlockedReasonRejectsUnknownEngineOnPipelineJob() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_run",
             Map.of("compileTarget", "LEGACY", "engine", "LEGACY"));
@@ -78,7 +89,7 @@ class RuntimeContractServiceTest {
 
     @Test
     void triggerBlockedReasonAllowsTrinoOnGraphPipelineJob() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
             Map.of("compileTarget", "TRINO_SQL"));
@@ -88,18 +99,44 @@ class RuntimeContractServiceTest {
 
     @Test
     void triggerBlockedReasonKeepsScriptEngineRestricted() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
 
         Optional<String> reason = service.triggerBlockedReason("onelake_pipeline_graph_run",
             Map.of("engine", "PYTHON"));
 
         assertThat(reason).isPresent();
-        assertThat(reason.get()).contains("受限").contains("隔离沙箱");
+        assertThat(reason.get()).contains("默认关闭");
+    }
+
+    @Test
+    void triggerBlockedReasonAllowsScriptWhenSandboxIsExplicitlyEnabled() {
+        TenantContext.setTenantId(java.util.UUID.randomUUID());
+        RuntimeContractService service = new RuntimeContractService(
+                dagster, new ScriptSandboxPolicy(true, "*"));
+
+        Optional<String> reason = service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("engine", "PYTHON"));
+
+        assertThat(reason).isEmpty();
+    }
+
+    @Test
+    void triggerBlockedReasonRejectsScriptForTenantOutsideAllowlist() {
+        TenantContext.setTenantId(java.util.UUID.randomUUID());
+        RuntimeContractService service = new RuntimeContractService(
+                dagster,
+                new ScriptSandboxPolicy(true, java.util.UUID.randomUUID().toString()));
+
+        Optional<String> reason = service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("engine", "PYTHON"));
+
+        assertThat(reason).isPresent();
+        assertThat(reason.get()).contains("当前租户未获");
     }
 
     @Test
     void launchBlockedReasonAllowsGraphPipelineJobWhenAvailable() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
         when(dagster.listJobs("onelake", "onelake-loc"))
             .thenReturn(List.of("onelake_pipeline_run", "onelake_pipeline_graph_run"));
 
@@ -111,7 +148,7 @@ class RuntimeContractServiceTest {
 
     @Test
     void launchBlockedReasonRejectsGraphPipelineJobWhenMissingFromDagster() {
-        RuntimeContractService service = new RuntimeContractService(dagster);
+        RuntimeContractService service = restrictedService();
         when(dagster.listJobs("onelake", "onelake-loc"))
             .thenReturn(List.of("onelake_pipeline_run"));
 

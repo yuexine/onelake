@@ -1,6 +1,11 @@
+import json
 import os
 import signal
+import subprocess
 import sys
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 from collections import Counter
 
@@ -25,6 +30,8 @@ def _node(task_key, task_type="SPARK_SQL", max_retries=0, base_attempt=None):
         },
         "max_retries": max_retries,
     }
+    if task_type == "TRINO_SQL":
+        node.update({"engine": "TRINO", "catalog": "iceberg", "schema": "dwd"})
     if base_attempt is not None:
         node["base_attempt"] = base_attempt
     return node
@@ -87,6 +94,57 @@ def _native_node_config(task_key, task_type="SPARK_SQL"):
         "callback_base_url": "",
         "runtime_params": [],
     }
+
+
+def _trino_result(rows_written=None):
+    outputs = {"engine": "TRINO", "queryId": "query-1"}
+    if rows_written is not None:
+        outputs["rowsWritten"] = rows_written
+    stdout = "trino ok\n" + definitions._TASK_OUTPUTS_MARKER + json.dumps(outputs)
+    return subprocess.CompletedProcess(
+        ["trino", "trino:8080", "iceberg", "dwd"], 0, stdout, "",
+    )
+
+
+def _direct_script_command(
+        task_type, sandbox_binary, workdir, tmpdir, script_name, env, limits):
+    script_path = os.path.join(workdir, script_name)
+    interpreter = sys.executable if task_type == "PYTHON" else "/bin/sh"
+    return [interpreter, script_path]
+
+
+def _enable_direct_script_sandbox(monkeypatch):
+    monkeypatch.setattr(definitions.shutil, "which", lambda *_: "/usr/bin/bwrap")
+    monkeypatch.setattr(definitions, "_script_sandbox_command", _direct_script_command)
+    monkeypatch.setattr(definitions, "_script_preexec", lambda limits: None)
+    monkeypatch.setattr(definitions, "_script_resource_accounting_available", lambda: True)
+    monkeypatch.setattr(
+        definitions,
+        "_script_process_tree_usage",
+        lambda pid: {"cpu_seconds": 0, "memory_bytes": 0, "processes": 1},
+    )
+
+
+def _script_node(task_key="script", task_type="PYTHON", script="print('ok')", **limits):
+    node = _node(task_key, task_type)
+    node.update({
+        "engine": "SCRIPT",
+        "sql_or_script": script,
+        "target_fqn": "",
+        "timeout_seconds": 5,
+        "cpu_seconds": 5,
+        "cpu_cores": 1,
+        "memory_mb": 256,
+        "max_processes": 8,
+        "max_files": 256,
+        "file_max_bytes": 1024 * 1024,
+        "stdout_max_bytes": 256 * 1024,
+        "stderr_max_bytes": 256 * 1024,
+        "env": [],
+        "network_allowlist": [],
+    })
+    node.update(limits)
+    return node
 
 
 def _command(exit_code, stdout=""):
@@ -303,6 +361,448 @@ ONELAKE_OUTPUTS_JSON={"rowsWritten":5,"partition":"20260711"}
     }
     with pytest.raises(ValueError, match="non-negative integer"):
         definitions._extract_task_outputs('ONELAKE_OUTPUTS_JSON={"rowsWritten":-1}')
+
+
+def test_execute_trino_sql_uses_environment_and_reports_query_output(monkeypatch):
+    connect_args = {}
+    batches = iter([[(42,)], []])
+
+    class Cursor:
+        description = [("answer",)]
+        stats = {"queryId": "20260712_000001_00001_test"}
+        update_count = None
+
+        def execute(self, sql):
+            connect_args["sql"] = sql
+
+        def fetchmany(self, size):
+            connect_args["fetch_size"] = size
+            return next(batches)
+
+        def close(self):
+            connect_args["cursor_closed"] = True
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            connect_args["connection_closed"] = True
+
+    def connect(**kwargs):
+        connect_args.update(kwargs)
+        return Connection()
+
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "trino.dbapi", SimpleNamespace(connect=connect))
+    monkeypatch.setenv("TRINO_HOST", "trino.test")
+    monkeypatch.setenv("TRINO_PORT", "18080")
+    monkeypatch.setenv("TRINO_USER", "pipeline")
+
+    result = definitions._execute_trino_sql(_node("validate", "TRINO_SQL"))
+
+    assert result.returncode == 0
+    assert connect_args["host"] == "trino.test"
+    assert connect_args["port"] == 18080
+    assert connect_args["user"] == "pipeline"
+    assert connect_args["catalog"] == "iceberg"
+    assert connect_args["schema"] == "dwd"
+    assert connect_args["sql"] == "SELECT 1"
+    assert "[rows] [[42]]" in result.stdout
+    assert definitions._extract_task_outputs(result.stdout) == {
+        "engine": "TRINO",
+        "resultRows": 1,
+        "queryId": "20260712_000001_00001_test",
+    }
+    assert connect_args["cursor_closed"]
+    assert connect_args["connection_closed"]
+
+
+def test_execute_trino_sql_honors_cancellation_before_connect(monkeypatch):
+    connect_calls = []
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "trino.dbapi",
+        SimpleNamespace(connect=lambda **kwargs: connect_calls.append(kwargs)),
+    )
+    cancellation_event = threading.Event()
+    cancellation_event.set()
+
+    with pytest.raises(definitions._TrinoExecutionCancelled, match="before connection"):
+        definitions._execute_trino_sql(
+            _node("cancelled", "TRINO_SQL"),
+            cancellation_event=cancellation_event,
+        )
+
+    assert connect_calls == []
+
+
+def test_execute_trino_sql_normalizes_ctas_result_row_to_rows_written(monkeypatch):
+    batches = iter([[(7,)], []])
+
+    class Cursor:
+        description = [("rows",)]
+        stats = {"queryId": "ctas-query"}
+        update_count = None
+
+        def execute(self, sql):
+            return None
+
+        def fetchmany(self, size):
+            return next(batches)
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "trino.dbapi",
+        SimpleNamespace(connect=lambda **kwargs: Connection()),
+    )
+    node = _node("ctas", "TRINO_SQL")
+    node["sql_or_script"] = "CREATE TABLE iceberg.dwd.ctas AS SELECT 1"
+
+    result = definitions._execute_trino_sql(node)
+
+    assert definitions._extract_task_outputs(result.stdout)["rowsWritten"] == 7
+
+
+def test_execute_trino_sql_drains_results_beyond_log_sample(monkeypatch):
+    batches = iter([[(1,), (2,)], [(3,)], []])
+
+    class Cursor:
+        description = [("value",)]
+        stats = {"queryId": "drained-query"}
+        update_count = None
+
+        def execute(self, sql):
+            return None
+
+        def fetchmany(self, size):
+            return next(batches)
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "trino.dbapi",
+        SimpleNamespace(connect=lambda **kwargs: Connection()),
+    )
+    monkeypatch.setenv("TRINO_LOG_MAX_ROWS", "2")
+
+    result = definitions._execute_trino_sql(_node("drain", "TRINO_SQL"))
+
+    assert definitions._extract_task_outputs(result.stdout)["resultRows"] == 3
+    assert "[rows] [[1],[2]]" in result.stdout
+    assert "[rows_truncated] bounded to 2 rows / 262144 bytes" in result.stdout
+
+
+def test_execute_trino_sql_bounds_large_cell_log_bytes(monkeypatch):
+    large_value = "x" * 1_000_000
+    batches = iter([[(large_value,)], []])
+
+    class Cursor:
+        description = [("large_value",)]
+        stats = {"queryId": "bounded-query"}
+        update_count = None
+
+        def execute(self, sql):
+            return None
+
+        def fetchmany(self, size):
+            return next(batches)
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "trino.dbapi",
+        SimpleNamespace(connect=lambda **kwargs: Connection()),
+    )
+    monkeypatch.setenv("TRINO_LOG_MAX_BYTES", "1024")
+
+    result = definitions._execute_trino_sql(_node("bounded", "TRINO_SQL"))
+
+    assert definitions._extract_task_outputs(result.stdout)["resultRows"] == 1
+    assert len(result.stdout.encode("utf-8")) < 4096
+    rows_line = next(line for line in result.stdout.splitlines() if line.startswith("[rows] "))
+    assert len(rows_line.removeprefix("[rows] ").encode("utf-8")) <= 1024
+    assert "value truncated" in result.stdout
+    assert "[rows_truncated] bounded to 100 rows / 1024 bytes" in result.stdout
+    assert large_value not in result.stdout
+
+
+def test_script_sandbox_command_has_private_filesystem_environment_and_network():
+    limits = definitions._effective_script_limits(definitions._SCRIPT_DEFAULTS)
+    command = definitions._script_sandbox_command(
+        "PYTHON",
+        "/usr/bin/bwrap",
+        "/tmp/work",
+        "/tmp/sandbox-tmp",
+        "main.py",
+        {"PATH": "/usr/bin", "HOME": "/workspace"},
+        limits,
+    )
+
+    assert command[:7] == [
+        "/usr/bin/bwrap", "--die-with-parent", "--unshare-all",
+        "--cap-drop", "ALL", "--new-session", "--clearenv",
+    ]
+    workspace_bind_index = command.index("/tmp/work") - 1
+    assert command[workspace_bind_index:workspace_bind_index + 3] == [
+        "--bind", "/tmp/work", "/workspace",
+    ]
+    tmp_bind_index = command.index("/tmp/sandbox-tmp") - 1
+    assert command[tmp_bind_index:tmp_bind_index + 3] == [
+        "--bind", "/tmp/sandbox-tmp", "/tmp",
+    ]
+    assert "--tmpfs" not in command
+    assert "/opt/dagster" not in command
+    assert "/etc" not in command
+    assert "/proc" not in command
+    assert "/usr/bin/prlimit" in command
+    assert "--nproc=4:4" in command
+    assert "--cpu=7:7" in command
+    assert "--as=67108864:67108864" in command
+    assert command[-2:] == ["/usr/local/bin/python3", "/workspace/main.py"]
+
+
+def test_sandboxed_script_timeout_kills_process_group(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+    started = time.monotonic()
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "timeout", script="import time\ntime.sleep(3)", timeout_seconds=1, cpu_seconds=1,
+    ))
+
+    assert time.monotonic() - started < 3
+    assert result.returncode == 124
+    assert "[sandbox timeout] exceeded 1 seconds" in result.stderr
+    assert result.task_outputs["engine"] == "PYTHON"
+
+
+def test_sandboxed_script_marks_system_error_truncation(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "timeout_with_full_stderr",
+        script="import os, time\nos.write(2, b'x' * 4096)\ntime.sleep(3)",
+        timeout_seconds=1,
+        cpu_seconds=1,
+        stderr_max_bytes=4096,
+    ))
+
+    assert result.returncode == 124
+    assert len(result.stderr.encode("utf-8")) <= 4096
+    assert "sandbox timeout" in result.stderr
+    assert result.task_outputs["stderrTruncated"] is True
+
+
+def test_process_tree_usage_excludes_bubblewrap_and_prlimit_helpers(monkeypatch):
+    stats = {
+        100: {"comm": "bwrap", "ppid": 1, "utime": 0, "stime": 0,
+              "cutime": 0, "cstime": 0, "rss_pages": 1},
+        101: {"comm": "bwrap", "ppid": 100, "utime": 0, "stime": 0,
+              "cutime": 0, "cstime": 0, "rss_pages": 1},
+        102: {"comm": "python3", "ppid": 101, "utime": 1, "stime": 0,
+              "cutime": 0, "cstime": 0, "rss_pages": 1},
+        103: {"comm": "python3", "ppid": 102, "utime": 1, "stime": 0,
+              "cutime": 0, "cstime": 0, "rss_pages": 1},
+        104: {"comm": "prlimit", "ppid": 101, "utime": 0, "stime": 0,
+              "cutime": 0, "cstime": 0, "rss_pages": 1},
+    }
+    monkeypatch.setattr(definitions.os, "listdir", lambda path: list(map(str, stats)))
+    monkeypatch.setattr(definitions, "_read_process_stat", stats.get)
+
+    usage = definitions._script_process_tree_usage(100)
+
+    assert usage["processes"] == 2
+
+
+def test_sandboxed_script_truncates_large_stdout_without_pipe_deadlock(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "large_output",
+        script="import sys\nsys.stdout.write('x' * 200000)",
+        stdout_max_bytes=4096,
+    ))
+
+    assert result.returncode == 0
+    assert len(result.stdout.encode("utf-8")) <= 4096
+    assert "sandbox output truncated" in result.stdout
+    assert result.task_outputs == {
+        "engine": "PYTHON",
+        "stdoutTruncated": True,
+        "stderrTruncated": False,
+        "effectiveMaxProcesses": 4,
+    }
+
+
+def test_sandboxed_script_binary_output_stays_within_byte_limit(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "binary_output",
+        script="import sys\nsys.stdout.buffer.write(b'ok' + b'\\xff' * 8192)",
+        stdout_max_bytes=4096,
+    ))
+
+    assert result.returncode == 0
+    assert len(result.stdout.encode("utf-8")) <= 4096
+    assert result.stdout.startswith("ok")
+    assert "sandbox output truncated" in result.stdout
+
+
+def test_sandboxed_script_marks_utf8_normalization_truncation(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "invalid_utf8",
+        script="import sys\nsys.stdout.buffer.write(b'\\xff' * 4096)",
+        stdout_max_bytes=4096,
+    ))
+
+    assert result.returncode == 0
+    assert len(result.stdout.encode("utf-8")) <= 4096
+    assert result.task_outputs["stdoutTruncated"] is True
+
+
+def test_sandboxed_script_limits_workspace_entries(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "many_files",
+        script="\n".join([
+            "for index in range(300):",
+            "    open(f'empty-{index}', 'w').close()",
+        ]),
+        max_files=256,
+    ))
+
+    assert result.returncode == definitions._SCRIPT_RESOURCE_EXIT_CODE
+    assert "workspace entries exceeded 256" in result.stderr
+
+
+def test_sandboxed_script_counts_directories_toward_workspace_entries(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "many_directories",
+        script="import os\nfor index in range(40): os.mkdir(f'dir-{index}')",
+        max_files=16,
+    ))
+
+    assert result.returncode == definitions._SCRIPT_RESOURCE_EXIT_CODE
+    assert "workspace entries exceeded 16" in result.stderr
+
+
+def test_workspace_usage_counts_separate_sandbox_tmp_directory(tmp_path):
+    workspace = tmp_path / "workspace"
+    sandbox_tmp = tmp_path / "tmp"
+    workspace.mkdir()
+    sandbox_tmp.mkdir()
+    script = workspace / "main.py"
+    script.write_text("print('ok')")
+    for index in range(5):
+        (sandbox_tmp / f"temp-{index}").touch()
+
+    usage = definitions._script_workspace_usage(
+        (str(workspace), str(sandbox_tmp)),
+        str(script),
+        {"max_files": 3, "file_max_bytes": 1024},
+    )
+
+    assert usage["entries"] == 4
+
+
+def test_sandboxed_script_kills_aggregate_memory_violation(monkeypatch):
+    _enable_direct_script_sandbox(monkeypatch)
+    monkeypatch.setattr(
+        definitions,
+        "_script_process_tree_usage",
+        lambda pid: {
+            "cpu_seconds": 0,
+            "memory_bytes": 65 * 1024 * 1024,
+            "processes": 2,
+        },
+    )
+    started = time.monotonic()
+
+    result = definitions._execute_sandboxed_script(_script_node(
+        "memory_limit",
+        script="import time\ntime.sleep(3)",
+        memory_mb=64,
+    ))
+
+    assert time.monotonic() - started < 3
+    assert result.returncode == definitions._SCRIPT_RESOURCE_EXIT_CODE
+    assert "[sandbox resource limit] memory exceeded" in result.stderr
+    assert "memory exceeded" in result.task_outputs["resourceLimit"]
+
+
+def test_script_security_profiles_restrict_syscalls_and_trino_catalogs():
+    dagster_dir = Path(__file__).resolve().parent
+    seccomp = json.loads((dagster_dir / "seccomp-user-code.json").read_text())
+    denied_syscalls = {
+        name
+        for rule in seccomp["syscalls"]
+        if rule["action"] == "SCMP_ACT_ERRNO"
+        for name in rule["names"]
+    }
+    assert seccomp["defaultAction"] == "SCMP_ACT_ALLOW"
+    assert {"bpf", "ptrace", "process_vm_readv", "process_vm_writev"} <= denied_syscalls
+    assert "unshare" not in denied_syscalls
+
+    trino_rules = json.loads(
+        (dagster_dir.parent / "trino" / "access-control-rules.json").read_text()
+    )
+    pipeline_catalogs = [
+        rule for rule in trino_rules["catalogs"]
+        if rule.get("user") == "onelake_pipeline"
+    ]
+    assert pipeline_catalogs == [
+        {"user": "onelake_pipeline", "catalog": "iceberg", "allow": "all"},
+        {"user": "onelake_pipeline", "catalog": ".*", "allow": "none"},
+    ]
+    assert any(
+        rule.get("user") == "onelake_pipeline" and rule.get("privileges") == []
+        for rule in trino_rules["tables"]
+    )
+
+
+def test_sandbox_environment_rejects_control_plane_credentials():
+    with pytest.raises(ValueError, match="reserved"):
+        definitions._script_environment({"env": [
+            {"key": "ONELAKE_INTERNAL_TOKEN", "value": "must-not-leak"},
+        ]})
 
 
 def test_spark_sql_wrapper_reads_snapshot_metrics_without_write_statement_regex():
@@ -579,7 +1079,7 @@ def test_graph_linear_order_and_sync_ref(monkeypatch):
 
 
 @pytest.mark.parametrize("task_type", [
-    "TRINO_SQL", "PYTHON", "SHELL", "BRANCH", "CONDITION", "SENSOR", "WAIT",
+    "BRANCH", "CONDITION", "SENSOR", "WAIT",
     "SUB_PIPELINE", "NOTIFY", "ASSERTION",
 ])
 def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, task_type):
@@ -609,6 +1109,151 @@ def test_graph_existing_spark_backed_types_keep_submit_dispatch(monkeypatch, tas
 
     assert command == (["spark-submit"], [])
     assert len(calls) == 1
+
+
+def test_graph_trino_node_uses_callback_log_retry_and_releases_downstream(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    attempts = Counter()
+    spark_calls = []
+
+    def execute(node, **kwargs):
+        attempts[node["task_key"]] += 1
+        if node["task_key"] == "trino_ctas" and attempts[node["task_key"]] == 1:
+            raise RuntimeError("temporary Trino failure")
+        return _trino_result(rows_written=3 if node["task_key"] == "trino_ctas" else None)
+
+    monkeypatch.setattr(definitions, "_execute_trino_sql", execute)
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda *args: spark_calls.append(args) or _command(0),
+    )
+    trino = _node("trino_ctas", "TRINO_SQL", max_retries=1)
+    trino["sql_or_script"] = "CREATE TABLE iceberg.dwd.trino_ctas AS SELECT 1"
+    spark = _node("spark_after")
+
+    result = _run_graph(_config([trino, spark], [_edge("trino_ctas", "spark_after")]))
+
+    assert result["status"] == {"trino_ctas": "SUCCEEDED", "spark_after": "SUCCEEDED"}
+    assert attempts["trino_ctas"] == 2
+    assert len(spark_calls) == 1
+    assert _statuses(callbacks, "trino_ctas") == ["RUNNING", "SUCCEEDED"]
+    success = [payload for key, payload in callbacks
+               if key == "trino_ctas" and payload["status"] == "SUCCEEDED"][0]
+    assert success["rowsWritten"] == 3
+    assert success["outputs"]["engine"] == "TRINO"
+
+
+@pytest.mark.parametrize("task_type", ["PYTHON", "SHELL"])
+def test_graph_script_node_uses_sandbox_callback_and_minio_log(monkeypatch, task_type):
+    callbacks = _install_callback_collector(monkeypatch)
+    uploads = []
+
+    def execute(node, **kwargs):
+        result = subprocess.CompletedProcess(
+            ["sandbox", task_type.lower()], 0, "sandbox output", "",
+        )
+        result.task_outputs = {
+            "engine": task_type,
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+        }
+        return result
+
+    monkeypatch.setattr(definitions, "_execute_sandboxed_script", execute)
+    monkeypatch.setattr(
+        definitions,
+        "_upload_log",
+        lambda tenant, run, task, attempt, content, log:
+            uploads.append((task, content)) or "minio://script.log",
+    )
+
+    result = _run_graph(_config([_script_node("script", task_type)], []))
+
+    assert result["status"] == {"script": "SUCCEEDED"}
+    assert _statuses(callbacks, "script") == ["RUNNING", "SUCCEEDED"]
+    success = callbacks[-1][1]
+    assert success["logRef"] == "minio://script.log"
+    assert success["outputs"]["engine"] == task_type
+    assert uploads[0][0] == "script"
+    assert "sandbox output" in uploads[0][1]
+
+
+def test_native_trino_node_does_not_invoke_spark_submit(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    materializations = []
+    monkeypatch.setattr(
+        definitions, "_execute_trino_sql", lambda node, **kwargs: _trino_result())
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda *args: (_ for _ in ()).throw(AssertionError("Trino must not invoke spark-submit")),
+    )
+    config = _native_node_config("trino_validate", "TRINO_SQL")
+    config.update({"engine": "TRINO", "catalog": "iceberg", "schema": "dwd"})
+    context = SimpleNamespace(op_config=config, log=_Log(), log_event=materializations.append)
+
+    definitions._execute_native_graph_node(context)
+
+    assert _statuses(callbacks, "trino_validate") == ["RUNNING", "SUCCEEDED"]
+    assert materializations == []
+
+
+def test_native_trino_ctas_emits_target_materialization(monkeypatch):
+    _install_callback_collector(monkeypatch)
+    materializations = []
+    monkeypatch.setattr(
+        definitions, "_execute_trino_sql", lambda node, **kwargs: _trino_result(1))
+    config = _native_node_config("trino_ctas", "TRINO_SQL")
+    config.update({
+        "engine": "TRINO",
+        "catalog": "iceberg",
+        "schema": "dwd",
+        "target_fqn": "iceberg.dwd.trino_ctas",
+        "sql_or_script": "CREATE TABLE iceberg.dwd.trino_ctas AS SELECT 1",
+    })
+    context = SimpleNamespace(op_config=config, log=_Log(), log_event=materializations.append)
+
+    definitions._execute_native_graph_node(context)
+
+    assert len(materializations) == 1
+
+
+def test_graph_termination_cancels_active_trino_cursor(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    cancelled = []
+
+    class Cursor:
+        description = None
+
+        def execute(self, sql):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+        def cancel(self):
+            cancelled.append(True)
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "trino", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "trino.dbapi",
+        SimpleNamespace(connect=lambda **kwargs: Connection()),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="SIGTERM"):
+        _run_graph(_config([_node("slow_trino", "TRINO_SQL")], []))
+
+    assert cancelled == [True]
+    assert _statuses(callbacks, "slow_trino") == ["RUNNING"]
 
 
 def test_graph_failure_short_circuits_downstream(monkeypatch):

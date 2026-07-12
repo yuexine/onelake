@@ -109,6 +109,7 @@ class OrchestrationServiceTest {
     @Mock private ObjectProvider<OutboxPublisher> outboxPublisher;
     @Mock private OutboxPublisher publisher;
     @Mock private PipelineLogStorage pipelineLogStorage;
+    @Mock private ScriptSandboxPolicy scriptSandboxPolicy;
 
     private OrchestrationService service;
 
@@ -122,7 +123,8 @@ class OrchestrationServiceTest {
         service = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
             runtimeContractService, pipelineCompileService, pipelineSnapshotService,
             pipelineTaskRepo, pipelineTaskEdgeRepo, taskRunRepo,
-            sparkBuilder, outboxPublisher, pipelineLogStorage, new DataIntervalCalculator());
+            sparkBuilder, outboxPublisher, pipelineLogStorage, new DataIntervalCalculator(),
+            scriptSandboxPolicy);
     }
 
     @AfterEach

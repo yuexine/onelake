@@ -124,6 +124,9 @@ public class OrchestrationService {
     @Value("${onelake.orchestration.max-parallel:4}")
     private int pipelineMaxParallel = 4;
 
+    /** 脚本节点要求环境开关与当前租户能力同时开启。 */
+    private final ScriptSandboxPolicy scriptSandboxPolicy;
+
     /**
      * 创建默认启用的通用 DAG 定义。
      *
@@ -509,6 +512,7 @@ public class OrchestrationService {
                                 .toList())
                     + (plan.graphErrors().isEmpty() ? "" : "; " + String.join("; ", plan.graphErrors())));
         }
+        validateTaskExecutionMode(tasks, tenantId);
         // 2. 就绪检查：至少需要一个真实执行节点；SYNC_REF/QUALITY_GATE 等观测节点仍会生成 task_run 供 UI 展示。
         long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
         if (executableCount == 0) {
@@ -1126,6 +1130,21 @@ public class OrchestrationService {
         return "GRAPH".equalsIgnoreCase(pipelineExecutionMode);
     }
 
+    private void validateTaskExecutionMode(List<PipelineTask> tasks, UUID tenantId) {
+        boolean hasScriptTask = tasks.stream().anyMatch(task ->
+                task.getTaskType() == TaskType.PYTHON || task.getTaskType() == TaskType.SHELL);
+        if (hasScriptTask && !scriptSandboxPolicy.isEnabledFor(tenantId)) {
+            throw new BizException(40063, scriptSandboxPolicy.blockedReason(tenantId));
+        }
+        if (!isGraphPipelineExecutionMode()
+                && tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.TRINO_SQL
+                        || task.getTaskType() == TaskType.PYTHON
+                        || task.getTaskType() == TaskType.SHELL)) {
+            throw new BizException(40062,
+                    "TRINO_SQL/PYTHON/SHELL 仅支持 GRAPH 执行模式，请设置 ONELAKE_PIPELINE_EXECUTION_MODE=GRAPH");
+        }
+    }
+
     private String pipelineEngineTag(List<PipelineTask> tasks) {
         return EngineType.SPARK_SQL.name();
     }
@@ -1603,12 +1622,13 @@ public class OrchestrationService {
         }
         TaskRunStatus mapped = mapTerminalTaskRunStatus(terminalStatus);
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+        Map<String, PipelineTask> snapshotTasks = snapshotTasksForRun(run);
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
         if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
             propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
         }
         for (TaskRun tr : taskRuns) {
-            PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(run.getDagId(), tr.getTaskKey()).orElse(null);
+            PipelineTask task = taskDefinitionForRun(run, tr.getTaskKey(), snapshotTasks);
             if (isTerminalTaskRunStatus(tr.getStatus())) {
                 if (tr.getStatus() == TaskRunStatus.SUCCEEDED
                         && needsTaskRunSummary(tr)
@@ -1637,6 +1657,7 @@ public class OrchestrationService {
         TaskRunStatus mapped = mapTerminalTaskRunStatus(terminalStatus);
         // GRAPH 模式可能同时收到节点回调和 run 终态兜底；锁住整批 task_run 后再补偿。
         List<TaskRun> taskRuns = taskRunRepo.findByJobRunIdForUpdate(run.getId());
+        Map<String, PipelineTask> snapshotTasks = snapshotTasksForRun(run);
         Set<String> failedOrBlocked = failedOrBlockedTaskKeys(taskRuns);
         if (mapped == TaskRunStatus.FAILED && !failedOrBlocked.isEmpty()) {
             propagateUpstreamFailures(run, taskRuns, failedOrBlocked);
@@ -1645,7 +1666,7 @@ public class OrchestrationService {
             if (isTerminalTaskRunStatus(tr.getStatus())) {
                 continue;
             }
-            PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(run.getDagId(), tr.getTaskKey()).orElse(null);
+            PipelineTask task = taskDefinitionForRun(run, tr.getTaskKey(), snapshotTasks);
             tr.setStatus(mapped);
             if (tr.getStartedAt() == null) {
                 tr.setStartedAt(run.getStartedAt());
@@ -2035,8 +2056,9 @@ public class OrchestrationService {
             boolean succeeded = terminalStatus == DagStatus.SUCCEEDED;
             // 1. 为本次作业中的可执行成功节点发布 pipeline.task.loaded。
             List<TaskRun> taskRuns = taskRunRepo.findByJobRunId(run.getId());
+            Map<String, PipelineTask> snapshotTasks = snapshotTasksForRun(run);
             for (TaskRun tr : taskRuns) {
-                publishPipelineTaskLoadedEvent(dag, run, tr, succeeded);
+                publishPipelineTaskLoadedEvent(dag, run, tr, succeeded, snapshotTasks);
             }
             // 2. 发布聚合级 pipeline.run.succeeded/failed。
             publishPipelineRunEvent(dag, run, null, succeeded,
@@ -2064,7 +2086,33 @@ public class OrchestrationService {
                 && RunEnvironment.DEV.name().equalsIgnoreCase(run.getRunMode());
     }
 
-    private void publishPipelineTaskLoadedEvent(Dag dag, JobRun run, TaskRun tr, boolean runSucceeded) {
+    private Map<String, PipelineTask> snapshotTasksForRun(JobRun run) {
+        if (run.getPipelineVersionId() == null) {
+            return Map.of();
+        }
+        return pipelineSnapshotService
+                .loadExecutionSnapshot(run.getPipelineVersionId(), run.getDagId())
+                .tasks().stream()
+                .collect(Collectors.toMap(
+                        PipelineTask::getTaskKey,
+                        Function.identity(),
+                        (first, ignored) -> first,
+                        LinkedHashMap::new));
+    }
+
+    private PipelineTask taskDefinitionForRun(JobRun run,
+                                              String taskKey,
+                                              Map<String, PipelineTask> snapshotTasks) {
+        return run.getPipelineVersionId() == null
+                ? pipelineTaskRepo.findByDagIdAndTaskKey(run.getDagId(), taskKey).orElse(null)
+                : snapshotTasks.get(taskKey);
+    }
+
+    private void publishPipelineTaskLoadedEvent(Dag dag,
+                                                JobRun run,
+                                                TaskRun tr,
+                                                boolean runSucceeded,
+                                                Map<String, PipelineTask> snapshotTasks) {
         OutboxPublisher publisher = outboxPublisher.getIfAvailable();
         if (publisher == null) return;
         if (tr.getStatus() == null) return;
@@ -2074,7 +2122,7 @@ public class OrchestrationService {
         if (tr.getStatus() != com.onelake.orchestration.domain.enums.TaskRunStatus.SUCCEEDED) return;
 
         java.util.Map<String, Object> payload = new LinkedHashMap<>();
-        PipelineTask task = pipelineTaskRepo.findByDagIdAndTaskKey(dag.getId(), tr.getTaskKey()).orElse(null);
+        PipelineTask task = taskDefinitionForRun(run, tr.getTaskKey(), snapshotTasks);
         if (!isMaterializingTask(task)) {
             return;
         }
@@ -2109,13 +2157,15 @@ public class OrchestrationService {
         publisher.publish(DomainEvents.PIPELINE_TASK_LOADED, dag.getId().toString(), payload);
     }
 
-    private boolean isMaterializingTask(PipelineTask task) {
+    boolean isMaterializingTask(PipelineTask task) {
         if (task == null || task.getTaskType() == null) {
             return false;
         }
         return switch (task.getTaskType()) {
             case SPARK_SQL, PYSPARK, QUALITY_GATE -> true;
-            case SYNC_REF, TRINO_SQL, PYTHON, SHELL, BRANCH, CONDITION, SENSOR, WAIT,
+            case TRINO_SQL -> StringUtils.hasText(task.getTargetFqn())
+                    && PipelineCompileService.isTrinoCtasConfig(task.getConfig());
+            case SYNC_REF, PYTHON, SHELL, BRANCH, CONDITION, SENSOR, WAIT,
                     SUB_PIPELINE, NOTIFY, ASSERTION -> false;
         };
     }

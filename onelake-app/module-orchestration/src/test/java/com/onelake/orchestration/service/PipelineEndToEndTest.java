@@ -96,6 +96,7 @@ class PipelineEndToEndTest {
     @Mock private ParamResolver paramResolver;
     @Mock private PipelineSnapshotService snapshotService;
     @Mock private TenantRepository tenantRepo;
+    @Mock private ScriptSandboxPolicy scriptSandboxPolicy;
 
     private PipelineService pipelineService;
     private PipelineCompileService compileService;
@@ -116,12 +117,14 @@ class PipelineEndToEndTest {
 
     @BeforeEach
     void setup() {
-        compileService = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
+        compileService = new PipelineCompileService(
+                dagRepo, taskRepo, edgeRepo, scriptSandboxPolicy);
         pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
                 runRepo, compileService, snapshotService, outboxProvider, tenantRepo);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
-                new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage, new DataIntervalCalculator());
+                new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage,
+                new DataIntervalCalculator(), scriptSandboxPolicy);
 
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();

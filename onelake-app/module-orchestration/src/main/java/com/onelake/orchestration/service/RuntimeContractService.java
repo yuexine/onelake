@@ -35,17 +35,19 @@ public class RuntimeContractService {
             CapabilityState.READY, null),
         new RuntimeSpec("TRINO", "TRINO", "onelake_pipeline_graph_run", true, true,
             CapabilityState.READY, null),
-        new RuntimeSpec("SCRIPT", "SCRIPT", "onelake_pipeline_graph_run", true, false,
+        new RuntimeSpec("SCRIPT", "SCRIPT", "onelake_pipeline_graph_run", true, true,
             CapabilityState.RESTRICTED,
             "脚本执行受限：目标环境必须显式启用满足 ADR-001 的隔离沙箱")
     );
 
     private final DagsterClient dagster;
+    private final ScriptSandboxPolicy scriptSandboxPolicy;
 
     /** 返回静态 Java 能力与当前 Dagster code location 可用性的合并视图。 */
     public List<RuntimeContractDTO> listRuntimeContracts() {
         Set<String> availableJobs = availableDagsterJobs();
         return SPECS.stream()
+            .map(this::effectiveSpec)
             .map(spec -> toDTO(spec, availableJobs.contains(spec.dagsterJob())))
             .toList();
     }
@@ -122,6 +124,7 @@ public class RuntimeContractService {
         String normalizedTarget = normalizeTarget(compileTarget);
         if (StringUtils.hasText(normalizedTarget)) {
             Optional<RuntimeSpec> byTarget = SPECS.stream()
+                .map(this::effectiveSpec)
                 .filter(spec -> spec.compileTarget().equals(normalizedTarget) || spec.engine().equals(normalizedTarget))
                 .filter(spec -> supportsJob(spec, dagsterJob))
                 .findFirst();
@@ -132,9 +135,27 @@ public class RuntimeContractService {
         }
         // 旧定义未声明 compileTarget 时，继续按实际 Dagster job 回退到 Spark 契约。
         return SPECS.stream()
+                .map(this::effectiveSpec)
                 .filter(spec -> "SPARK".equals(spec.engine()))
                 .filter(spec -> supportsJob(spec, dagsterJob))
                 .findFirst();
+    }
+
+    private RuntimeSpec effectiveSpec(RuntimeSpec spec) {
+        if (!"SCRIPT".equals(spec.engine())) {
+            return spec;
+        }
+        java.util.UUID tenantId = com.onelake.common.context.TenantContext.getTenantId();
+        if (!scriptSandboxPolicy.isEnabledFor(tenantId)) {
+            return new RuntimeSpec(
+                    spec.compileTarget(), spec.engine(), spec.dagsterJob(),
+                    spec.manifestSupported(), spec.graphExecutionSupported(),
+                    CapabilityState.RESTRICTED, scriptSandboxPolicy.blockedReason(tenantId));
+        }
+        return new RuntimeSpec(
+                spec.compileTarget(), spec.engine(), spec.dagsterJob(),
+                spec.manifestSupported(), spec.graphExecutionSupported(),
+                CapabilityState.READY, null);
     }
 
     private boolean supportsJob(RuntimeSpec spec, String dagsterJob) {

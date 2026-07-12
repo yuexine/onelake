@@ -76,6 +76,8 @@ services:
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./trino/access-control-rules.json:/etc/trino/access-control-rules.json:ro
 
   # ===== P-Spark: Spark runtime shared with Trino (C5 / docs/流水线模块重设计方案.md §6.4) =====
   # Shares Iceberg + Hive Metastore + MinIO with Trino so cross-engine table-level deps close.
@@ -227,6 +229,17 @@ services:
       dockerfile: Dockerfile_user_code
     image: onelake-dagster-user-code:latest
     container_name: onelake-dagster-user-code
+    read_only: true
+    cap_drop: ["ALL"]
+    # 自定义 seccomp 保留 Bubblewrap 所需的 namespace/mount 调用，同时阻断
+    # ptrace、BPF、内核模块、跨进程内存访问等高风险 syscall。
+    security_opt: ["no-new-privileges:true", "seccomp:./dagster/seccomp-user-code.json"]
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /home/onelake:size=512m,uid=10001,gid=10001,mode=700
+      # Dagster step compute logs / default IO manager need a writable runtime area;
+      # it is not mounted into the inner Bubblewrap script sandbox.
+      - /opt/dagster/dagster_home:size=512m,uid=10001,gid=10001,mode=700
     environment:
       DAGSTER_POSTGRES_HOST: dagster-postgres
       DAGSTER_POSTGRES_USER: dagster
@@ -237,7 +250,7 @@ services:
       ONELAKE_DBT_PROFILES_DIR: /opt/onelake/dbt
       TRINO_HOST: trino
       TRINO_PORT: 8080
-      TRINO_USER: onelake
+      TRINO_USER: onelake_pipeline
       DBT_SCHEMA: ods
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: minio12345

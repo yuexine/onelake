@@ -49,7 +49,8 @@ class PipelineCompileServiceTest {
 
     @BeforeEach
     void setup() {
-        service = new PipelineCompileService(dagRepo, taskRepo, edgeRepo);
+        service = new PipelineCompileService(
+                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"));
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -264,7 +265,200 @@ class PipelineCompileServiceTest {
         PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
 
         assertThat(result.allValidated()).isFalse();
-        assertThat(result.tasks().get(0).errorMessage()).contains("non-empty config");
+        assertThat(result.tasks().get(0).errorMessage()).contains("valid object config");
+    }
+
+    @Test
+    void scriptTaskCompilesWithConservativeSandboxLimits() {
+        PipelineTask task = extensionTask("python_safe", TaskType.PYTHON);
+        task.setConfig("""
+            {
+              "script":"print('hello')",
+              "timeout_seconds":20,
+              "cpu_seconds":10,
+              "cpu_cores":1,
+              "memory_mb":128,
+              "max_processes":4,
+              "stdout_max_bytes":8192,
+              "stderr_max_bytes":8192,
+              "env":{"BIZ_LABEL":"daily"},
+              "network_allowlist":[]
+            }
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(task.getExecutable()).isTrue();
+    }
+
+    @Test
+    void scriptTaskRejectsTenantWithoutSandboxCapability() {
+        PipelineCompileService denied = new PipelineCompileService(
+                dagRepo, taskRepo, edgeRepo,
+                new ScriptSandboxPolicy(true, UUID.randomUUID().toString()));
+        PipelineTask task = extensionTask("python_denied", TaskType.PYTHON);
+
+        PipelineCompileResult result = denied.compile(
+                dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage())
+                .contains("当前租户未获 PYTHON/SHELL 沙箱能力授权");
+    }
+
+    @Test
+    void scriptTaskRejectsOversizedSourceAndTimeout() {
+        PipelineTask oversized = extensionTask("python_large", TaskType.PYTHON);
+        oversized.setConfig("{\"script\":\"" + "x".repeat(65_537) + "\"}");
+        PipelineTask timeout = extensionTask("shell_timeout", TaskType.SHELL);
+        timeout.setConfig("{\"script\":\"echo ok\",\"timeout_seconds\":901}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(oversized, timeout), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(error -> assertThat(error).contains("exceeds 65536 UTF-8 bytes"))
+                .anySatisfy(error -> assertThat(error).contains("timeout_seconds must be between 1 and 900"));
+    }
+
+    @Test
+    void scriptTaskRejectsControlPlaneCredentialAndEscapePatterns() {
+        PipelineTask credential = extensionTask("python_secret", TaskType.PYTHON);
+        credential.setConfig("""
+            {"script":"print('safe')","env":{"ONELAKE_INTERNAL_TOKEN":"forbidden"}}
+            """);
+        PipelineTask escape = extensionTask("shell_escape", TaskType.SHELL);
+        escape.setConfig("""
+            {"script":"cat /var/run/docker.sock","network_allowlist":[]}
+            """);
+        PipelineTask network = extensionTask("python_network", TaskType.PYTHON);
+        network.setConfig("""
+            {"script":"print('network')","network_allowlist":["example.com:443"]}
+            """);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(credential, escape, network), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(error -> assertThat(error).contains("env key is reserved"))
+                .anySatisfy(error -> assertThat(error).contains("sandbox-escape pattern"))
+                .anySatisfy(error -> assertThat(error).contains("networking is default-deny"));
+    }
+
+    @Test
+    void trinoReadQueryCompilesWithoutMaterializationTarget() {
+        PipelineTask task = extensionTask("trino_validate", TaskType.TRINO_SQL);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(task.getExecutable()).isTrue();
+        assertThat(task.getTargetFqn()).isNull();
+    }
+
+    @Test
+    void trinoCtasRequiresMatchingIcebergTarget() {
+        PipelineTask task = extensionTask("trino_ctas", TaskType.TRINO_SQL);
+        task.setTargetFqn("iceberg.dwd.daily_orders");
+        task.setConfig("""
+            {
+              "sql":"CREATE TABLE dwd.daily_orders AS SELECT 1 AS order_id",
+              "catalog":"iceberg",
+              "schema":"dwd"
+            }
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isTrue();
+    }
+
+    @Test
+    void trinoRejectsUnapprovedWritesAndCatalogs() {
+        PipelineTask write = extensionTask("trino_insert", TaskType.TRINO_SQL);
+        write.setConfig("""
+            {"sql":"INSERT INTO dwd.orders SELECT 1","catalog":"iceberg","schema":"dwd"}
+            """);
+        PipelineTask catalog = extensionTask("trino_hive", TaskType.TRINO_SQL);
+        catalog.setConfig("""
+            {"sql":"SELECT 1","catalog":"hive","schema":"dwd"}
+            """);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(write, catalog), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(error -> assertThat(error).contains("read-only queries or CREATE TABLE AS SELECT"))
+                .anySatisfy(error -> assertThat(error).contains("config.catalog"));
+    }
+
+    @Test
+    void trinoExplainAnalyzeCannotWrapWriteStatement() {
+        PipelineTask task = extensionTask("trino_explain_insert", TaskType.TRINO_SQL);
+        task.setConfig("""
+            {
+              "sql":"EXPLAIN ANALYZE INSERT INTO dwd.orders SELECT 1",
+              "catalog":"iceberg",
+              "schema":"dwd"
+            }
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage())
+                .contains("read-only queries or CREATE TABLE AS SELECT");
+    }
+
+    @Test
+    void trinoExplainAnalyzeCommentsCannotBypassWriteCheck() {
+        PipelineTask task = extensionTask("trino_explain_comment_insert", TaskType.TRINO_SQL);
+        task.setConfig("""
+            {
+              "sql":"EXPLAIN /* inspect */ ANALYZE -- execute below\\n INSERT INTO dwd.orders SELECT 1",
+              "catalog":"iceberg",
+              "schema":"dwd"
+            }
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage())
+                .contains("read-only queries or CREATE TABLE AS SELECT");
+    }
+
+    @Test
+    void trinoExplainAnalyzeReadQueryRemainsAllowed() {
+        PipelineTask task = extensionTask("trino_explain_select", TaskType.TRINO_SQL);
+        task.setConfig("""
+            {
+              "sql":"EXPLAIN ANALYZE SELECT count(*) FROM dwd.orders",
+              "catalog":"iceberg",
+              "schema":"dwd"
+            }
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isTrue();
+    }
+
+    @Test
+    void trinoRejectsSchemaOutsideServerAllowlist() {
+        PipelineTask task = extensionTask("trino_private", TaskType.TRINO_SQL);
+        task.setConfig("""
+            {"sql":"SELECT 1","catalog":"iceberg","schema":"private_tenant"}
+            """);
+
+        PipelineCompileResult result = service.compile(dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage()).contains("config.schema must be one of");
     }
 
     @Test
@@ -383,7 +577,12 @@ class PipelineCompileServiceTest {
         task.setTaskType(type);
         task.setName(key);
         task.setEngine(type.name());
-        task.setConfig("{\"enabled\":true}");
+        task.setConfig(switch (type) {
+            case TRINO_SQL -> "{\"sql\":\"SELECT 1\",\"catalog\":\"iceberg\",\"schema\":\"dwd\"}";
+            case PYTHON -> "{\"script\":\"print('ok')\"}";
+            case SHELL -> "{\"script\":\"echo ok\"}";
+            default -> "{\"enabled\":true}";
+        });
         return task;
     }
 

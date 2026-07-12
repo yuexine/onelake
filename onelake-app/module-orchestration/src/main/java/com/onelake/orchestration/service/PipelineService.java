@@ -166,8 +166,14 @@ public class PipelineService {
                         + result.taskResults().stream().filter(t -> !t.valid()).count() + " 个任务错误 / "
                         + result.graphErrors().size() + " 个图错误）");
             }
-        } else if ("PUBLISHED".equals(target) && !"VALIDATED".equals(current)) {
-            throw new BizException(40071, "无法直接从 " + current + " 发布到 PUBLISHED：必须先 VALIDATED");
+        } else if ("PUBLISHED".equals(target)) {
+            if (!"VALIDATED".equals(current)) {
+                throw new BizException(40071, "无法直接从 " + current + " 发布到 PUBLISHED：必须先 VALIDATED");
+            }
+            PipelineValidationResult result = validate(dagId);
+            if (!result.valid()) {
+                throw new BizException(40070, "无法发布：当前草稿或租户执行能力校验未通过");
+            }
         }
 
         if ("PUBLISHED".equals(target) && publishApprovalEnabled) {
@@ -211,17 +217,21 @@ public class PipelineService {
             return dag;
         }
 
-        PipelineSnapshotService.SnapshotPayload currentSnapshot = snapshotService.snapshot(dagId);
-        if (!java.util.Objects.equals(approvedChecksum, currentSnapshot.checksum())) {
-            log.warn("流水线 {} 发布审批对应内容已过期，保持状态 {}：approvedChecksum={} currentChecksum={}",
-                    dagId, dag.getStatus(), approvedChecksum, currentSnapshot.checksum());
-            return dag;
-        }
         if (!"VALIDATED".equalsIgnoreCase(dag.getStatus())
                 && !("PUBLISHED".equalsIgnoreCase(dag.getStatus())
                     && (dag.getPublishedVersionId() == null
                         || Boolean.TRUE.equals(dag.getHasUnpublishedChanges())))) {
             log.warn("流水线 {} 当前状态 {} 不接受发布审批结果，跳过", dagId, dag.getStatus());
+            return dag;
+        }
+        PipelineValidationResult validation = validate(dagId);
+        if (!validation.valid()) {
+            throw new BizException(40070, "审批通过后无法发布：当前草稿或租户执行能力校验未通过");
+        }
+        PipelineSnapshotService.SnapshotPayload currentSnapshot = snapshotService.snapshot(dagId);
+        if (!java.util.Objects.equals(approvedChecksum, currentSnapshot.checksum())) {
+            log.warn("流水线 {} 发布审批对应内容已过期，保持状态 {}：approvedChecksum={} currentChecksum={}",
+                    dagId, dag.getStatus(), approvedChecksum, currentSnapshot.checksum());
             return dag;
         }
 

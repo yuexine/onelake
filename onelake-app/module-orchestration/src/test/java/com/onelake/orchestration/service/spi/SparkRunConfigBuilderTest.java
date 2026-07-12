@@ -18,6 +18,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -169,6 +170,133 @@ class SparkRunConfigBuilderTest {
                 tenantId, pipelineId, Set.of("sync_user", "spark_dwd"), null, Map.of());
         Map<String, Object> execution = (Map<String, Object>) config.opConfig().get("execution");
         assertThat(execution).isEqualTo(Map.of("config", Map.of("max_concurrent", 6)));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphRunConfigCarriesTrinoSessionAndRendersSqlParameters() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask trino = task(pipelineId, tenantId, "trino_validate", TaskType.TRINO_SQL, true, """
+            {
+              "sql": "select date '${bizdate}' as bizdate",
+              "catalog": "ICEBERG",
+              "schema": "DWD"
+            }
+            """);
+        trino.setEngine("TRINO");
+        trino.setTargetFqn(null);
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId,
+                "pipeline_" + pipelineId,
+                tenantId,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        trino.getId(), trino.getTaskKey(), trino.getTaskType().name(),
+                        true, null, null)),
+                true,
+                List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+        RunContext runContext = runContext("2026-07-11T16:00:00Z", "2026-07-12T16:00:00Z");
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context, List.of(trino), List.of(), "", 1, Map.of(),
+                runContext, runContext.builtInParameters(runId));
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> node = (Map<String, Object>)
+                ((Map<String, Object>) ops.get("trino_validate")).get("config");
+        assertThat(node)
+                .containsEntry("task_type", "TRINO_SQL")
+                .containsEntry("engine", "TRINO")
+                .containsEntry("catalog", "iceberg")
+                .containsEntry("schema", "dwd")
+                .containsEntry("sql_or_script", "select date '2026-07-12' as bizdate");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphRunConfigFreezesScriptSandboxLimitsAndSafeEnvironment() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        PipelineTask script = task(pipelineId, tenantId, "python_daily", TaskType.PYTHON, true, """
+            {
+              "script":"print('${bizdate}')",
+              "timeout_seconds":20,
+              "cpu_seconds":10,
+              "cpu_cores":1,
+              "memory_mb":128,
+              "max_processes":4,
+              "max_files":128,
+              "file_max_bytes":65536,
+              "stdout_max_bytes":8192,
+              "stderr_max_bytes":4096,
+              "env":{"BIZ_LABEL":"daily"},
+              "network_allowlist":[]
+            }
+            """);
+        script.setEngine("SCRIPT");
+        script.setTargetFqn(null);
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId, "pipeline_" + pipelineId, tenantId,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        script.getId(), script.getTaskKey(), script.getTaskType().name(),
+                        true, null, null)),
+                true, List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, runId, compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+        RunContext runContext = runContext("2026-07-11T16:00:00Z", "2026-07-12T16:00:00Z");
+
+        DagsterRunConfig config = builder.buildGraphRunConfig(
+                context, List.of(script), List.of(), "", 1, Map.of(),
+                runContext, runContext.builtInParameters(runId));
+
+        Map<String, Object> ops = (Map<String, Object>) config.opConfig().get("ops");
+        Map<String, Object> node = (Map<String, Object>)
+                ((Map<String, Object>) ops.get("python_daily")).get("config");
+        assertThat(node)
+                .containsEntry("task_type", "PYTHON")
+                .containsEntry("engine", "SCRIPT")
+                .containsEntry("sql_or_script", "print('2026-07-12')")
+                .containsEntry("timeout_seconds", 20)
+                .containsEntry("cpu_seconds", 10)
+                .containsEntry("cpu_cores", 1)
+                .containsEntry("memory_mb", 128)
+                .containsEntry("max_processes", 4)
+                .containsEntry("max_files", 128)
+                .containsEntry("file_max_bytes", 65536)
+                .containsEntry("stdout_max_bytes", 8192)
+                .containsEntry("stderr_max_bytes", 4096)
+                .containsEntry("network_allowlist", List.of());
+        assertThat((List<Map<String, String>>) node.get("env"))
+                .containsExactly(Map.of("key", "BIZ_LABEL", "value", "daily"));
+    }
+
+    @Test
+    void legacyRunConfigRejectsTrinoInsteadOfSilentlyDroppingIt() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        PipelineTask trino = task(
+                pipelineId, tenantId, "trino_validate", TaskType.TRINO_SQL, true,
+                "{\"sql\":\"SELECT 1\",\"catalog\":\"iceberg\",\"schema\":\"default\"}");
+        PipelineCompileResult compile = new PipelineCompileResult(
+                pipelineId, "pipeline_" + pipelineId, tenantId,
+                List.of(new PipelineCompileResult.TaskCompileResult(
+                        trino.getId(), trino.getTaskKey(), trino.getTaskType().name(),
+                        true, null, null)),
+                true, List.of());
+        TaskBundleContext context = new TaskBundleContext(
+                pipelineId, tenantId, UUID.randomUUID(), compile,
+                "pipeline_" + pipelineId, "spark-default", "spark-small");
+
+        assertThatThrownBy(() -> builder.build(
+                context, List.of(trino), "", null, Map.of(), List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GRAPH");
     }
 
     @Test

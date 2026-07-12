@@ -20,21 +20,26 @@ import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
-import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 将流水线（DAG + 节点）编译为 {@link PipelineCompileResult}。
@@ -47,9 +52,70 @@ import java.util.UUID;
 @Slf4j
 public class PipelineCompileService {
 
+    private static final Pattern TRINO_SCHEMA = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern TRINO_DIRECT_READ_QUERY = Pattern.compile(
+            "(?is)^(?:SELECT|WITH|SHOW|DESCRIBE)\\b.*");
+    private static final Pattern TRINO_EXPLAIN = Pattern.compile("(?is)^EXPLAIN\\b.*");
+    private static final Pattern TRINO_EXPLAIN_ANALYZE = Pattern.compile(
+            "(?is)^EXPLAIN\\s+ANALYZE(?:\\s+VERBOSE)?\\s+(.+)$");
+    private static final Pattern TRINO_SQL_COMMENT = Pattern.compile(
+            "(?s)/\\*.*?\\*/|--[^\\r\\n]*(?:\\r?\\n|$)");
+    private static final Pattern TRINO_CTAS = Pattern.compile(
+            "(?is)^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"
+                    + "([A-Za-z_][A-Za-z0-9_$]*(?:\\.[A-Za-z_][A-Za-z0-9_$]*){0,2})"
+                    + "\\s+(?:WITH\\s*\\(.*?\\)\\s+)?AS\\s+(?:SELECT|WITH)\\b.*");
+    private static final Pattern LEADING_SQL_COMMENT = Pattern.compile(
+            "(?s)^\\s*(?:--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)");
+    private static final Pattern SCRIPT_ENV_NAME = Pattern.compile("[A-Z_][A-Z0-9_]{0,63}");
+    private static final Pattern SCRIPT_DANGEROUS_PATTERN = Pattern.compile(
+            "(?is)(?:/var/run/docker\\.sock|/proc/1(?:/|\\b)|/sys/fs/cgroup|/opt/dagster|"
+                    + "169\\.254\\.169\\.254|ONELAKE_INTERNAL_TOKEN|AWS_SECRET_ACCESS_KEY|"
+                    + "DAGSTER_POSTGRES_PASSWORD|(?:^|[;&|`])\\s*(?:mount|nsenter|unshare)\\b)");
+    private static final List<String> SCRIPT_FORBIDDEN_ENV_MARKERS = List.of(
+            "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "ACCESS_KEY", "PRIVATE_KEY",
+            "DAGSTER_", "ONELAKE_INTERNAL", "MINIO_", "AWS_", "DATABASE_", "POSTGRES_");
+    private static final Set<String> SCRIPT_FORBIDDEN_ENV_NAMES = Set.of(
+            "PATH", "HOME", "TMPDIR", "LANG", "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONHOME",
+            "LD_LIBRARY_PATH", "LD_PRELOAD", "BASH_ENV", "ENV");
+    private static final int SCRIPT_MAX_ENV_ENTRIES = 16;
+
     private final DagRepository dagRepo;
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
+    private final ScriptSandboxPolicy scriptSandboxPolicy;
+
+    @Value("${onelake.orchestration.trino.allowed-catalogs:iceberg}")
+    private String trinoAllowedCatalogs = "iceberg";
+
+    @Value("${onelake.orchestration.trino.allowed-schemas:default,ods,dwd}")
+    private String trinoAllowedSchemas = "default,ods,dwd";
+
+    @Value("${onelake.orchestration.script.max-script-bytes:65536}")
+    private int scriptMaxBytes = 65_536;
+
+    @Value("${onelake.orchestration.script.max-timeout-seconds:900}")
+    private int scriptMaxTimeoutSeconds = 900;
+
+    @Value("${onelake.orchestration.script.max-cpu-seconds:900}")
+    private int scriptMaxCpuSeconds = 900;
+
+    @Value("${onelake.orchestration.script.max-cpu-cores:4}")
+    private int scriptMaxCpuCores = 4;
+
+    @Value("${onelake.orchestration.script.max-memory-mb:2048}")
+    private int scriptMaxMemoryMb = 2048;
+
+    @Value("${onelake.orchestration.script.max-processes:64}")
+    private int scriptMaxProcesses = 64;
+
+    @Value("${onelake.orchestration.script.max-files:4096}")
+    private int scriptMaxFiles = 4096;
+
+    @Value("${onelake.orchestration.script.max-file-bytes:16777216}")
+    private int scriptMaxFileBytes = 16 * 1024 * 1024;
+
+    @Value("${onelake.orchestration.script.max-output-bytes:1048576}")
+    private int scriptMaxOutputBytes = 1024 * 1024;
 
     /**
      * 编译单条流水线，并在调用方事务内回写每个节点的
@@ -144,9 +210,214 @@ public class PipelineCompileService {
             case QUALITY_GATE -> validateQualityGate(t);
             case SYNC_REF -> validateSyncRef(t);
             case SPARK_SQL, PYSPARK -> validateSparkTask(t);
-            case TRINO_SQL, PYTHON, SHELL, BRANCH, CONDITION, SENSOR, WAIT,
+            case TRINO_SQL -> validateTrinoTask(t);
+            case PYTHON, SHELL -> validateScriptTask(t, tenantId);
+            case BRANCH, CONDITION, SENSOR, WAIT,
                     SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
         };
+    }
+
+    /** Trino 只接受固定 Iceberg 会话中的只读查询或声明目标资产的 CTAS。 */
+    private TaskCompileResult validateTrinoTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "TRINO_SQL task requires valid object config");
+        }
+        String sql = textOrEmpty(cfg, "sql");
+        if (!StringUtils.hasText(sql)) {
+            return fail(t, "TRINO_SQL task requires non-empty config.sql");
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "TRINO_SQL parameter expression invalid: " + ex.getMessage());
+        }
+
+        String catalog = normalizeIdentifier(textOrEmpty(cfg, "catalog"));
+        String schema = normalizeIdentifier(textOrEmpty(cfg, "schema"));
+        Set<String> allowedCatalogs = configuredIdentifiers(trinoAllowedCatalogs);
+        Set<String> allowedSchemas = configuredIdentifiers(trinoAllowedSchemas);
+        if (!allowedCatalogs.contains(catalog)) {
+            return fail(t, "TRINO_SQL config.catalog must be one of " + allowedCatalogs);
+        }
+        if (!TRINO_SCHEMA.matcher(schema).matches()) {
+            return fail(t, "TRINO_SQL config.schema must be a simple identifier");
+        }
+        if (!allowedSchemas.contains(schema)) {
+            return fail(t, "TRINO_SQL config.schema must be one of " + allowedSchemas);
+        }
+
+        String statement = stripLeadingSqlComments(sql);
+        if (isReadOnlyTrinoStatement(statement)) {
+            return ok(t);
+        }
+        Matcher ctas = TRINO_CTAS.matcher(statement);
+        if (!ctas.matches()) {
+            return fail(t, "TRINO_SQL only supports read-only queries or CREATE TABLE AS SELECT");
+        }
+        if (!StringUtils.hasText(t.getTargetFqn())) {
+            return fail(t, "TRINO_SQL CTAS requires targetFqn");
+        }
+        String ctasTarget = qualifyTrinoTarget(ctas.group(1), catalog, schema);
+        if (!ctasTarget.equalsIgnoreCase(t.getTargetFqn().trim())) {
+            return fail(t, "TRINO_SQL CTAS target " + ctasTarget
+                    + " must match targetFqn " + t.getTargetFqn().trim());
+        }
+        return ok(t);
+    }
+
+    private static String stripLeadingSqlComments(String sql) {
+        String statement = sql == null ? "" : sql.stripLeading();
+        Matcher matcher = LEADING_SQL_COMMENT.matcher(statement);
+        while (matcher.find()) {
+            statement = statement.substring(matcher.end()).stripLeading();
+            matcher = LEADING_SQL_COMMENT.matcher(statement);
+        }
+        return statement;
+    }
+
+    static boolean isTrinoCtasConfig(String config) {
+        JsonNode cfg = parseSafeJson(config);
+        return cfg != null
+                && cfg.isObject()
+                && TRINO_CTAS.matcher(stripLeadingSqlComments(textOrEmpty(cfg, "sql"))).matches();
+    }
+
+    private static boolean isReadOnlyTrinoStatement(String statement) {
+        // SQL comments are whitespace to Trino; normalize them before checking the
+        // EXPLAIN ANALYZE prefix so `EXPLAIN /*...*/ ANALYZE INSERT` cannot bypass it.
+        String normalized = TRINO_SQL_COMMENT.matcher(statement).replaceAll(" ").stripLeading();
+        Matcher explainAnalyze = TRINO_EXPLAIN_ANALYZE.matcher(normalized);
+        if (explainAnalyze.matches()) {
+            return TRINO_DIRECT_READ_QUERY.matcher(
+                    stripLeadingSqlComments(explainAnalyze.group(1))).matches();
+        }
+        return TRINO_DIRECT_READ_QUERY.matcher(statement).matches()
+                || TRINO_EXPLAIN.matcher(statement).matches();
+    }
+
+    private static Set<String> configuredIdentifiers(String csv) {
+        if (!StringUtils.hasText(csv)) {
+            return Set.of();
+        }
+        return java.util.Arrays.stream(csv.split(","))
+                .map(PipelineCompileService::normalizeIdentifier)
+                .filter(StringUtils::hasText)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private static String normalizeIdentifier(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String qualifyTrinoTarget(String target, String catalog, String schema) {
+        String[] parts = target.split("\\.");
+        return switch (parts.length) {
+            case 1 -> catalog + "." + schema + "." + parts[0];
+            case 2 -> catalog + "." + parts[0] + "." + parts[1];
+            default -> target;
+        };
+    }
+
+    /** Python/Shell 必须携带可冻结的沙箱边界，且不能声明控制面凭证或网络直通。 */
+    private TaskCompileResult validateScriptTask(PipelineTask t, UUID tenantId) {
+        if (!scriptSandboxPolicy.isEnabledFor(tenantId)) {
+            return fail(t, scriptSandboxPolicy.blockedReason(tenantId));
+        }
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, t.getTaskType().name() + " task requires valid object config");
+        }
+        String script = textOrEmpty(cfg, "script");
+        if (!StringUtils.hasText(script)) {
+            return fail(t, t.getTaskType().name() + " task requires non-empty config.script");
+        }
+        int scriptBytes = script.getBytes(StandardCharsets.UTF_8).length;
+        if (scriptBytes > scriptMaxBytes) {
+            return fail(t, t.getTaskType().name() + " config.script exceeds "
+                    + scriptMaxBytes + " UTF-8 bytes");
+        }
+        try {
+            validateParamExpressions(cfg);
+            int timeout = scriptLimit(cfg, "timeout_seconds", 60, 1, scriptMaxTimeoutSeconds);
+            int cpuSeconds = scriptLimit(
+                    cfg, "cpu_seconds", Math.min(30, timeout), 1, scriptMaxCpuSeconds);
+            if (cpuSeconds > timeout) {
+                throw new IllegalArgumentException("config.cpu_seconds must not exceed config.timeout_seconds");
+            }
+            scriptLimit(cfg, "cpu_cores", 1, 1, scriptMaxCpuCores);
+            scriptLimit(cfg, "memory_mb", 256, 32, scriptMaxMemoryMb);
+            scriptLimit(cfg, "max_processes", 8, 1, scriptMaxProcesses);
+            scriptLimit(cfg, "max_files", 256, 1, scriptMaxFiles);
+            scriptLimit(cfg, "file_max_bytes", 1024 * 1024, 1, scriptMaxFileBytes);
+            scriptLimit(cfg, "stdout_max_bytes", 256 * 1024, 1, scriptMaxOutputBytes);
+            scriptLimit(cfg, "stderr_max_bytes", 256 * 1024, 1, scriptMaxOutputBytes);
+            validateScriptEnvironment(cfg.path("env"));
+            if (cfg.path("network_allowlist").isArray()
+                    && !cfg.path("network_allowlist").isEmpty()) {
+                throw new IllegalArgumentException(
+                        "config.network_allowlist is not enabled; script networking is default-deny");
+            }
+            if (cfg.has("network_allowlist") && !cfg.path("network_allowlist").isArray()) {
+                throw new IllegalArgumentException("config.network_allowlist must be an array");
+            }
+            if (SCRIPT_DANGEROUS_PATTERN.matcher(script).find()) {
+                throw new IllegalArgumentException(
+                        "config.script contains a blocked control-plane or sandbox-escape pattern");
+            }
+        } catch (IllegalArgumentException ex) {
+            return fail(t, t.getTaskType().name() + " sandbox config invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private static int scriptLimit(JsonNode cfg,
+                                   String field,
+                                   int defaultValue,
+                                   int min,
+                                   int max) {
+        JsonNode value = cfg.path(field);
+        if (value.isMissingNode()) {
+            return defaultValue;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new IllegalArgumentException("config." + field + " must be an integer");
+        }
+        int parsed = value.intValue();
+        if (parsed < min || parsed > max) {
+            throw new IllegalArgumentException(
+                    "config." + field + " must be between " + min + " and " + max);
+        }
+        return parsed;
+    }
+
+    private static void validateScriptEnvironment(JsonNode env) {
+        if (env.isMissingNode()) {
+            return;
+        }
+        if (!env.isObject()) {
+            throw new IllegalArgumentException("config.env must be an object");
+        }
+        if (env.size() > SCRIPT_MAX_ENV_ENTRIES) {
+            throw new IllegalArgumentException(
+                    "config.env supports at most " + SCRIPT_MAX_ENV_ENTRIES + " entries");
+        }
+        env.fields().forEachRemaining(entry -> {
+            String key = entry.getKey().toUpperCase(Locale.ROOT);
+            if (!SCRIPT_ENV_NAME.matcher(key).matches()) {
+                throw new IllegalArgumentException("config.env key is invalid: " + entry.getKey());
+            }
+            if (SCRIPT_FORBIDDEN_ENV_NAMES.contains(key)
+                    || SCRIPT_FORBIDDEN_ENV_MARKERS.stream().anyMatch(key::contains)) {
+                throw new IllegalArgumentException("config.env key is reserved: " + entry.getKey());
+            }
+            if (!entry.getValue().isTextual()) {
+                throw new IllegalArgumentException("config.env value must be a string: " + entry.getKey());
+            }
+            if (entry.getValue().asText().getBytes(StandardCharsets.UTF_8).length > 4096) {
+                throw new IllegalArgumentException("config.env value is too large: " + entry.getKey());
+            }
+        });
     }
 
     /** M4 后续步骤会补充类型专属规则；基线阶段只要求存在结构化配置。 */

@@ -143,6 +143,8 @@ class PipelineStatusMachineTest {
     void publishedEmitsOutboxEvent() {
         Dag dag = dag("VALIDATED");
         when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(compileService.compile(dagId)).thenReturn(validCompileResult());
         when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
         when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(List.of());
 
@@ -162,6 +164,8 @@ class PipelineStatusMachineTest {
     void approvalEnabledSubmitsSnapshotSummaryAndKeepsValidated() {
         Dag dag = dag("VALIDATED");
         when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(compileService.compile(dagId)).thenReturn(validCompileResult());
         when(outboxProvider.getIfAvailable()).thenReturn(outboxPublisher);
         when(snapshotService.snapshot(dagId))
                 .thenReturn(new PipelineSnapshotService.SnapshotPayload("{\"tasks\":[]}", "checksum-1"));
@@ -199,6 +203,8 @@ class PipelineStatusMachineTest {
     void approvedDecisionPublishesMatchingSnapshotAndSetsPublished() {
         Dag dag = dag("VALIDATED");
         when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(compileService.compile(dagId)).thenReturn(validCompileResult());
         PipelineSnapshotService.SnapshotPayload verifiedSnapshot =
                 new PipelineSnapshotService.SnapshotPayload("{}", "checksum-1");
         when(snapshotService.snapshot(dagId)).thenReturn(verifiedSnapshot);
@@ -209,6 +215,20 @@ class PipelineStatusMachineTest {
         assertThat(updated.getVersion()).isEqualTo(2);
         verify(snapshotService).publishSnapshot(dagId, verifiedSnapshot);
         verify(dagRepo).save(dag);
+    }
+
+    @Test
+    void publishRevalidatesTenantRuntimeCapability() {
+        Dag dag = dag("VALIDATED");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        when(compileService.compile(dagId)).thenReturn(invalidCompileResult());
+
+        assertThatThrownBy(() -> service.updatePipelineStatus(dagId, "PUBLISHED"))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("租户执行能力校验未通过");
+
+        verify(snapshotService, never()).publishSnapshot(any());
     }
 
     @Test

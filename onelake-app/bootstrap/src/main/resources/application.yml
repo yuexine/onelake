@@ -92,6 +92,24 @@ onelake:
   orchestration:
     # 流水线执行灰度开关：LEGACY 走旧单 op；GRAPH 走节点级图执行器。
     pipeline-execution-mode: ${ONELAKE_PIPELINE_EXECUTION_MODE:LEGACY}
+    trino:
+      # TRINO_SQL 只能访问服务端明确允许的 Iceberg catalog/schema。
+      allowed-catalogs: ${ONELAKE_TRINO_ALLOWED_CATALOGS:iceberg}
+      allowed-schemas: ${ONELAKE_TRINO_ALLOWED_SCHEMAS:default,ods,dwd}
+    script:
+      # Java 编译期硬上限；Dagster 运行时会再次按相同或更严格的边界校验。
+      enabled: ${ONELAKE_SCRIPT_SANDBOX_ENABLED:false}
+      # 逗号分隔租户 UUID；显式使用 * 才允许所有租户。enabled=true 但此项为空时仍拒绝。
+      allowed-tenant-ids: ${ONELAKE_SCRIPT_SANDBOX_ALLOWED_TENANTS:}
+      max-script-bytes: ${ONELAKE_SCRIPT_MAX_BYTES:65536}
+      max-timeout-seconds: ${ONELAKE_SCRIPT_MAX_TIMEOUT_SECONDS:900}
+      max-cpu-seconds: ${ONELAKE_SCRIPT_MAX_CPU_SECONDS:900}
+      max-cpu-cores: ${ONELAKE_SCRIPT_MAX_CPU_CORES:4}
+      max-memory-mb: ${ONELAKE_SCRIPT_MAX_MEMORY_MB:2048}
+      max-processes: ${ONELAKE_SCRIPT_MAX_PROCESSES:64}
+      max-files: ${ONELAKE_SCRIPT_MAX_FILES:4096}
+      max-file-bytes: ${ONELAKE_SCRIPT_MAX_FILE_BYTES:16777216}
+      max-output-bytes: ${ONELAKE_SCRIPT_MAX_OUTPUT_BYTES:1048576}
     publish-approval:
       # 默认关闭以兼容现有直接发布行为；开启后由 security 审批结果驱动真正发布。
       enabled: ${ONELAKE_ORCHESTRATION_PUBLISH_APPROVAL_ENABLED:false}

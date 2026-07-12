@@ -23,6 +23,7 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -100,6 +101,12 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                                   RunContext runContext,
                                   Map<String, String> runtimeParams,
                                   List<PipelineTaskEdge> pipelineEdges) {
+        if (tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.TRINO_SQL
+                || task.getTaskType() == TaskType.PYTHON
+                || task.getTaskType() == TaskType.SHELL)) {
+            throw new IllegalArgumentException(
+                    "TRINO_SQL/PYTHON/SHELL require GRAPH pipeline execution mode");
+        }
         PipelineCompileResult plan = ctx.compileResult();
         List<Map<String, Object>> sparkTasks = new ArrayList<>();
         Map<String, PipelineTask> taskByKey = tasks.stream()
@@ -275,6 +282,30 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
 
         // 解析 config jsonb，提取 script/sql/from_tables。
         JsonNode cfg = parseSafe(task.getConfig());
+        if (TaskType.TRINO_SQL.name().equals(taskType)) {
+            opConfig.put("engine", "TRINO");
+            opConfig.put("catalog", textOrEmpty(cfg, "catalog").trim().toLowerCase(Locale.ROOT));
+            opConfig.put("schema", textOrEmpty(cfg, "schema").trim().toLowerCase(Locale.ROOT));
+        } else {
+            opConfig.put("engine", StringUtils.hasText(task.getEngine()) ? task.getEngine() : "SPARK");
+        }
+        if (TaskType.PYTHON.name().equals(taskType) || TaskType.SHELL.name().equals(taskType)) {
+            opConfig.put("engine", "SCRIPT");
+            putScriptLimit(opConfig, cfg, "timeout_seconds", 60);
+            putScriptLimit(opConfig, cfg, "cpu_seconds", 30);
+            putScriptLimit(opConfig, cfg, "cpu_cores", 1);
+            putScriptLimit(opConfig, cfg, "memory_mb", 256);
+            putScriptLimit(opConfig, cfg, "max_processes", 8);
+            putScriptLimit(opConfig, cfg, "max_files", 256);
+            putScriptLimit(opConfig, cfg, "file_max_bytes", 1024 * 1024);
+            putScriptLimit(opConfig, cfg, "stdout_max_bytes", 256 * 1024);
+            putScriptLimit(opConfig, cfg, "stderr_max_bytes", 256 * 1024);
+            opConfig.put("cpu_seconds", Math.min(
+                    (int) opConfig.get("cpu_seconds"),
+                    (int) opConfig.get("timeout_seconds")));
+            opConfig.put("env", scriptEnvironment(cfg.path("env")));
+            opConfig.put("network_allowlist", textArray(cfg.path("network_allowlist")));
+        }
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
             opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task, runContext, params));
             String target = ParamRenderer.render(
@@ -402,6 +433,25 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             }
         }
         return -1;
+    }
+
+    private static void putScriptLimit(Map<String, Object> target,
+                                       JsonNode config,
+                                       String field,
+                                       int defaultValue) {
+        int value = intField(config, field);
+        target.put(field, value < 0 ? defaultValue : value);
+    }
+
+    private static List<Map<String, String>> scriptEnvironment(JsonNode env) {
+        if (env == null || !env.isObject()) {
+            return List.of();
+        }
+        List<Map<String, String>> values = new ArrayList<>();
+        env.fields().forEachRemaining(entry -> values.add(Map.of(
+                "key", entry.getKey().toUpperCase(Locale.ROOT),
+                "value", entry.getValue().asText(""))));
+        return values;
     }
 
     private static Map<String, Object> defaultSparkProfile() {

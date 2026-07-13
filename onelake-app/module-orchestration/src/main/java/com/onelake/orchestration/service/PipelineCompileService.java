@@ -893,7 +893,8 @@ public class PipelineCompileService {
             }
             String assetFqn = firstText(e.getAssetFqn(), source.getTargetFqn());
             if (!StringUtils.hasText(assetFqn)
-                    && source.getTaskType().category() == TaskCategory.EXEC) {
+                    && source.getTaskType().category() == TaskCategory.EXEC
+                    && requiresAssetInput(target)) {
                 errors.add(String.format(
                         "Edge %s cannot resolve assetFqn from edge.assetFqn or source task '%s'.targetFqn",
                         edgeId(e), source.getTaskKey()));
@@ -992,6 +993,10 @@ public class PipelineCompileService {
     private static boolean isSparkTask(PipelineTask t) {
         String tt = t.getTaskType().name();
         return TaskType.SPARK_SQL.name().equals(tt) || TaskType.PYSPARK.name().equals(tt);
+    }
+
+    private static boolean requiresAssetInput(PipelineTask task) {
+        return isSparkTask(task) || task.getTaskType() == TaskType.QUALITY_GATE;
     }
 
     /**

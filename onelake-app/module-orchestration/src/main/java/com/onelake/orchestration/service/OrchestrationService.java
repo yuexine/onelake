@@ -2324,7 +2324,7 @@ public class OrchestrationService {
         TriggerReadiness readiness = triggerReadiness(d, definition);
         return new DagDTO(d.getId(), d.getName(), d.getDagsterJob(), definition,
             d.getScheduleCron(), d.getEnabled(), readiness.triggerable(), readiness.reason(),
-            d.getVersion(), d.getCreatedAt(),
+            d.getVersion(), d.getPublishedVersionId(), d.getCreatedAt(),
             latestRun == null ? null : toRunDTO(latestRun, d));
     }
 

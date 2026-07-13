@@ -61,7 +61,7 @@ final class PipelineNodePortRegistry {
             );
         }
         return switch (type) {
-            case TRINO_SQL -> new NodeContract(
+            case TRINO_SQL, PYTHON, SHELL -> new NodeContract(
                     type.name(),
                     engine,
                     Map.of("in", new InputPort("in", false, 0, Integer.MAX_VALUE)),
@@ -105,6 +105,9 @@ final class PipelineNodePortRegistry {
             case SPARK_SQL -> "SPARK_SQL";
             case PYSPARK -> "PYSPARK";
             case TRINO_SQL -> "TRINO";
+            case PYTHON, SHELL -> "SCRIPT";
+            case BRANCH, CONDITION, SUB_PIPELINE -> "CONTROL";
+            case SENSOR, WAIT, NOTIFY, ASSERTION -> "OBSERVE";
             default -> "SPARK_SQL";
         };
     }

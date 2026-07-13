@@ -218,6 +218,16 @@ const TASK_TYPE_LABEL: Record<PipelineTaskType, string> = {
   QUALITY_GATE: '质量检查',
   SPARK_SQL: 'Spark SQL',
   PYSPARK: 'PySpark',
+  TRINO_SQL: 'Trino SQL',
+  PYTHON: 'Python',
+  SHELL: 'Shell',
+  BRANCH: '多路分支',
+  CONDITION: '条件判断',
+  SENSOR: '资产 Sensor',
+  WAIT: '等待',
+  SUB_PIPELINE: '子流水线',
+  NOTIFY: '运行通知',
+  ASSERTION: '轻量断言',
 };
 
 function taskTypeLabel(type?: PipelineTaskType) {

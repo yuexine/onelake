@@ -93,9 +93,9 @@ export function InspectorLayout({ task, tasks, edges, children }: InspectorLayou
         ) : task.engine && (
           <RailSection title="执行环境">
             <div style={railCardStyle}>
-              <Text strong style={{ fontSize: 13 }}>{task.engine === 'PYSPARK' ? 'PySpark' : 'Spark'}</Text>
+              <Text strong style={{ fontSize: 13 }}>{executionEnvironment(task).title}</Text>
               <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
-                共享 Iceberg / Hive Metastore / MinIO
+                {executionEnvironment(task).description}
               </Text>
               {task.executable && (
                 <Tag color="green" style={{ marginTop: 10 }}>
@@ -108,6 +108,25 @@ export function InspectorLayout({ task, tasks, edges, children }: InspectorLayou
       </aside>
     </div>
   );
+}
+
+function executionEnvironment(task: PipelineTask) {
+  if (task.taskType === 'TRINO_SQL') {
+    return { title: 'Trino', description: '受限 Iceberg 会话；仅允许只读查询或匹配目标表的 CTAS' };
+  }
+  if (task.taskType === 'PYTHON' || task.taskType === 'SHELL') {
+    return { title: '脚本沙箱', description: '默认禁网，不注入控制面或内部凭证，资源与输出有界' };
+  }
+  if (task.category === 'CONTROL' || ['BRANCH', 'CONDITION', 'SUB_PIPELINE'].includes(task.taskType)) {
+    return { title: '控制节点', description: '受控求值与触发；不声明资产产出' };
+  }
+  if (task.category === 'OBSERVE' || ['SENSOR', 'WAIT', 'NOTIFY', 'ASSERTION'].includes(task.taskType)) {
+    return { title: '观测节点', description: '等待、通知或断言；不声明资产产出' };
+  }
+  if (task.engine === 'PYSPARK') {
+    return { title: 'PySpark', description: '共享 Iceberg / Hive Metastore / MinIO' };
+  }
+  return { title: 'Spark', description: '共享 Iceberg / Hive Metastore / MinIO' };
 }
 
 function RailSection({ title, children }: { title: string; children: ReactNode }) {

@@ -29,7 +29,6 @@ import {
   Modal,
   Select,
   Space,
-  Spin,
   Steps,
   Tag,
   Typography,
@@ -54,11 +53,12 @@ import {
   ThunderboltOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { PageHeader } from '../../../components';
+import { PageHeader, StateView } from '../../../components';
 import { usePipelineEditor } from './usePipelineEditor';
 import { TaskPalette } from './TaskPalette';
 import { DagCanvasSimple } from './DagCanvasSimple';
 import { InspectorRouter, type InspectorProps } from './InspectorRouter';
+import { validateInspectorTask } from './inspectorValidation';
 import type { TaskTypeMeta } from './taskTypes';
 import { PipelineAPI, PipelineVersionAPI } from '../../../api';
 import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
@@ -78,6 +78,16 @@ const taskTypeCopy: Record<PipelineTaskType, { code: string; label: string; summ
   SPARK_SQL: { code: 'SQL', label: 'Spark SQL', summary: '使用 Spark SQL 处理上游数据并产出表', color: '#4f46e5' },
   PYSPARK: { code: 'PY', label: 'PySpark', summary: '使用 PySpark 脚本处理上游数据并产出表', color: '#7c3aed' },
   QUALITY_GATE: { code: 'QA', label: '质量门禁', summary: '校验上游产出表并阻断异常数据', color: '#16a34a' },
+  TRINO_SQL: { code: 'TR', label: 'Trino SQL', summary: '使用 Trino 执行轻量查询或 CTAS', color: '#0284c7' },
+  PYTHON: { code: 'PY', label: 'Python', summary: '在受限沙箱中执行 Python 脚本', color: '#ca8a04' },
+  SHELL: { code: 'SH', label: 'Shell', summary: '在受限沙箱中执行 Shell 脚本', color: '#475569' },
+  BRANCH: { code: 'BR', label: '多路分支', summary: '按表达式结果选择后续分支', color: '#7c3aed' },
+  CONDITION: { code: 'IF', label: '条件判断', summary: '按布尔表达式决定下游是否继续', color: '#8b5cf6' },
+  SENSOR: { code: 'SE', label: '资产 Sensor', summary: '等待目标资产或分区就绪', color: '#0891b2' },
+  WAIT: { code: 'WT', label: '等待', summary: '等待固定时长或业务时间偏移', color: '#64748b' },
+  SUB_PIPELINE: { code: 'SUB', label: '子流水线', summary: '触发另一条已发布流水线', color: '#9333ea' },
+  NOTIFY: { code: 'NT', label: '运行通知', summary: '向通知中心发送运行消息', color: '#ea580c' },
+  ASSERTION: { code: 'AS', label: '轻量断言', summary: '按受控表达式校验运行结果', color: '#059669' },
 };
 
 const validationSteps = [
@@ -117,7 +127,7 @@ function taskValidationCopy(task: PipelineValidationResult['taskResults'][number
   if (normalized.includes('requires non-empty config.script')) {
     return {
       label: '缺少脚本内容',
-      description: `${taskTypeLabel} 节点未配置可执行的 PySpark 脚本。`,
+      description: `${taskTypeLabel} 节点未配置可执行脚本。`,
       suggestion: '请打开节点详情，补充脚本内容后重新校验。',
     };
   }
@@ -427,6 +437,10 @@ export default function UnifiedPipelineEditor() {
   const [edgeOpen, setEdgeOpen] = useState(false);
   const [edgeForm] = Form.useForm<PipelineTaskEdgeRequest>();
   const [draftPatch, setDraftPatch] = useState<Partial<PipelineTaskRequest> & { taskType: PipelineTaskType } | undefined>(undefined);
+  const [externalInspectorValidation, setExternalInspectorValidation] = useState<{
+    taskKey?: string;
+    errors: Record<string, string>;
+  }>({ errors: {} });
   const [inspectorHeaderEditing, setInspectorHeaderEditing] = useState(false);
   const [createPosition, setCreatePosition] = useState<{ x: number; y: number } | undefined>(undefined);
   const [validationOpen, setValidationOpen] = useState(false);
@@ -451,6 +465,17 @@ export default function UnifiedPipelineEditor() {
     });
     setCreateOpen(true);
   }, [createForm]);
+
+  const updateInspectorValidation = useCallback((taskKey: string, field: string, error?: string) => {
+    setExternalInspectorValidation((current) => {
+      const errors = current.taskKey === taskKey ? current.errors : {};
+      if (error ? errors[field] === error : !(field in errors)) return current;
+      const nextErrors = { ...errors };
+      if (error) nextErrors[field] = error;
+      else delete nextErrors[field];
+      return { taskKey, errors: nextErrors };
+    });
+  }, []);
 
   const defaultConfigFor = useCallback((meta: TaskTypeMeta): Record<string, unknown> => {
     if (meta.preset === 'SPARK_JOIN') {
@@ -487,7 +512,7 @@ export default function UnifiedPipelineEditor() {
         },
       };
     }
-    return {};
+    return { ...meta.defaultConfig };
   }, []);
 
   const runValidation = useCallback(async () => {
@@ -633,15 +658,33 @@ export default function UnifiedPipelineEditor() {
   }, [dagId, editor, message, modal]);
 
   // Build inspector props from selected task + local draft patch
-  const inspectorProps: InspectorProps | undefined = editor.selectedTask
+  const inspectorTask = editor.selectedTask
+    ? { ...editor.selectedTask, ...(draftPatch as Partial<typeof editor.selectedTask> | undefined) }
+    : undefined;
+  const baseInspectorValidationErrors = inspectorTask
+    ? validateInspectorTask(inspectorTask, editor.edges)
+    : {};
+  const inspectorValidationErrors = inspectorTask
+    ? {
+        ...baseInspectorValidationErrors,
+        ...(externalInspectorValidation.taskKey === inspectorTask.taskKey
+          ? externalInspectorValidation.errors
+          : {}),
+      }
+    : {};
+  const inspectorProps: InspectorProps | undefined = inspectorTask
     ? {
         dagId: dagId!,
-        task: { ...editor.selectedTask, ...(draftPatch as Partial<typeof editor.selectedTask> | undefined) },
+        task: inspectorTask,
         tasks: editor.tasks,
         edges: editor.edges,
         onChange: (patch) => setDraftPatch((prev) => ({ ...prev, ...patch } as typeof prev)),
         onSave: async () => {
           if (!editor.selectedTask || !draftPatch) return;
+          if (Object.keys(inspectorValidationErrors).length > 0) {
+            message.error('请先修正 Inspector 中标出的必填或格式问题');
+            return;
+          }
           try {
             await editor.updateTask(editor.selectedTask.taskKey, draftPatch);
             setDraftPatch(undefined);
@@ -651,6 +694,8 @@ export default function UnifiedPipelineEditor() {
           }
         },
         saving: editor.saving,
+        validationErrors: inspectorValidationErrors,
+        onValidationChange: updateInspectorValidation,
       }
     : undefined;
 
@@ -662,9 +707,7 @@ export default function UnifiedPipelineEditor() {
 
   if (editor.loading) {
     return (
-      <div style={{ padding: 80, textAlign: 'center' }}>
-        <Spin size="large" />
-      </div>
+      <StateView state="loading" rows={10} />
     );
   }
 
@@ -711,19 +754,18 @@ export default function UnifiedPipelineEditor() {
     );
   }
 
-  if (!editor.pipeline) {
+  if (editor.loadError) {
     return (
-      <Alert
-        type="error"
-        message="流水线不存在或无权访问"
-        action={
-          <Button size="small" onClick={() => navigate('/orchestration/pipelines')}>
-            返回列表
-          </Button>
-        }
+      <StateView
+        state={editor.loadError.noPermission ? 'no-permission' : 'error'}
+        title={editor.loadError.noPermission ? '无权访问流水线' : '流水线加载失败'}
+        description={editor.loadError.message}
+        onRetry={editor.reload}
       />
     );
   }
+
+  if (!editor.pipeline) return <StateView state="empty" title="流水线不存在" description="请返回列表选择其他流水线。" />;
 
   const statusTagColor =
     editor.pipeline.status === 'PUBLISHED' ? 'green'
@@ -1166,7 +1208,7 @@ export default function UnifiedPipelineEditor() {
                 icon={<SaveOutlined />}
                 onClick={inspectorProps?.onSave}
                 loading={inspectorProps?.saving}
-                disabled={!draftPatch}
+                disabled={!draftPatch || Object.keys(inspectorValidationErrors).length > 0}
               >
                 保存配置
               </Button>
@@ -1214,7 +1256,7 @@ export default function UnifiedPipelineEditor() {
               <Input placeholder="modeling.data_model.id (UUID)" />
             </Form.Item>
           )}
-          {!createMeta?.requiresModel && createMeta?.type !== 'QUALITY_GATE' && (
+          {createMeta?.acceptsTargetFqn && createMeta.type !== 'QUALITY_GATE' && (
             <Form.Item name="targetFqn" label="目标表 FQN">
               <Input placeholder="iceberg.<schema>.<table>" />
             </Form.Item>

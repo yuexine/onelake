@@ -31,7 +31,7 @@ export function TaskPalette({ onAdd, disabled }: Props) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {g.items.map((item) => (
           <button
-            key={`${item.type}:${item.preset ?? item.name}`}
+            key={`${item.type}:${item.preset ?? 'base'}:${item.name}`}
             type="button"
             draggable={!disabled}
             disabled={disabled}

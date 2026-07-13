@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useRef } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
-import { Button, Empty, Space, Tag, Tooltip, Typography } from 'antd';
+import { Button, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   AimOutlined,
   CompressOutlined,
@@ -18,6 +18,7 @@ import {
 import { Graph, Shape } from '@antv/x6';
 import type { PipelineTask, PipelineTaskEdge, PipelineTaskType } from '../../../types';
 import type { TaskTypeMeta } from './taskTypes';
+import { StateView } from '../../../components';
 
 const { Text } = Typography;
 
@@ -79,6 +80,16 @@ const TASK_KIND_TONE: Record<string, { fill: string; stroke: string; text: strin
   QUALITY_GATE: { fill: '#F0FDF4', stroke: '#4ADE80', text: '#15803D' },
   SPARK_SQL: { fill: '#F8FAFC', stroke: '#CBD5E1', text: '#334155' },
   PYSPARK: { fill: '#ECFEFF', stroke: '#22D3EE', text: '#0E7490' },
+  TRINO_SQL: { fill: '#EFF6FF', stroke: '#60A5FA', text: '#1D4ED8' },
+  PYTHON: { fill: '#FEFCE8', stroke: '#FACC15', text: '#A16207' },
+  SHELL: { fill: '#F8FAFC', stroke: '#94A3B8', text: '#334155' },
+  BRANCH: { fill: '#F5F3FF', stroke: '#A78BFA', text: '#6D28D9' },
+  CONDITION: { fill: '#F5F3FF', stroke: '#C4B5FD', text: '#7C3AED' },
+  SENSOR: { fill: '#ECFEFF', stroke: '#67E8F9', text: '#0E7490' },
+  WAIT: { fill: '#F8FAFC', stroke: '#CBD5E1', text: '#475569' },
+  SUB_PIPELINE: { fill: '#FAF5FF', stroke: '#D8B4FE', text: '#7E22CE' },
+  NOTIFY: { fill: '#FFF7ED', stroke: '#FDBA74', text: '#C2410C' },
+  ASSERTION: { fill: '#ECFDF5', stroke: '#6EE7B7', text: '#047857' },
 };
 
 const RUN_TONE: Record<string, { fill: string; stroke: string; text: string }> = {
@@ -99,6 +110,19 @@ function nodeTypeDisplay(type: PipelineTaskType, kind?: string): { code: string;
   if (kind === 'DERIVE_COLUMN') return { code: 'GV', label: '治理', role: '字段标准化' };
   if (kind === 'SINK') return { code: 'OUT', label: '落表', role: 'DWD 输出' };
   if (type === 'PYSPARK') return { code: 'PY', label: 'PySpark', role: '脚本计算' };
+  const displays: Partial<Record<PipelineTaskType, { code: string; label: string; role: string }>> = {
+    TRINO_SQL: { code: 'TR', label: 'Trino SQL', role: '轻量查询' },
+    PYTHON: { code: 'PY', label: 'Python', role: '沙箱脚本' },
+    SHELL: { code: 'SH', label: 'Shell', role: '沙箱脚本' },
+    BRANCH: { code: 'BR', label: '多路分支', role: '流程控制' },
+    CONDITION: { code: 'IF', label: '条件判断', role: '流程控制' },
+    SENSOR: { code: 'SE', label: 'Sensor', role: '资产观测' },
+    WAIT: { code: 'WT', label: '等待', role: '时间观测' },
+    SUB_PIPELINE: { code: 'SUB', label: '子流水线', role: '流程控制' },
+    NOTIFY: { code: 'NT', label: '通知', role: '运行观测' },
+    ASSERTION: { code: 'AS', label: '断言', role: '运行观测' },
+  };
+  if (displays[type]) return displays[type]!;
   return { code: 'SQL', label: 'Spark SQL', role: 'Spark 计算' };
 }
 
@@ -198,6 +222,10 @@ function nodeTone(task: PipelineTask): { fill: string; stroke: string; text: str
 function engineLabel(task: PipelineTask): string {
   if (task.taskType === 'SYNC_REF') return 'SYNC';
   if (task.taskType === 'PYSPARK' || task.engine === 'PYSPARK') return 'PYSPARK';
+  if (task.taskType === 'TRINO_SQL') return 'TRINO';
+  if (task.taskType === 'PYTHON' || task.taskType === 'SHELL') return 'SANDBOX';
+  if (task.category === 'CONTROL' || ['BRANCH', 'CONDITION', 'SUB_PIPELINE'].includes(task.taskType)) return 'CONTROL';
+  if (task.category === 'OBSERVE' || ['SENSOR', 'WAIT', 'NOTIFY', 'ASSERTION'].includes(task.taskType)) return 'OBSERVE';
   return 'SPARK';
 }
 
@@ -205,7 +233,31 @@ function tableRole(task: PipelineTask, kind: string): string {
   if (task.taskType === 'SYNC_REF') return '读取表';
   if (task.taskType === 'QUALITY_GATE') return '检查表';
   if (kind === 'SINK') return '输出表';
+  if (task.taskType === 'BRANCH' || task.taskType === 'CONDITION' || task.taskType === 'ASSERTION') return '表达式';
+  if (task.taskType === 'SENSOR') return '等待资产';
+  if (task.taskType === 'WAIT') return '等待时长';
+  if (task.taskType === 'SUB_PIPELINE') return '目标流水线';
+  if (task.taskType === 'NOTIFY') return '通知标题';
+  if (task.taskType === 'PYTHON' || task.taskType === 'SHELL') return '执行环境';
   return '产出表';
+}
+
+function taskDetail(task: PipelineTask): string {
+  if (task.targetFqn) return compactFqn(task.targetFqn, 30);
+  const config = task.config ?? {};
+  if (task.taskType === 'BRANCH' || task.taskType === 'CONDITION' || task.taskType === 'ASSERTION') {
+    return truncate(typeof config.expression === 'string' ? config.expression : '', 30) || '未配置表达式';
+  }
+  if (task.taskType === 'SENSOR') return truncate(typeof config.assetFqn === 'string' ? config.assetFqn : '', 30) || '未配置资产';
+  if (task.taskType === 'WAIT') {
+    if (typeof config.offsetSeconds === 'number') return `logical_date + ${config.offsetSeconds} 秒`;
+    if (typeof config.durationSeconds === 'number') return `${config.durationSeconds} 秒`;
+    return '未配置时长';
+  }
+  if (task.taskType === 'SUB_PIPELINE') return truncate(typeof config.subDagId === 'string' ? config.subDagId : '', 30) || '未选择流水线';
+  if (task.taskType === 'NOTIFY') return truncate(typeof config.title === 'string' ? config.title : '', 30) || '未配置标题';
+  if (task.taskType === 'PYTHON' || task.taskType === 'SHELL') return '默认禁网 · 受限沙箱';
+  return '未配置表';
 }
 
 function flowMetric(node: CanvasNode): string {
@@ -632,9 +684,14 @@ function addTaskNode(graph: Graph, node: CanvasNode, selectedKey?: string) {
   const runTone = runDisplay.tone;
   const hasError = Boolean(task.compileError || node.runState?.errorMsg || status === 'FAILED' || status === '校验失败');
   const title = truncate(task.name || task.taskKey, 22);
-  const table = compactFqn(task.targetFqn, 30) || '未配置表';
+  const table = taskDetail(task);
   const engine = engineLabel(task);
-  const engineColor = engine === 'PYSPARK' ? '#0E7490' : engine === 'SYNC' ? '#0369A1' : '#C2410C';
+  const engineColor = engine === 'PYSPARK' ? '#0E7490'
+    : engine === 'SYNC' || engine === 'TRINO' ? '#0369A1'
+    : engine === 'CONTROL' ? '#7C3AED'
+    : engine === 'OBSERVE' ? '#0E7490'
+    : engine === 'SANDBOX' ? '#A16207'
+    : '#C2410C';
   const card: TaskCardData = {
     typeCode: typeDisplay.code,
     typeLabel: typeDisplay.label,
@@ -938,7 +995,7 @@ export function DagCanvasSimple({
           color: 'var(--ol-ink-3)',
         }}
       >
-        <Empty description="从左侧拖入任务，或点击任务面板添加" />
+        <StateView state="empty" title="流水线还是空的" description="从左侧拖入任务，或点击任务面板添加。" />
       </div>
     );
   }

@@ -18,6 +18,7 @@ import java.util.UUID;
  * @param triggerable 当前运行时契约是否允许手动触发
  * @param triggerBlockedReason 不可触发原因
  * @param version 定义版本号
+ * @param publishedVersionId 当前生产发布快照；为空表示尚未发布
  * @param createdAt 创建时间
  * @param lastRun 最近一次运行摘要
  */
@@ -31,6 +32,7 @@ public record DagDTO(
     Boolean triggerable,
     String triggerBlockedReason,
     Integer version,
+    UUID publishedVersionId,
     Instant createdAt,
     JobRunDTO lastRun
 ) {}

@@ -107,6 +107,7 @@ export interface Dag {
   triggerable?: boolean;
   triggerBlockedReason?: string;
   version: number;
+  publishedVersionId?: UUID;
   createdAt: string;
   lastRun?: JobRun;
 }
@@ -308,7 +309,19 @@ export type PipelineTaskType =
   | 'QUALITY_GATE'
   | 'SYNC_REF'
   | 'SPARK_SQL'
-  | 'PYSPARK';
+  | 'PYSPARK'
+  | 'TRINO_SQL'
+  | 'PYTHON'
+  | 'SHELL'
+  | 'BRANCH'
+  | 'CONDITION'
+  | 'SENSOR'
+  | 'WAIT'
+  | 'SUB_PIPELINE'
+  | 'NOTIFY'
+  | 'ASSERTION';
+
+export type PipelineTaskCategory = 'EXEC' | 'CONTROL' | 'OBSERVE';
 
 export type TaskCompileStatus = 'DRAFT' | 'VALIDATED' | 'FAILED';
 export type EdgeLayer = 'PIPELINE' | 'CROSS_ENGINE';
@@ -329,8 +342,11 @@ export interface PipelineTask {
   dagId: UUID;
   taskKey: string;
   taskType: PipelineTaskType;
+  category?: PipelineTaskCategory;
+  operatorRef?: string;
+  operatorVersion?: string;
   name: string;
-  engine: string;            // SPARK_SQL | PYSPARK
+  engine: string;
   targetFqn?: string;
   modelId?: UUID;            // deprecated; null for new Spark-only tasks
   syncTaskId?: UUID;         // SYNC_REF only

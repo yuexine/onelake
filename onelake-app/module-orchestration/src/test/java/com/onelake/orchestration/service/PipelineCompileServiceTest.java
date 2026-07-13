@@ -361,6 +361,26 @@ class PipelineCompileServiceTest {
     }
 
     @Test
+    void mixedRuntimeNodesUsePipelineEdgesWithoutPretendingToProduceAssets() {
+        PipelineTask trino = extensionTask("trino", TaskType.TRINO_SQL);
+        PipelineTask python = extensionTask("python", TaskType.PYTHON);
+        PipelineTask shell = extensionTask("shell", TaskType.SHELL);
+        PipelineTask condition = extensionTask("condition", TaskType.CONDITION);
+
+        PipelineCompileResult result = service.compile(
+                dagId,
+                tenantId,
+                List.of(trino, python, shell, condition),
+                List.of(
+                        edge("trino", "python", EdgeLayer.PIPELINE),
+                        edge("python", "shell", EdgeLayer.PIPELINE),
+                        edge("shell", "condition", EdgeLayer.PIPELINE)));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(result.graphErrors()).isEmpty();
+    }
+
+    @Test
     void p2NodesAcceptPipelineFlowAndTransitiveUpstreamOutputs() {
         PipelineTask source = sparkSqlTask("source", "onelake.dwd.source");
         PipelineTask assertion = extensionTask("assertion", TaskType.ASSERTION);

@@ -675,6 +675,8 @@ class OrchestrationServiceTest {
     @Test
     void listDagsIncludesLatestProdRunMetadata() {
         Dag dag = dag();
+        UUID publishedVersionId = UUID.randomUUID();
+        dag.setPublishedVersionId(publishedVersionId);
         when(dagRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(dag));
         when(runRepo.findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(DAG_ID, "DEV"))
                 .thenReturn(Optional.of(jobRun(DAG_ID)));
@@ -688,6 +690,7 @@ class OrchestrationServiceTest {
         assertThat(dags.get(0).lastRun().dagName()).isEqualTo("old_pipeline");
         assertThat(dags.get(0).triggerable()).isTrue();
         assertThat(dags.get(0).triggerBlockedReason()).isNull();
+        assertThat(dags.get(0).publishedVersionId()).isEqualTo(publishedVersionId);
         verify(runRepo).findFirstByDagIdAndRunModeNotOrderByStartedAtDesc(DAG_ID, "DEV");
     }
 

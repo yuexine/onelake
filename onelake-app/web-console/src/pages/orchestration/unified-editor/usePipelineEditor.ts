@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntApp } from 'antd';
 import { PipelineAPI, PipelineVersionAPI, OrchestrationAPI, SecurityAPI } from '../../../api';
+import { BizError } from '../../../api/http';
 import type {
   Pipeline,
   PipelineTask,
@@ -56,6 +57,7 @@ function publishApprovalView(
 
 export interface PipelineEditorState {
   loading: boolean;
+  loadError?: { message: string; noPermission: boolean };
   pipeline?: Pipeline;
   tasks: PipelineTask[];
   edges: PipelineTaskEdge[];
@@ -67,6 +69,7 @@ export interface PipelineEditorState {
 export function usePipelineEditor(dagId: string | undefined) {
   const { message } = AntApp.useApp();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<{ message: string; noPermission: boolean }>();
   const [pipeline, setPipeline] = useState<Pipeline | undefined>(undefined);
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
   const [edges, setEdges] = useState<PipelineTaskEdge[]>([]);
@@ -101,6 +104,7 @@ export function usePipelineEditor(dagId: string | undefined) {
   const loadAll = useCallback(async () => {
     if (!dagId) {
       setLoading(false);
+      setLoadError(undefined);
       setPipeline(undefined);
       setTasks([]);
       setEdges([]);
@@ -113,6 +117,7 @@ export function usePipelineEditor(dagId: string | undefined) {
       return;
     }
     setLoading(true);
+    setLoadError(undefined);
     try {
       const [p, ts, es, publishApprovalConfig, publishApprovalState] = await Promise.all([
         PipelineAPI.get(dagId),
@@ -135,6 +140,10 @@ export function usePipelineEditor(dagId: string | undefined) {
       setPublishApprovalStatus(approval.status);
       setPublishApprovalComment(approval.comment);
     } catch (err) {
+      setPipeline(undefined);
+      setTasks([]);
+      setEdges([]);
+      setLoadError(toEditorLoadError(err));
       message.error(`加载流水线失败: ${(err as Error).message}`);
     } finally {
       setLoading(false);
@@ -460,6 +469,7 @@ export function usePipelineEditor(dagId: string | undefined) {
 
   return {
     loading,
+    loadError,
     pipeline,
     tasks,
     edges,
@@ -487,5 +497,18 @@ export function usePipelineEditor(dagId: string | undefined) {
     taskRuns,
     taskRunByKey,
     activeRunId,
+  };
+}
+
+function toEditorLoadError(error: unknown) {
+  const code = error instanceof BizError ? error.code : undefined;
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  const noPermission = status === 401 || status === 403 || code === 40100 || code === 40300;
+  if (status === 401 || code === 40100) return { noPermission, message: '登录状态已失效，请重新登录。' };
+  if (status === 403 || code === 40300) return { noPermission, message: '当前账号没有查看或编辑该流水线的权限。' };
+  if (status === 404) return { noPermission, message: '未找到该流水线，可能已被删除。' };
+  return {
+    noPermission,
+    message: error instanceof Error && error.message ? error.message : '流水线服务暂时不可用，请稍后重试。',
   };
 }

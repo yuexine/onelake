@@ -124,6 +124,18 @@ class RuntimeContractServiceTest {
     }
 
     @Test
+    void triggerBlockedReasonAllowsSubPipelineNotifyAndAssertionOnGraphJob() {
+        RuntimeContractService service = restrictedService();
+
+        assertThat(service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("compileTarget", "SUB_PIPELINE"))).isEmpty();
+        assertThat(service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("compileTarget", "NOTIFY"))).isEmpty();
+        assertThat(service.triggerBlockedReason(
+                "onelake_pipeline_graph_run", Map.of("compileTarget", "ASSERTION"))).isEmpty();
+    }
+
+    @Test
     void triggerBlockedReasonKeepsScriptEngineRestricted() {
         RuntimeContractService service = restrictedService();
 

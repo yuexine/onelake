@@ -35,6 +35,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -809,19 +810,21 @@ class OrchestrationServiceTest {
     }
 
     @Test
-    void triggerPipelineRunUsesGraphJobWhenConfigured() {
+    void triggerPipelineRunUsesGraphJobForObserveOnlyPipeline() {
         List<DagStatus> statuses = captureRunStatuses();
         ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
         ReflectionTestUtils.setField(service, "pipelineCallbackBaseUrl", "http://localhost:8080");
         ReflectionTestUtils.setField(service, "pipelineMaxParallel", 8);
         Dag dag = dag();
         dag.setDagsterJob("onelake_pipeline_run");
-        PipelineTask task = pipelineTask("spark_node");
-        PipelineTaskEdge edge = pipelineEdge("source", "spark_node");
+        PipelineTask task = pipelineTask("assert_only");
+        task.setTaskType(TaskType.ASSERTION);
+        task.setExecutable(false);
+        task.setConfig("{\"expression\":\"true\"}");
         when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
         when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
-        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of(edge));
+        when(pipelineTaskEdgeRepo.findByDagId(DAG_ID)).thenReturn(List.of());
         when(sparkBuilder.buildGraphRunConfig(any(), anyList(), anyList(),
                 eq("http://localhost:8080"), eq(8), anyMap(), any(RunContext.class), anyMap()))
                 .thenReturn(new DagsterRunConfig(GRAPH_JOB, Map.of("ops", Map.of())));
@@ -839,6 +842,27 @@ class OrchestrationServiceTest {
                 eq("http://localhost:8080"), eq(8), anyMap(), any(RunContext.class), anyMap());
         verify(dagster).launch(eq(GRAPH_JOB), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void deterministicEventTriggerLocksBeforeReusingExistingRun() {
+        Dag dag = dag();
+        JobRun existing = jobRun(DAG_ID);
+        String eventKey = "sub-pipeline-attempt-key";
+        when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
+        when(runRepo.findByDagIdAndEventTriggerKey(DAG_ID, eventKey))
+                .thenReturn(Optional.of(existing));
+
+        UUID result = service.triggerPipelineRun(
+                DAG_ID, TriggerType.EVENT, RunContext.empty(TriggerType.EVENT),
+                UUID.randomUUID(), eventKey);
+
+        assertThat(result).isEqualTo(RUN_ID);
+        var ordered = inOrder(jdbc, runRepo);
+        ordered.verify(jdbc).execute(any(ConnectionCallback.class));
+        ordered.verify(runRepo).findByDagIdAndEventTriggerKey(DAG_ID, eventKey);
+        verifyNoInteractions(dagster);
     }
 
     @Test
@@ -888,6 +912,32 @@ class OrchestrationServiceTest {
                 .hasMessageContaining("GRAPH");
 
         verifyNoInteractions(dagRepo, taskRunRepo, dagster);
+    }
+
+    @Test
+    void extensionNodesRejectLegacyExecutionMode() {
+        PipelineTask assertion = pipelineTask("assertion");
+        assertion.setTaskType(TaskType.ASSERTION);
+
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(
+                service, "validateTaskExecutionMode", List.of(assertion), TENANT_ID))
+                .isInstanceOfSatisfying(BizException.class,
+                        ex -> assertThat(ex.getCode()).isEqualTo(40062))
+                .hasMessageContaining("ASSERTION")
+                .hasMessageContaining("GRAPH");
+    }
+
+    @Test
+    void graphModeTreatsControlAndObserveNodesAsRunnableWithoutExecNode() {
+        ReflectionTestUtils.setField(service, "pipelineExecutionMode", "GRAPH");
+        PipelineTask assertion = pipelineTask("assertion");
+        assertion.setTaskType(TaskType.ASSERTION);
+        assertion.setExecutable(false);
+
+        Boolean runnable = ReflectionTestUtils.invokeMethod(
+                service, "hasRunnableTask", List.of(assertion));
+
+        assertThat(runnable).isTrue();
     }
 
     @Test

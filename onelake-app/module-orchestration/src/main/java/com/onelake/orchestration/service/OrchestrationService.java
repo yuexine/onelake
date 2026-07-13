@@ -18,6 +18,7 @@ import com.onelake.orchestration.domain.enums.DagStatus;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.ScheduleMode;
+import com.onelake.orchestration.domain.enums.TaskCategory;
 import com.onelake.orchestration.domain.enums.TaskRunStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.domain.enums.TriggerType;
@@ -44,6 +45,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -342,8 +344,8 @@ public class OrchestrationService {
     /**
      * 使用确定性 EVENT 触发键启动或复用发布版本运行。
      *
-     * <p>触发键先写入 {@code job_run} 的唯一索引，再启动 Dagster；回执落库失败后重试
-     * 会返回同一 JobRun，而不会再次启动下游流水线。</p>
+     * <p>同一 DAG/触发键先用 PostgreSQL 事务级 advisory lock 串行化，再查询
+     * {@code job_run} 唯一键；回执落库失败后重试会返回同一 JobRun，而不会再次启动下游流水线。</p>
      */
     @Transactional(noRollbackFor = BizException.class)
     public UUID triggerPipelineRun(UUID dagId,
@@ -433,6 +435,19 @@ public class OrchestrationService {
                 dagId, trigger, context, retryMetadata, useVersionId, environment, null);
     }
 
+    /** Serialize a deterministic EVENT key across backend replicas until this transaction ends. */
+    private void lockEventTriggerKey(UUID dagId, String eventTriggerKey) {
+        String lockKey = "orchestration.job_run.event:" + dagId + ":" + eventTriggerKey;
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            try (var statement = connection.prepareStatement(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+                statement.setString(1, lockKey);
+                statement.execute();
+            }
+            return null;
+        });
+    }
+
     private UUID triggerPipelineRunInternal(UUID dagId,
                                             TriggerType trigger,
                                             RunContext context,
@@ -446,6 +461,7 @@ public class OrchestrationService {
         }
         Dag liveDag = findTenantDag(dagId);
         if (StringUtils.hasText(eventTriggerKey)) {
+            lockEventTriggerKey(dagId, eventTriggerKey);
             UUID existingRunId = runRepo.findByDagIdAndEventTriggerKey(dagId, eventTriggerKey)
                     .map(JobRun::getId)
                     .orElse(null);
@@ -518,9 +534,8 @@ public class OrchestrationService {
             validatePipelineRuntimeContract(dag, compiledJobName);
         }
         activeJobName = compiledJobName;
-        // 2. 就绪检查：至少需要一个真实执行节点；SYNC_REF/QUALITY_GATE 等观测节点仍会生成 task_run 供 UI 展示。
-        long executableCount = tasks.stream().filter(PipelineTask::getExecutable).count();
-        if (executableCount == 0) {
+        // 2. 就绪检查：GRAPH 模式下 CONTROL/OBSERVE 节点本身也会作为真实 Dagster step 执行。
+        if (!hasRunnableTask(tasks)) {
             throw new BizException(40061, "流水线没有可执行任务（可能是 Spark 任务尚未就绪，P-Spark 阶段后启用）");
         }
 
@@ -1152,6 +1167,14 @@ public class OrchestrationService {
         return "GRAPH".equalsIgnoreCase(pipelineExecutionMode);
     }
 
+    private boolean hasRunnableTask(List<PipelineTask> tasks) {
+        return tasks != null && tasks.stream().anyMatch(task ->
+                Boolean.TRUE.equals(task.getExecutable())
+                        || (isGraphPipelineExecutionMode()
+                        && task.getTaskType() != null
+                        && task.getTaskType().category() != TaskCategory.EXEC));
+    }
+
     private void validateTaskExecutionMode(List<PipelineTask> tasks, UUID tenantId) {
         boolean hasScriptTask = tasks.stream().anyMatch(task ->
                 task.getTaskType() == TaskType.PYTHON || task.getTaskType() == TaskType.SHELL);
@@ -1161,9 +1184,13 @@ public class OrchestrationService {
         if (!isGraphPipelineExecutionMode()
                 && tasks.stream().anyMatch(task -> task.getTaskType() == TaskType.TRINO_SQL
                         || task.getTaskType() == TaskType.PYTHON
-                        || task.getTaskType() == TaskType.SHELL)) {
+                        || task.getTaskType() == TaskType.SHELL
+                        || task.getTaskType() == TaskType.SUB_PIPELINE
+                        || task.getTaskType() == TaskType.NOTIFY
+                        || task.getTaskType() == TaskType.ASSERTION)) {
             throw new BizException(40062,
-                    "TRINO_SQL/PYTHON/SHELL 仅支持 GRAPH 执行模式，请设置 ONELAKE_PIPELINE_EXECUTION_MODE=GRAPH");
+                    "TRINO_SQL/PYTHON/SHELL/SUB_PIPELINE/NOTIFY/ASSERTION 仅支持 GRAPH 执行模式，"
+                            + "请设置 ONELAKE_PIPELINE_EXECUTION_MODE=GRAPH");
         }
     }
 

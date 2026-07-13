@@ -1154,16 +1154,128 @@ def test_graph_linear_order_and_sync_ref(monkeypatch):
 
 
 @pytest.mark.parametrize("task_type", ["SUB_PIPELINE", "NOTIFY", "ASSERTION"])
-def test_graph_extension_dispatch_stubs_never_call_spark_submit(monkeypatch, task_type):
+def test_graph_extensions_never_fall_through_to_spark_submit(monkeypatch, task_type):
     def fail_if_called(*args):
         raise AssertionError("extension dispatch must not invoke spark-submit")
 
     monkeypatch.setattr(definitions, "_build_spark_submit", fail_if_called)
 
-    with pytest.raises(NotImplementedError, match=f"{task_type} graph dispatcher"):
+    with pytest.raises(NotImplementedError, match=f"{task_type} is executed"):
         definitions._dispatch_graph_node_command(
             _node("extension", task_type), "onelake", "local[2]",
         )
+
+
+def test_sub_pipeline_triggers_child_and_reports_success(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    triggers = []
+    node = _node("call_child", "SUB_PIPELINE")
+    node.update({
+        "sub_dag_id": "00000000-0000-0000-0000-000000000099",
+        "wait_for_completion": False,
+        "sub_timeout_seconds": 60,
+        "sub_poll_interval_seconds": 1,
+        "base_attempt": 3,
+    })
+    monkeypatch.setattr(
+        definitions,
+        "_trigger_sub_pipeline",
+        lambda base_url, run_id, task_key, sub_dag_id, attempt: triggers.append(
+            (run_id, task_key, sub_dag_id, attempt)
+        ) or {"runId": "child-run-1", "status": "QUEUED"},
+    )
+
+    result = _run_graph(_config([node], []))
+
+    assert result["status"] == {"call_child": "SUCCEEDED"}
+    assert triggers == [(
+        "run-1", "call_child", "00000000-0000-0000-0000-000000000099", 3,
+    )]
+    assert _statuses(callbacks, "call_child") == ["RUNNING", "SUCCEEDED"]
+    assert callbacks[-1][1]["outputs"]["subPipelineRunId"] == "child-run-1"
+
+
+def test_sub_pipeline_waits_for_child_terminal_success(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    node = _node("wait_child", "SUB_PIPELINE")
+    node.update({
+        "sub_dag_id": "00000000-0000-0000-0000-000000000099",
+        "wait_for_completion": True,
+        "sub_timeout_seconds": 60,
+        "sub_poll_interval_seconds": 1,
+    })
+    polls = []
+    monkeypatch.setattr(
+        definitions, "_trigger_sub_pipeline",
+        lambda *args: {"runId": "child-run-2", "status": "RUNNING"},
+    )
+    monkeypatch.setattr(
+        definitions, "_sub_pipeline_status",
+        lambda *args: polls.append(args) or {
+            "runId": "child-run-2", "status": "SUCCEEDED",
+        },
+    )
+    monkeypatch.setattr(definitions, "_wait_observe_interval", lambda *args: None)
+
+    result = _run_graph(_config([node], []))
+
+    assert result["status"] == {"wait_child": "SUCCEEDED"}
+    assert len(polls) == 1
+    assert callbacks[-1][1]["outputs"]["subPipelineStatus"] == "SUCCEEDED"
+
+
+def test_notify_sends_message_after_runtime_parameter_rendering(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    sent = []
+    node = _node("notify", "NOTIFY")
+    node.update({
+        "notification_title": "Daily ${bizdate}",
+        "notification_message": "rows=${rows}",
+        "notification_level": "INFO",
+        "notification_link": "/runs/${run_id}",
+    })
+    config = _config([node], [])
+    config["runtime_params"] = [
+        {"key": "bizdate", "value": "2026-07-13"},
+        {"key": "rows", "value": "42"},
+        {"key": "run_id", "value": "run-1"},
+    ]
+    monkeypatch.setattr(
+        definitions,
+        "_send_pipeline_notification",
+        lambda base_url, run_id, task_key, rendered: sent.append(dict(rendered))
+        or {"created": True},
+    )
+
+    result = _run_graph(config)
+
+    assert result["status"] == {"notify": "SUCCEEDED"}
+    assert sent[0]["notification_title"] == "Daily 2026-07-13"
+    assert sent[0]["notification_message"] == "rows=42"
+    assert sent[0]["notification_link"] == "/runs/run-1"
+    assert _statuses(callbacks, "notify") == ["RUNNING", "SUCCEEDED"]
+
+
+def test_assertion_false_fails_node_and_short_circuits_downstream(monkeypatch):
+    callbacks = _install_callback_collector(monkeypatch)
+    assertion = _node("assert_rows", "ASSERTION")
+    assertion["expression"] = "0 > 0"
+    downstream = _node("downstream")
+    monkeypatch.setattr(
+        definitions,
+        "_build_spark_submit",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("downstream spark-submit must not run")),
+    )
+
+    with pytest.raises(RuntimeError, match="assert_rows"):
+        _run_graph(_config(
+            [assertion, downstream], [_edge("assert_rows", "downstream")], max_parallel=1,
+        ))
+
+    assert _statuses(callbacks, "assert_rows") == ["RUNNING", "FAILED"]
+    assert _statuses(callbacks, "downstream") == ["UPSTREAM_FAILED"]
+    assert "evaluated to false" in callbacks[1][1]["errorMsg"]
 
 
 def test_sensor_ready_releases_downstream_and_stays_observe_only(monkeypatch):

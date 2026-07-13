@@ -12,13 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from dagster import Array, AssetMaterialization, Failure, Field, In, Int, Nothing, Out, Output, Shape, String, graph, job, multiprocess_executor, op, repository
+from dagster import Array, AssetMaterialization, Bool, Failure, Field, In, Int, Nothing, Out, Output, Shape, String, graph, job, multiprocess_executor, op, repository
 
 
 _TASK_OUTPUTS_MARKER = "ONELAKE_OUTPUTS_JSON="
 _SPARK_SUBMIT_TASK_TYPES = frozenset({"SPARK_SQL", "PYSPARK"})
 _CONTROL_TASK_TYPES = frozenset({"BRANCH", "CONDITION"})
-_EXTENSION_DISPATCH_STUB_TYPES = frozenset({
+_EXTENSION_TASK_TYPES = frozenset({
     "SUB_PIPELINE", "NOTIFY", "ASSERTION",
 })
 _OBSERVE_WAIT_TASK_TYPES = frozenset({"SENSOR", "WAIT"})
@@ -211,9 +211,9 @@ def _dispatch_graph_node_command(node, iceberg_catalog, spark_master):
     if task_type == "QUALITY_GATE":
         # QUALITY_GATE was Spark-backed before M4 and remains so for rollback compatibility.
         return _build_spark_submit(node, iceberg_catalog, spark_master)
-    if task_type in _EXTENSION_DISPATCH_STUB_TYPES:
+    if task_type in _EXTENSION_TASK_TYPES:
         raise NotImplementedError(
-            f"{task_type} graph dispatcher is reserved for a later M4 implementation step"
+            f"{task_type} is executed by the graph control/observe adapter"
         )
     raise ValueError(f"unsupported pipeline task_type: {task_type}")
 
@@ -417,6 +417,192 @@ def _run_observe_wait_with_callback(node, runtime_params, base_url, run_id,
         payload["errorMsg"] = _tail(message, 3900)
     _callback(base_url, run_id, task_key, payload, log)
     return outcome["status"], message
+
+
+def _internal_api_headers():
+    token = os.getenv("ONELAKE_INTERNAL_TOKEN", "") or os.getenv(
+        "ONELAKE_ORCHESTRATION_INTERNAL_TOKEN", ""
+    )
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Onelake-Internal-Token"] = token
+    return headers
+
+
+def _internal_api_base_url(base_url, task_type):
+    target = (base_url or os.getenv("ONELAKE_CALLBACK_BASE_URL", "")).rstrip("/")
+    if not target:
+        raise RuntimeError(f"{task_type} internal API base URL is empty")
+    return target
+
+
+def _internal_response_data(response, operation):
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.ok:
+        message = body.get("message") or response.text or response.reason
+        raise RuntimeError(f"{operation} failed: {message}")
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{operation} returned invalid data")
+    return data
+
+
+def _trigger_sub_pipeline(base_url, run_id, task_key, sub_dag_id, attempt):
+    import requests
+
+    response = requests.post(
+        _internal_api_base_url(base_url, "SUB_PIPELINE")
+        + "/api/v1/internal/orchestration/dagster/sub-pipelines/trigger",
+        json={
+            "parentRunId": run_id,
+            "taskKey": task_key,
+            "subDagId": sub_dag_id,
+            "attempt": attempt,
+        },
+        headers=_internal_api_headers(),
+        timeout=10,
+    )
+    return _internal_response_data(response, "SUB_PIPELINE trigger")
+
+
+def _sub_pipeline_status(base_url, parent_run_id, child_run_id):
+    import requests
+
+    response = requests.get(
+        _internal_api_base_url(base_url, "SUB_PIPELINE")
+        + f"/api/v1/internal/orchestration/dagster/sub-pipelines/runs/{quote(str(child_run_id), safe='')}",
+        params={"parentRunId": parent_run_id},
+        headers=_internal_api_headers(),
+        timeout=5,
+    )
+    return _internal_response_data(response, "SUB_PIPELINE status")
+
+
+def _send_pipeline_notification(base_url, run_id, task_key, node):
+    import requests
+
+    receiver_id = str(node.get("notification_receiver_id") or "").strip()
+    response = requests.post(
+        _internal_api_base_url(base_url, "NOTIFY")
+        + "/api/v1/internal/orchestration/dagster/notifications",
+        json={
+            "parentRunId": run_id,
+            "taskKey": task_key,
+            **({"receiverId": receiver_id} if receiver_id else {}),
+            "title": str(node.get("notification_title") or ""),
+            "message": str(node.get("notification_message") or ""),
+            "link": str(node.get("notification_link") or ""),
+            "level": str(node.get("notification_level") or "INFO"),
+        },
+        headers=_internal_api_headers(),
+        timeout=10,
+    )
+    return _internal_response_data(response, "NOTIFY send")
+
+
+def _execute_extension_node(node, base_url, run_id, task_key, attempt,
+                            cancellation_event, log):
+    task_type = node.get("task_type")
+    if task_type == "ASSERTION":
+        result = _safe_control_eval(node.get("expression"))
+        if not isinstance(result, bool):
+            raise ValueError("ASSERTION expression must resolve to boolean")
+        if not result:
+            raise AssertionError("ASSERTION expression evaluated to false")
+        return {
+            "message": "ASSERTION passed",
+            "outputs": {"assertionResult": True},
+        }
+
+    if task_type == "NOTIFY":
+        result = _send_pipeline_notification(base_url, run_id, task_key, node)
+        return {
+            "message": "NOTIFY delivered" if result.get("created") else "NOTIFY already delivered",
+            "outputs": {"notificationCreated": bool(result.get("created"))},
+        }
+
+    if task_type == "SUB_PIPELINE":
+        sub_dag_id = str(node.get("sub_dag_id") or "").strip()
+        if not sub_dag_id:
+            raise ValueError("SUB_PIPELINE sub_dag_id must not be empty")
+        child = _trigger_sub_pipeline(
+            base_url, run_id, task_key, sub_dag_id, attempt,
+        )
+        child_run_id = str(child.get("runId") or "").strip()
+        if not child_run_id:
+            raise RuntimeError("SUB_PIPELINE trigger returned empty runId")
+        outputs = {"subPipelineRunId": child_run_id, "subDagId": sub_dag_id}
+        if not bool(node.get("wait_for_completion")):
+            return {
+                "message": f"SUB_PIPELINE accepted child_run_id={child_run_id}",
+                "outputs": outputs,
+            }
+
+        timeout_seconds = _bounded_observe_seconds(
+            node, "sub_timeout_seconds", 1, _OBSERVE_HARD_MAX_WAIT_SECONDS,
+        )
+        poll_seconds = _bounded_observe_seconds(
+            node, "sub_poll_interval_seconds", 1, _SENSOR_HARD_MAX_POLL_SECONDS,
+        )
+        if poll_seconds > timeout_seconds:
+            raise ValueError(
+                "SUB_PIPELINE sub_poll_interval_seconds must not exceed sub_timeout_seconds"
+            )
+        deadline = time.monotonic() + timeout_seconds
+        status = str(child.get("status") or "QUEUED").upper()
+        while status not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"SUB_PIPELINE child run {child_run_id} timed out after {timeout_seconds}s"
+                )
+            _wait_observe_interval(cancellation_event, min(poll_seconds, remaining))
+            child = _sub_pipeline_status(base_url, run_id, child_run_id)
+            status = str(child.get("status") or "").upper()
+        outputs["subPipelineStatus"] = status
+        if status != "SUCCEEDED":
+            raise RuntimeError(f"SUB_PIPELINE child run {child_run_id} finished with {status}")
+        return {
+            "message": f"SUB_PIPELINE child run {child_run_id} succeeded",
+            "outputs": outputs,
+        }
+
+    raise ValueError(f"unsupported extension task_type: {task_type}")
+
+
+def _run_extension_with_callback(node, base_url, run_id, tenant_id, task_key,
+                                 attempt, cancellation_event, log):
+    try:
+        outcome = _execute_extension_node(
+            node, base_url, run_id, task_key, attempt, cancellation_event, log,
+        )
+        status = "SUCCEEDED"
+        message = outcome["message"]
+        outputs = outcome.get("outputs") or {}
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        status = "FAILED"
+        message = str(exc)
+        outputs = {}
+
+    log_ref = _upload_log(tenant_id, run_id, task_key, attempt, message, log)
+    payload = {
+        "status": status,
+        "finishedAt": _now(),
+        "dagsterStepKey": task_key,
+        "attempt": attempt,
+        "logRef": log_ref,
+    }
+    if status == "SUCCEEDED":
+        payload["outputs"] = outputs
+    else:
+        payload["errorMsg"] = _tail(message, 3900)
+    _callback(base_url, run_id, task_key, payload, log)
+    return status, message
 
 
 def _safe_control_eval(expression):
@@ -1059,6 +1245,8 @@ def _materializes_asset(node):
         return False
     if node.get("task_type") in _OBSERVE_WAIT_TASK_TYPES:
         return False
+    if node.get("task_type") in _EXTENSION_TASK_TYPES:
+        return False
     if node.get("task_type") in _SCRIPT_TASK_TYPES:
         return False
     if node.get("task_type") == "TRINO_SQL":
@@ -1306,6 +1494,15 @@ def _node_with_runtime_params(node, params):
     enriched = dict(node)
     enriched["sql_or_script"] = _apply_runtime_params(enriched.get("sql_or_script", ""), params)
     enriched["expression"] = _apply_runtime_params(enriched.get("expression", ""), params)
+    enriched["notification_title"] = _apply_runtime_params(
+        enriched.get("notification_title", ""), params,
+    )
+    enriched["notification_message"] = _apply_runtime_params(
+        enriched.get("notification_message", ""), params,
+    )
+    enriched["notification_link"] = _apply_runtime_params(
+        enriched.get("notification_link", ""), params,
+    )
     return enriched
 
 
@@ -1793,6 +1990,19 @@ _OBSERVE_NODE_CONFIG = {
 }
 
 
+_EXTENSION_NODE_CONFIG = {
+    "sub_dag_id": Field(String, default_value=""),
+    "wait_for_completion": Field(Bool, default_value=False),
+    "sub_timeout_seconds": Field(Int, default_value=3600),
+    "sub_poll_interval_seconds": Field(Int, default_value=5),
+    "notification_receiver_id": Field(String, default_value=""),
+    "notification_title": Field(String, default_value=""),
+    "notification_message": Field(String, default_value=""),
+    "notification_level": Field(String, default_value="INFO"),
+    "notification_link": Field(String, default_value=""),
+}
+
+
 _NATIVE_NODE_CONFIG = {
     "pipeline_id": Field(String),
     "run_id": Field(String),
@@ -1826,6 +2036,7 @@ _NATIVE_NODE_CONFIG = {
     **_CONTROL_NODE_CONFIG,
     **_SCRIPT_NODE_CONFIG,
     **_OBSERVE_NODE_CONFIG,
+    **_EXTENSION_NODE_CONFIG,
 }
 
 
@@ -1895,6 +2106,15 @@ def _execute_native_graph_node(context):
         if observe_status == "FAILED":
             raise Failure(description=message)
         return observe_status
+
+    if node["task_type"] in _EXTENSION_TASK_TYPES:
+        extension_status, message = _run_extension_with_callback(
+            node, base_url, run_id, tenant_id, task_key,
+            first_attempt, threading.Event(), context.log,
+        )
+        if extension_status == "FAILED":
+            raise Failure(description=message)
+        return extension_status
 
     attempts = max(1, int(node.get("max_retries", 0)) + 1)
     last_log = ""
@@ -2233,6 +2453,7 @@ def _load_native_pipeline_jobs():
                 **_CONTROL_NODE_CONFIG,
                 **_SCRIPT_NODE_CONFIG,
                 **_OBSERVE_NODE_CONFIG,
+                **_EXTENSION_NODE_CONFIG,
             })),
             default_value=[],
         ),
@@ -2521,6 +2742,13 @@ def run_pipeline_graph_op(context):
                 first_attempt, cancellation_event, context.log,
             )
             return observe_status
+
+        if task_type in _EXTENSION_TASK_TYPES:
+            extension_status, _ = _run_extension_with_callback(
+                node, base_url, run_id, tenant_id, task_key,
+                first_attempt, cancellation_event, context.log,
+            )
+            return extension_status
 
         attempts = max(1, int(node.get("max_retries", 0)) + 1)
         last_log = ""

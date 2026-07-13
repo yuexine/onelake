@@ -12,6 +12,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -21,6 +23,7 @@ public class NotificationService {
 
     private static final int DEFAULT_LIMIT = 50;
     private static final int MAX_LIMIT = 100;
+    private static final Set<String> PIPELINE_LEVELS = Set.of("INFO", "WARNING", "CRITICAL");
 
     private final NotificationRepository repo;
 
@@ -81,6 +84,45 @@ public class NotificationService {
         } catch (DataIntegrityViolationException e) {
             log.debug("skip duplicated task notification for {}:{}", task.getRefType(), task.getRefId());
         }
+    }
+
+    /**
+     * Persist a notification requested by an orchestration NOTIFY node.
+     *
+     * <p>The caller supplies an explicit tenant and receiver because Dagster invokes the
+     * orchestration internal API without a user JWT. The source key makes retries idempotent
+     * through {@code uk_notification_receiver_source}.</p>
+     *
+     * @return {@code true} when a new notification was inserted, {@code false} for a retry
+     *         that already produced the same notification
+     */
+    @Transactional
+    public boolean notifyPipelineNode(UUID tenantId,
+                                      UUID receiverId,
+                                      String title,
+                                      String content,
+                                      String link,
+                                      String level,
+                                      String sourceRefId) {
+        if (tenantId == null || receiverId == null) {
+            throw new BizException(40020, "通知租户与接收人不能为空");
+        }
+        String normalizedTitle = title == null ? "" : title.trim();
+        String normalizedContent = content == null ? "" : content;
+        String normalizedLevel = level == null ? "INFO" : level.trim().toUpperCase(Locale.ROOT);
+        if (normalizedTitle.isEmpty() || normalizedTitle.length() > 256) {
+            throw new BizException(40020, "通知标题不能为空且不能超过 256 字符");
+        }
+        if (!PIPELINE_LEVELS.contains(normalizedLevel)) {
+            throw new BizException(40020, "通知级别必须是 INFO、WARNING 或 CRITICAL");
+        }
+        if (sourceRefId == null || sourceRefId.isBlank() || sourceRefId.length() > 128) {
+            throw new BizException(40020, "通知幂等键不能为空且不能超过 128 字符");
+        }
+        return repo.insertPipelineNodeNotification(
+                UUID.randomUUID(), tenantId, receiverId, normalizedTitle, normalizedContent,
+                link == null || link.isBlank() ? null : link.trim(), normalizedLevel,
+                sourceRefId, Instant.now()) == 1;
     }
 
     /**

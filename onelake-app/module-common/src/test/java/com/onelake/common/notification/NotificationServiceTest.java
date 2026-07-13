@@ -17,8 +17,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -111,6 +113,30 @@ class NotificationServiceTest {
         service.notifyTaskIfNeeded(task);
 
         verify(repo, never()).save(any(Notification.class));
+    }
+
+    @Test
+    void notifyPipelineNodePersistsRenderedMessageAndIsIdempotent() {
+        UUID tenantId = UUID.randomUUID();
+        UUID receiverId = UUID.randomUUID();
+        when(repo.insertPipelineNodeNotification(
+                any(UUID.class), eq(tenantId), eq(receiverId), eq("Daily 2026-07-13"),
+                eq("rows=42"), eq("/orchestration/runs/1"), eq("WARNING"),
+                eq("run-node-key"), any())).thenReturn(1, 0);
+
+        boolean created = service.notifyPipelineNode(
+                tenantId, receiverId, "Daily 2026-07-13", "rows=42",
+                "/orchestration/runs/1", "warning", "run-node-key");
+        boolean duplicate = service.notifyPipelineNode(
+                tenantId, receiverId, "Daily 2026-07-13", "rows=42",
+                "/orchestration/runs/1", "warning", "run-node-key");
+
+        assertThat(created).isTrue();
+        assertThat(duplicate).isFalse();
+        verify(repo, times(2)).insertPipelineNodeNotification(
+                any(UUID.class), eq(tenantId), eq(receiverId), eq("Daily 2026-07-13"),
+                eq("rows=42"), eq("/orchestration/runs/1"), eq("WARNING"),
+                eq("run-node-key"), any());
     }
 
     private RunningTask failedTask(UUID tenantId, UUID userId) {

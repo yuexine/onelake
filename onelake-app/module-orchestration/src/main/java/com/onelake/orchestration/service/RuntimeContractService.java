@@ -183,10 +183,12 @@ public class RuntimeContractService {
         if ("PYTHON".equals(normalized) || "SHELL".equals(normalized)) {
             return "SCRIPT";
         }
-        if ("BRANCH".equals(normalized) || "CONDITION".equals(normalized)) {
+        if ("BRANCH".equals(normalized) || "CONDITION".equals(normalized)
+                || "SUB_PIPELINE".equals(normalized)) {
             return "CONTROL";
         }
-        if ("SENSOR".equals(normalized) || "WAIT".equals(normalized)) {
+        if ("SENSOR".equals(normalized) || "WAIT".equals(normalized)
+                || "NOTIFY".equals(normalized) || "ASSERTION".equals(normalized)) {
             return "OBSERVE";
         }
         return normalized;

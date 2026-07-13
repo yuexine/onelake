@@ -270,6 +270,34 @@ class PipelineCompileServiceTest {
     }
 
     @Test
+    void subPipelineRejectsSelfReferenceAtCompileTime() {
+        PipelineTask task = extensionTask("self", TaskType.SUB_PIPELINE);
+        task.setConfig("{\"subDagId\":\"" + dagId + "\",\"waitForCompletion\":false}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(task), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks().get(0).errorMessage()).contains("cannot reference its own");
+    }
+
+    @Test
+    void notifyAndAssertionRequireTheirRuntimePayloads() {
+        PipelineTask notify = extensionTask("notify", TaskType.NOTIFY);
+        notify.setConfig("{\"title\":\"done\"}");
+        PipelineTask assertion = extensionTask("assert", TaskType.ASSERTION);
+        assertion.setConfig("{\"expression\":\"\"}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(notify, assertion), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).extracting(PipelineCompileResult.TaskCompileResult::errorMessage)
+                .anySatisfy(message -> assertThat(message).contains("NOTIFY").contains("message"))
+                .anySatisfy(message -> assertThat(message).contains("ASSERTION").contains("expression"));
+    }
+
+    @Test
     void conditionAndBranchRequireCompleteControlConfig() {
         PipelineTask condition = extensionTask("condition", TaskType.CONDITION);
         condition.setConfig("{\"enabled\":true}");
@@ -330,6 +358,29 @@ class PipelineCompileServiceTest {
         assertThat(wait.getExecutable()).isFalse();
         assertThat(result.graphErrors()).noneSatisfy(
                 message -> assertThat(message).contains("cannot resolve assetFqn"));
+    }
+
+    @Test
+    void p2NodesAcceptPipelineFlowAndTransitiveUpstreamOutputs() {
+        PipelineTask source = sparkSqlTask("source", "onelake.dwd.source");
+        PipelineTask assertion = extensionTask("assertion", TaskType.ASSERTION);
+        assertion.setConfig("{\"expression\":\"${upstream.source.rowsWritten} > 0\"}");
+        PipelineTask notify = extensionTask("notify", TaskType.NOTIFY);
+        notify.setConfig("{\"title\":\"done\","
+                + "\"message\":\"rows=${upstream.source.rowsWritten}\"}");
+        PipelineTask subPipeline = extensionTask("sub_pipeline", TaskType.SUB_PIPELINE);
+
+        PipelineCompileResult result = service.compile(
+                dagId,
+                tenantId,
+                List.of(source, assertion, notify, subPipeline),
+                List.of(
+                        edge("source", "assertion", EdgeLayer.PIPELINE),
+                        edge("assertion", "notify", EdgeLayer.PIPELINE),
+                        edge("notify", "sub_pipeline", EdgeLayer.PIPELINE)));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(result.graphErrors()).isEmpty();
     }
 
     @Test
@@ -674,6 +725,9 @@ class PipelineCompileServiceTest {
                      "timeoutSeconds":60,"pollIntervalSeconds":5,"onTimeout":"FAILED"}
                     """;
             case WAIT -> "{\"durationSeconds\":1}";
+            case SUB_PIPELINE -> "{\"subDagId\":\"00000000-0000-0000-0000-000000000099\",\"waitForCompletion\":true}";
+            case NOTIFY -> "{\"title\":\"Pipeline ${bizdate}\",\"message\":\"completed\",\"level\":\"INFO\"}";
+            case ASSERTION -> "{\"expression\":\"1 > 0\"}";
             default -> "{\"enabled\":true}";
         });
         return task;

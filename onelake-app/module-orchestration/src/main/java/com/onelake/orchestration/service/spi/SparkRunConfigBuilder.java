@@ -357,6 +357,31 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             opConfig.put("wait_duration_seconds", firstConfigInt(
                     cfg, -1, "durationSeconds", "duration_seconds"));
         }
+        if (TaskType.SUB_PIPELINE.name().equals(taskType)) {
+            opConfig.put("engine", "CONTROL");
+            opConfig.put("sub_dag_id", firstConfigText(cfg, "subDagId", "sub_dag_id"));
+            opConfig.put("wait_for_completion", firstConfigBoolean(
+                    cfg, false, "waitForCompletion", "wait_for_completion"));
+            opConfig.put("sub_timeout_seconds", firstConfigInt(
+                    cfg, 3600, "timeoutSeconds", "timeout_seconds"));
+            opConfig.put("sub_poll_interval_seconds", firstConfigInt(
+                    cfg, 5, "pollIntervalSeconds", "poll_interval_seconds"));
+        }
+        if (TaskType.NOTIFY.name().equals(taskType)) {
+            opConfig.put("engine", "OBSERVE");
+            opConfig.put("notification_receiver_id", firstConfigText(
+                    cfg, "receiverId", "receiver_id"));
+            opConfig.put("notification_title", ParamRenderer.render(
+                    textOrEmpty(cfg, "title"), runContext, params));
+            opConfig.put("notification_message", ParamRenderer.render(
+                    firstConfigText(cfg, "message", "content"), runContext, params));
+            opConfig.put("notification_level", firstConfigText(cfg, "level"));
+            opConfig.put("notification_link", ParamRenderer.render(
+                    textOrEmpty(cfg, "link"), runContext, params));
+        }
+        if (TaskType.ASSERTION.name().equals(taskType)) {
+            opConfig.put("engine", "OBSERVE");
+        }
         if (TaskType.QUALITY_GATE.name().equals(taskType)) {
             opConfig.put("sql_or_script", QualityGateScriptRenderer.render(task, runContext, params));
             String target = ParamRenderer.render(
@@ -370,7 +395,8 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             opConfig.put("from_tables", textArray(cfg.path("from_tables")));
         }
         if (TaskType.CONDITION.name().equals(taskType)
-                || TaskType.BRANCH.name().equals(taskType)) {
+                || TaskType.BRANCH.name().equals(taskType)
+                || TaskType.ASSERTION.name().equals(taskType)) {
             opConfig.put("expression", ParamRenderer.render(
                     textOrEmpty(cfg, "expression"), runContext, params));
         }
@@ -521,6 +547,20 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
             int value = intField(config, field);
             if (value >= 0) {
                 return value;
+            }
+        }
+        return defaultValue;
+    }
+
+    private static boolean firstConfigBoolean(
+            JsonNode config, boolean defaultValue, String... fields) {
+        if (config == null) {
+            return defaultValue;
+        }
+        for (String field : fields) {
+            JsonNode value = config.path(field);
+            if (value.isBoolean()) {
+                return value.asBoolean();
             }
         }
         return defaultValue;

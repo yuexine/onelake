@@ -637,6 +637,49 @@ class SparkRunConfigBuilderTest {
                 .containsEntry("wait_duration_seconds", -1);
     }
 
+    @Test
+    void mapsSubPipelineNotifyAndAssertionConfigsWithRenderedParameters() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        UUID subDagId = UUID.randomUUID();
+        UUID receiverId = UUID.randomUUID();
+        RunContext runContext = runContext("2026-07-11T16:00:00Z", "2026-07-12T16:00:00Z");
+        Map<String, String> params = runContext.builtInParameters(UUID.randomUUID());
+        PipelineTask subPipeline = task(pipelineId, tenantId, "child", TaskType.SUB_PIPELINE, false,
+                "{\"subDagId\":\"" + subDagId + "\",\"waitForCompletion\":true,"
+                        + "\"timeoutSeconds\":90,\"pollIntervalSeconds\":3}");
+        PipelineTask notify = task(pipelineId, tenantId, "notify", TaskType.NOTIFY, false,
+                "{\"receiverId\":\"" + receiverId + "\","
+                        + "\"title\":\"Daily ${bizdate}\",\"message\":\"rows=${upstream.load.rowsWritten}\","
+                        + "\"level\":\"WARNING\",\"link\":\"/runs/${run_id}\"}");
+        PipelineTask assertion = task(pipelineId, tenantId, "assert", TaskType.ASSERTION, false,
+                "{\"expression\":\"${upstream.load.rowsWritten} > 0\"}");
+
+        Map<String, Object> subConfig = builder.buildPerTaskOpConfig(
+                subPipeline, null, runContext, params);
+        Map<String, Object> notifyConfig = builder.buildPerTaskOpConfig(
+                notify, null, runContext, params);
+        Map<String, Object> assertionConfig = builder.buildPerTaskOpConfig(
+                assertion, null, runContext, params);
+
+        assertThat(subConfig)
+                .containsEntry("engine", "CONTROL")
+                .containsEntry("sub_dag_id", subDagId.toString())
+                .containsEntry("wait_for_completion", true)
+                .containsEntry("sub_timeout_seconds", 90)
+                .containsEntry("sub_poll_interval_seconds", 3);
+        assertThat(notifyConfig)
+                .containsEntry("engine", "OBSERVE")
+                .containsEntry("notification_receiver_id", receiverId.toString())
+                .containsEntry("notification_title", "Daily 2026-07-12")
+                .containsEntry("notification_message", "rows=${upstream.load.rowsWritten}")
+                .containsEntry("notification_level", "WARNING");
+        assertThat(notifyConfig.get("notification_link").toString()).startsWith("/runs/");
+        assertThat(assertionConfig)
+                .containsEntry("engine", "OBSERVE")
+                .containsEntry("expression", "${upstream.load.rowsWritten} > 0");
+    }
+
     private RunContext runContext(String logicalDate, String dataIntervalEnd) {
         Instant logical = Instant.parse(logicalDate);
         return new RunContext(

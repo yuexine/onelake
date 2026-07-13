@@ -219,7 +219,9 @@ public class PipelineCompileService {
             case BRANCH -> validateBranchTask(t);
             case SENSOR -> validateSensorTask(t);
             case WAIT -> validateWaitTask(t);
-            case SUB_PIPELINE, NOTIFY, ASSERTION -> validateExtensionTask(t);
+            case SUB_PIPELINE -> validateSubPipelineTask(t);
+            case NOTIFY -> validateNotifyTask(t);
+            case ASSERTION -> validateAssertionTask(t);
         };
     }
 
@@ -584,19 +586,91 @@ public class PipelineCompileService {
         });
     }
 
-    /** M4 后续步骤会补充类型专属规则；基线阶段只要求存在结构化配置。 */
-    private TaskCompileResult validateExtensionTask(PipelineTask t) {
-        if (!StringUtils.hasText(t.getConfig()) || "{}".equals(t.getConfig().trim())) {
-            return fail(t, t.getTaskType().name() + " task requires non-empty config");
-        }
+    private TaskCompileResult validateSubPipelineTask(PipelineTask t) {
         JsonNode cfg = parseSafeJson(t.getConfig());
         if (cfg == null || !cfg.isObject()) {
-            return fail(t, t.getTaskType().name() + " task requires valid object config");
+            return fail(t, "SUB_PIPELINE task requires valid object config");
+        }
+        String rawSubDagId = firstText(
+                textOrEmpty(cfg, "subDagId"), textOrEmpty(cfg, "sub_dag_id"));
+        UUID subDagId;
+        try {
+            subDagId = UUID.fromString(rawSubDagId);
+        } catch (RuntimeException ex) {
+            return fail(t, "SUB_PIPELINE config.subDagId must be a UUID");
+        }
+        if (subDagId.equals(t.getDagId())) {
+            return fail(t, "SUB_PIPELINE cannot reference its own pipeline");
+        }
+        JsonNode wait = cfg.has("waitForCompletion")
+                ? cfg.get("waitForCompletion") : cfg.get("wait_for_completion");
+        if (wait == null || !wait.isBoolean()) {
+            return fail(t, "SUB_PIPELINE config.waitForCompletion must be boolean");
+        }
+        try {
+            if (hasAnyField(cfg, "timeoutSeconds", "timeout_seconds")) {
+                requiredObserveSeconds(
+                        cfg, "timeoutSeconds", "timeout_seconds", 1, OBSERVE_MAX_WAIT_SECONDS);
+            }
+            if (hasAnyField(cfg, "pollIntervalSeconds", "poll_interval_seconds")) {
+                requiredObserveSeconds(
+                        cfg, "pollIntervalSeconds", "poll_interval_seconds",
+                        1, SENSOR_MAX_POLL_INTERVAL_SECONDS);
+            }
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "SUB_PIPELINE config invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private TaskCompileResult validateNotifyTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "NOTIFY task requires valid object config");
+        }
+        String title = textOrEmpty(cfg, "title");
+        String message = firstText(textOrEmpty(cfg, "message"), textOrEmpty(cfg, "content"));
+        if (!StringUtils.hasText(title) || title.length() > 256) {
+            return fail(t, "NOTIFY config.title is required and must not exceed 256 characters");
+        }
+        if (!StringUtils.hasText(message)) {
+            return fail(t, "NOTIFY config.message is required");
+        }
+        String receiverId = firstText(
+                textOrEmpty(cfg, "receiverId"), textOrEmpty(cfg, "receiver_id"));
+        if (StringUtils.hasText(receiverId)) {
+            try {
+                UUID.fromString(receiverId);
+            } catch (IllegalArgumentException ex) {
+                return fail(t, "NOTIFY config.receiverId must be a UUID");
+            }
+        }
+        String level = textOrEmpty(cfg, "level");
+        if (StringUtils.hasText(level)
+                && !Set.of("INFO", "WARNING", "CRITICAL").contains(level.toUpperCase(Locale.ROOT))) {
+            return fail(t, "NOTIFY config.level must be INFO, WARNING or CRITICAL");
         }
         try {
             validateParamExpressions(cfg);
         } catch (IllegalArgumentException ex) {
-            return fail(t, t.getTaskType().name() + " parameter expression invalid: " + ex.getMessage());
+            return fail(t, "NOTIFY parameter expression invalid: " + ex.getMessage());
+        }
+        return ok(t);
+    }
+
+    private TaskCompileResult validateAssertionTask(PipelineTask t) {
+        JsonNode cfg = parseSafeJson(t.getConfig());
+        if (cfg == null || !cfg.isObject()) {
+            return fail(t, "ASSERTION task requires valid object config");
+        }
+        if (!StringUtils.hasText(textOrEmpty(cfg, "expression"))) {
+            return fail(t, "ASSERTION task requires non-empty config.expression");
+        }
+        try {
+            validateParamExpressions(cfg);
+        } catch (IllegalArgumentException ex) {
+            return fail(t, "ASSERTION parameter expression invalid: " + ex.getMessage());
         }
         return ok(t);
     }

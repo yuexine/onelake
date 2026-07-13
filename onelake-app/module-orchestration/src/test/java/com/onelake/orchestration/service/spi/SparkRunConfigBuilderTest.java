@@ -54,6 +54,46 @@ class SparkRunConfigBuilderTest {
     }
 
     @Test
+    void prefersCompiledOperatorSqlAndStillAppliesM2ParameterRendering() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        PipelineTask task = task(
+                pipelineId, tenantId, "operator_select", TaskType.SPARK_SQL, true, """
+                {
+                  "sql":"SELECT raw_config_value",
+                  "compiled_sql":"CREATE OR REPLACE TABLE dwd.result AS SELECT '${bizdate}' AS dt"
+                }
+                """);
+        task.setOperatorRef("transform.select_columns");
+        task.setOperatorVersion("1.2.3");
+        RunContext runContext = runContext("2026-07-11T16:00:00Z", "2026-07-12T16:00:00Z");
+
+        Map<String, Object> config = builder.buildPerTaskOpConfig(
+                task, null, runContext, runContext.builtInParameters(UUID.randomUUID()));
+
+        assertThat(config).containsEntry(
+                "sql_or_script",
+                "CREATE OR REPLACE TABLE dwd.result AS SELECT '2026-07-12' AS dt");
+    }
+
+    @Test
+    void manualSparkSqlCannotBeOverriddenByCompiledOperatorField() {
+        UUID pipelineId = UUID.randomUUID();
+        UUID tenantId = UUID.randomUUID();
+        PipelineTask task = task(
+                pipelineId, tenantId, "manual_sql", TaskType.SPARK_SQL, true, """
+                {
+                  "sql":"SELECT validated_sql",
+                  "compiled_sql":"SELECT unvalidated_override"
+                }
+                """);
+
+        Map<String, Object> config = builder.buildPerTaskOpConfig(task, null, Map.of());
+
+        assertThat(config).containsEntry("sql_or_script", "SELECT validated_sql");
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void qualityGateIsRenderedAsExecutableSparkTask() {
         UUID pipelineId = UUID.randomUUID();

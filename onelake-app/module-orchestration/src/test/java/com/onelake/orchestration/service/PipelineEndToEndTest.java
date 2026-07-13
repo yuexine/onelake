@@ -97,6 +97,7 @@ class PipelineEndToEndTest {
     @Mock private PipelineSnapshotService snapshotService;
     @Mock private TenantRepository tenantRepo;
     @Mock private ScriptSandboxPolicy scriptSandboxPolicy;
+    @Mock private OperatorService operatorService;
 
     private PipelineService pipelineService;
     private PipelineCompileService compileService;
@@ -118,9 +119,10 @@ class PipelineEndToEndTest {
     @BeforeEach
     void setup() {
         compileService = new PipelineCompileService(
-                dagRepo, taskRepo, edgeRepo, scriptSandboxPolicy);
+                dagRepo, taskRepo, edgeRepo, scriptSandboxPolicy,
+                operatorService, new OperatorSqlGenerator());
         pipelineService = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, snapshotService, outboxProvider, tenantRepo);
+                runRepo, compileService, operatorService, snapshotService, outboxProvider, tenantRepo);
         orchestrationService = new OrchestrationService(dagRepo, runRepo, dagster, jdbc,
                 runtimeContractService, compileService, snapshotService, taskRepo, edgeRepo, taskRunRepo,
                 new SparkRunConfigBuilder(paramResolver), outboxProvider, pipelineLogStorage,

@@ -15,6 +15,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.PipelineCompileResult.TaskCompileResult;
+import com.onelake.orchestration.dto.OperatorManifestDTO;
+import com.onelake.orchestration.dto.PipelineCompilePreview;
+import com.onelake.orchestration.dto.PipelineCompilePreview.NodeSqlPreview;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
 import com.onelake.orchestration.repository.PipelineTaskRepository;
@@ -85,6 +88,8 @@ public class PipelineCompileService {
     private final PipelineTaskRepository taskRepo;
     private final PipelineTaskEdgeRepository edgeRepo;
     private final ScriptSandboxPolicy scriptSandboxPolicy;
+    private final OperatorService operatorService;
+    private final OperatorSqlGenerator operatorSqlGenerator;
 
     @Value("${onelake.orchestration.trino.allowed-catalogs:iceberg}")
     private String trinoAllowedCatalogs = "iceberg";
@@ -143,7 +148,53 @@ public class PipelineCompileService {
     }
 
     /**
-     * 只基于调用方给定的任务和边编译，不读取或写入数据库。
+     * 编译但不持久化节点状态，返回前端可直接展示的最终节点 SQL/脚本。
+     */
+    @Transactional(readOnly = true)
+    public PipelineCompilePreview preview(UUID dagId) {
+        UUID tenantId = TenantContext.getTenantId();
+        if (tenantId == null) {
+            throw new BizException(40100, "Tenant context required to preview pipeline compile");
+        }
+        dagRepo.findByIdAndTenantId(dagId, tenantId)
+                .orElseThrow(() -> new BizException(40400, "Pipeline 不存在"));
+        List<PipelineTask> tasks = taskRepo.findByDagIdOrderByCreatedAtAsc(dagId);
+        List<PipelineTaskEdge> edges = new ArrayList<>(edgeRepo.findByDagId(dagId));
+        PipelineCompileResult result = compile(dagId, tenantId, tasks, edges);
+
+        Map<String, PipelineTask> taskByKey = new LinkedHashMap<>();
+        for (PipelineTask task : tasks) {
+            taskByKey.put(task.getTaskKey(), task);
+        }
+        List<NodeSqlPreview> nodes = result.tasks().stream().map(compiled -> {
+            PipelineTask task = taskByKey.get(compiled.taskKey());
+            JsonNode cfg = task == null ? null : parseSafeJson(task.getConfig());
+            String compiledSql = task != null && StringUtils.hasText(task.getOperatorRef())
+                    ? textOrEmpty(cfg, "compiled_sql")
+                    : firstText(
+                            textOrEmpty(cfg, "compiled_sql"),
+                            textOrEmpty(
+                                    cfg, task != null && task.getTaskType() == TaskType.PYSPARK
+                                            ? "script" : "sql"));
+            return new NodeSqlPreview(
+                    compiled.taskId(),
+                    compiled.taskKey(),
+                    compiled.taskType(),
+                    task == null ? null : task.getOperatorRef(),
+                    task == null ? null : task.getOperatorVersion(),
+                    textOrEmpty(cfg, "compiled_operator_template_kind"),
+                    StringUtils.hasText(compiledSql) ? compiledSql : null,
+                    cfg != null && cfg.path("compiled_sql_generated").asBoolean(false),
+                    compiled.valid(),
+                    compiled.errorMessage());
+        }).toList();
+        return new PipelineCompilePreview(
+                dagId, result.allValidated(), nodes, result.graphErrors());
+    }
+
+    /**
+     * 只基于调用方给定的任务和边编译，不读取或写入流水线定义；带算子引用的节点会
+     * 通过 {@link OperatorService} 读取其锁定版本 Manifest。
      *
      * <p>发布版本运行从不可变 snapshot 重建实体集合后调用此入口，避免运行时重新读取
      * 已被编辑的实时 DAG 定义。</p>
@@ -160,14 +211,17 @@ public class PipelineCompileService {
 
         // 数据流边是下游输入的事实来源。Spark 节点从入边资产推导输入表，
         // 用户只需要在画布连线一次，不必在每个节点 config 中重复维护 from_tables。
-        applyDataflowInputs(tasks, edges);
+        Map<String, String> generationErrors = applyDataflowInputs(tasks, edges, tenantId);
 
         // 1. 节点级校验。
         Map<UUID, TaskCompileResult> resultsById = new LinkedHashMap<>();
         Map<String, PipelineTask> taskByKey = new HashMap<>();
         for (PipelineTask t : tasks) {
             taskByKey.put(t.getTaskKey(), t);
-            TaskCompileResult r = validateTask(t, tenantId);
+            String generationError = generationErrors.get(t.getTaskKey());
+            TaskCompileResult r = generationError == null
+                    ? validateTask(t, tenantId)
+                    : fail(t, generationError);
             resultsById.put(t.getId(), r);
             applyCompileResult(t, r);
         }
@@ -712,9 +766,14 @@ public class PipelineCompileService {
     private TaskCompileResult validateSparkTask(PipelineTask t) {
         JsonNode cfg = parseSafeJson(t.getConfig());
         String expectedField = t.getTaskType() == TaskType.PYSPARK ? "script" : "sql";
-        String script = textOrEmpty(cfg, expectedField);
+        String script = t.getTaskType() == TaskType.SPARK_SQL && StringUtils.hasText(t.getOperatorRef())
+                ? textOrEmpty(cfg, "compiled_sql")
+                : textOrEmpty(cfg, expectedField);
         if (!StringUtils.hasText(script)) {
-            return fail(t, t.getTaskType().name() + " task requires non-empty config." + expectedField);
+            String field = t.getTaskType() == TaskType.SPARK_SQL && StringUtils.hasText(t.getOperatorRef())
+                    ? "compiled_sql generated from locked operator manifest"
+                    : "config." + expectedField;
+            return fail(t, t.getTaskType().name() + " task requires non-empty " + field);
         }
         try {
             validateParamExpressions(cfg);
@@ -1005,7 +1064,9 @@ public class PipelineCompileService {
      * <p>边是输入资产、别名、端口和新鲜度策略的单一事实来源；编译器据此生成 SQL，
      * 避免画布边和节点 from_tables 配置发生双写漂移。
      */
-    private void applyDataflowInputs(List<PipelineTask> tasks, List<PipelineTaskEdge> edges) {
+    private Map<String, String> applyDataflowInputs(List<PipelineTask> tasks,
+                                                    List<PipelineTaskEdge> edges,
+                                                    UUID tenantId) {
         Map<String, PipelineTask> taskByKey = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
             taskByKey.put(task.getTaskKey(), task);
@@ -1035,35 +1096,51 @@ public class PipelineCompileService {
                             firstText(edge.getFreshnessPolicy(), defaultFreshnessPolicy(targetInput))));
         }
 
+        Map<String, String> generationErrors = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
             if (!isSparkTask(task)) {
                 continue;
             }
             List<DataflowInput> inputs = inputsByTarget.getOrDefault(task.getTaskKey(), List.of());
+            ObjectNode cfg = objectConfig(task.getConfig());
+            if (!inputs.isEmpty()) {
+                applyInputMetadata(cfg, inputs);
+            }
+
+            if (StringUtils.hasText(task.getOperatorRef())) {
+                cfg.remove("compiled_sql");
+                cfg.remove("compiled_operator_ref");
+                cfg.remove("compiled_operator_version");
+                cfg.remove("compiled_operator_template_kind");
+                cfg.remove("compiled_sql_generated");
+                try {
+                    if (!StringUtils.hasText(task.getOperatorVersion())) {
+                        throw new IllegalArgumentException(
+                                "operatorVersion is required; operator nodes must compile a locked version");
+                    }
+                    OperatorManifestDTO manifest = operatorService.getManifest(
+                            tenantId, task.getOperatorRef(), task.getOperatorVersion());
+                    String fragment = operatorSqlGenerator.generate(manifest, cfg);
+                    String sql = composeOperatorSql(task, manifest, cfg, fragment, inputs);
+                    cfg.put("compiled_sql", sql);
+                    cfg.put("compiled_operator_ref", task.getOperatorRef());
+                    cfg.put("compiled_operator_version", task.getOperatorVersion());
+                    cfg.put("compiled_operator_template_kind",
+                            operatorSqlGenerator.templateKind(manifest).name());
+                    cfg.put("compiled_sql_generated", true);
+                } catch (RuntimeException ex) {
+                    generationErrors.put(task.getTaskKey(),
+                            "Operator SQL generation failed for " + task.getOperatorRef()
+                                    + "@" + firstText(task.getOperatorVersion(), "<missing>")
+                                    + ": " + safeExceptionMessage(ex));
+                }
+                task.setConfig(cfg.toString());
+                continue;
+            }
+
             if (inputs.isEmpty()) {
                 continue;
             }
-            ObjectNode cfg = objectConfig(task.getConfig());
-            ArrayNode fromTables = cfg.putArray("from_tables");
-            ArrayNode inputNodes = cfg.putArray("dataflow_inputs");
-            LinkedHashSet<String> seenTables = new LinkedHashSet<>();
-            inputs.stream()
-                    .sorted((a, b) -> inputOrder(a.targetInput()).compareTo(inputOrder(b.targetInput())))
-                    .forEach(input -> {
-                        if (seenTables.add(input.assetFqn())) {
-                            fromTables.add(input.assetFqn());
-                        }
-                        ObjectNode item = JsonUtil.mapper().createObjectNode();
-                        item.put("sourceTaskKey", input.sourceTaskKey());
-                        item.put("assetFqn", input.assetFqn());
-                        item.put("sourceOutput", input.sourceOutput());
-                        item.put("targetInput", input.targetInput());
-                        item.put("alias", input.alias());
-                        item.put("joinRole", input.joinRole());
-                        item.put("triggerPolicy", input.triggerPolicy());
-                        item.put("freshnessPolicy", input.freshnessPolicy());
-                        inputNodes.add(item);
-                    });
 
             JsonNode dataflow = cfg.path("dataflow");
             String nodeKind = textOrEmpty(dataflow, "nodeKind");
@@ -1090,6 +1167,188 @@ public class PipelineCompileService {
             }
             task.setConfig(cfg.toString());
         }
+        return generationErrors;
+    }
+
+    private void applyInputMetadata(ObjectNode cfg, List<DataflowInput> inputs) {
+        ArrayNode fromTables = cfg.putArray("from_tables");
+        ArrayNode inputNodes = cfg.putArray("dataflow_inputs");
+        LinkedHashSet<String> seenTables = new LinkedHashSet<>();
+        inputs.stream()
+                .sorted((a, b) -> inputOrder(a.targetInput()).compareTo(inputOrder(b.targetInput())))
+                .forEach(input -> {
+                    if (seenTables.add(input.assetFqn())) {
+                        fromTables.add(input.assetFqn());
+                    }
+                    ObjectNode item = JsonUtil.mapper().createObjectNode();
+                    item.put("sourceTaskKey", input.sourceTaskKey());
+                    item.put("assetFqn", input.assetFqn());
+                    item.put("sourceOutput", input.sourceOutput());
+                    item.put("targetInput", input.targetInput());
+                    item.put("alias", input.alias());
+                    item.put("joinRole", input.joinRole());
+                    item.put("triggerPolicy", input.triggerPolicy());
+                    item.put("freshnessPolicy", input.freshnessPolicy());
+                    inputNodes.add(item);
+                });
+    }
+
+    /** 把算子片段与节点上下游资产组合成可直接执行的 Spark SQL。 */
+    private String composeOperatorSql(PipelineTask task,
+                                      OperatorManifestDTO manifest,
+                                      ObjectNode cfg,
+                                      String fragment,
+                                      List<DataflowInput> inputs) {
+        if (task.getTaskType() != TaskType.SPARK_SQL) {
+            throw new IllegalArgumentException(
+                    "G1 operator SQL generation requires taskType=SPARK_SQL");
+        }
+        if (!"SPARK".equalsIgnoreCase(manifest.compileTarget())) {
+            throw new IllegalArgumentException(
+                    "operator compileTarget must be SPARK, got " + manifest.compileTarget());
+        }
+        OperatorSqlGenerator.TemplateKind kind = operatorSqlGenerator.templateKind(manifest);
+        String target = OperatorSqlGenerator.quoteQualifiedIdentifier(requiredTargetFqn(task));
+        boolean sourceOperator = manifest.inputPorts() != null && manifest.inputPorts().isEmpty();
+
+        if (sourceOperator && !inputs.isEmpty()) {
+            throw new IllegalArgumentException("source operator must not have upstream dataflow inputs");
+        }
+        DataflowInput input = null;
+        if (!sourceOperator) {
+            if (inputs.size() != 1) {
+                throw new IllegalArgumentException("operator template " + kind
+                        + " requires exactly one upstream dataflow input, got " + inputs.size());
+            }
+            input = inputs.get(0);
+        }
+
+        return switch (kind) {
+            case SELECT_EXPR -> sourceOperator
+                    ? materializeQuery(target, "SELECT * FROM " + fragment)
+                    : composeSelectExpression(target, manifest, fragment, input);
+            case COLUMN_EXPR -> composeColumnExpression(target, cfg, fragment, input);
+            case FILTER -> materializeQuery(target,
+                    "SELECT *\nFROM " + relation(input) + "\nWHERE " + fragment);
+            case RAW_SQL -> materializeQuery(
+                    target, OperatorSqlGenerator.stripOuterParentheses(fragment));
+            case SPARK_SQL -> OperatorSqlGenerator.isQuery(fragment)
+                    ? materializeQuery(target, fragment)
+                    : fragment;
+            case SPARK_SINK -> composeSparkSink(task, cfg, target, fragment, input);
+        };
+    }
+
+    private String composeSelectExpression(String target,
+                                           OperatorManifestDTO manifest,
+                                           String fragment,
+                                           DataflowInput input) {
+        Object rawMode = manifest.template().get("selectMode");
+        if (rawMode == null) {
+            rawMode = manifest.template().get("select_mode");
+        }
+        boolean append = rawMode != null && "APPEND".equalsIgnoreCase(String.valueOf(rawMode).trim());
+        String select = append
+                ? OperatorSqlGenerator.quoteIdentifier(input.alias()) + ".*, " + fragment
+                : fragment;
+        return materializeQuery(target, "SELECT " + select + "\nFROM " + relation(input));
+    }
+
+    private String composeColumnExpression(String target,
+                                           ObjectNode cfg,
+                                           String fragment,
+                                           DataflowInput input) {
+        String column = textOrEmpty(cfg, "column");
+        if (!StringUtils.hasText(column)) {
+            JsonNode columns = cfg.path("columns");
+            if (columns.isArray() && columns.size() == 1 && columns.get(0).isTextual()) {
+                column = columns.get(0).asText();
+            }
+        }
+        if (!StringUtils.hasText(column)) {
+            throw new IllegalArgumentException(
+                    "COLUMN_EXPR requires config.column or one config.columns entry");
+        }
+        String outputColumn = OperatorSqlGenerator.quoteIdentifier(column);
+        // Spark 3.5 does not support SELECT * EXCEPT, while SELECT *, expr AS same_name
+        // makes CTAS fail with COLUMN_ALREADY_EXISTS. Materialize first and then replace the
+        // column in the Iceberg target so COLUMN_EXPR keeps every non-target column exactly once.
+        return materializeQuery(target, "SELECT * FROM " + relation(input))
+                + ";\nUPDATE " + target + "\nSET " + outputColumn + " = " + fragment;
+    }
+
+    private String composeSparkSink(PipelineTask task,
+                                    ObjectNode cfg,
+                                    String target,
+                                    String fragment,
+                                    DataflowInput input) {
+        String configuredTarget = textOrEmpty(cfg, "targetFqn");
+        if (StringUtils.hasText(configuredTarget)
+                && !configuredTarget.trim().equals(task.getTargetFqn().trim())) {
+            throw new IllegalArgumentException("SPARK_SINK config.targetFqn must match task.targetFqn");
+        }
+        String normalized = fragment.trim().toLowerCase(Locale.ROOT);
+        String source = relation(input);
+        if (normalized.startsWith("write_iceberg(")) {
+            return materializeIcebergSink(target, source, cfg.path("partitionBy"));
+        }
+        if (normalized.startsWith("create_or_replace_view(")) {
+            return "CREATE OR REPLACE VIEW " + target + " AS\nSELECT * FROM " + source;
+        }
+        if (normalized.startsWith("merge_into(")) {
+            String key = textOrEmpty(cfg, "uniqueKey");
+            if (!StringUtils.hasText(key)) {
+                throw new IllegalArgumentException("merge SPARK_SINK requires config.uniqueKey");
+            }
+            String quotedKey = OperatorSqlGenerator.quoteQualifiedIdentifier(key);
+            return "MERGE INTO " + target + " AS target\nUSING " + source + " AS source\nON target."
+                    + quotedKey + " = source." + quotedKey
+                    + "\nWHEN MATCHED THEN UPDATE SET *\nWHEN NOT MATCHED THEN INSERT *";
+        }
+        return fragment;
+    }
+
+    private String materializeIcebergSink(String target, String source, JsonNode partitionBy) {
+        if (partitionBy == null || partitionBy.isMissingNode() || partitionBy.isNull()
+                || (partitionBy.isArray() && partitionBy.isEmpty())) {
+            return materializeQuery(target, "SELECT * FROM " + source);
+        }
+        if (!partitionBy.isArray()) {
+            throw new IllegalArgumentException("SPARK_SINK config.partitionBy must be an identifier array");
+        }
+        List<String> columns = new ArrayList<>();
+        partitionBy.forEach(item -> {
+            if (!item.isTextual() || !StringUtils.hasText(item.asText())) {
+                throw new IllegalArgumentException(
+                        "SPARK_SINK config.partitionBy must contain non-empty identifiers");
+            }
+            columns.add(OperatorSqlGenerator.quoteQualifiedIdentifier(item.asText()));
+        });
+        return "CREATE OR REPLACE TABLE " + target
+                + "\nUSING iceberg\nPARTITIONED BY (" + String.join(", ", columns) + ")"
+                + "\nAS\nSELECT * FROM " + source;
+    }
+
+    private String materializeQuery(String target, String query) {
+        return "CREATE OR REPLACE TABLE " + target + " AS\n" + query.trim();
+    }
+
+    private String relation(DataflowInput input) {
+        return OperatorSqlGenerator.quoteQualifiedIdentifier(input.assetFqn()) + " "
+                + OperatorSqlGenerator.quoteIdentifier(input.alias());
+    }
+
+    private String requiredTargetFqn(PipelineTask task) {
+        if (!StringUtils.hasText(task.getTargetFqn())) {
+            throw new IllegalArgumentException("operator task requires targetFqn");
+        }
+        return task.getTargetFqn().trim();
+    }
+
+    private String safeExceptionMessage(RuntimeException ex) {
+        return StringUtils.hasText(ex.getMessage())
+                ? ex.getMessage()
+                : ex.getClass().getSimpleName();
     }
 
     private ObjectNode objectConfig(String json) {

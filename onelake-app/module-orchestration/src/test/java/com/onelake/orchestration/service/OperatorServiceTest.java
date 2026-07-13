@@ -40,6 +40,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 
 @ExtendWith(MockitoExtension.class)
 class OperatorServiceTest {
@@ -99,6 +100,39 @@ class OperatorServiceTest {
         assertThat(BuiltInOperatorCatalog.size()).isEqualTo(66);
         verify(operatorRepo, times(66)).save(any(Operator.class));
         verify(versionRepo, times(66)).save(any(OperatorVersion.class));
+    }
+
+    @Test
+    void seedBuiltInsNeverOverwritesExistingVersionSnapshots() {
+        when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(anyString(), eq(OperatorScope.BUILTIN)))
+            .thenReturn(Optional.empty());
+        when(operatorRepo.save(any(Operator.class))).thenAnswer(invocation -> {
+            Operator operator = invocation.getArgument(0);
+            operator.setId(UUID.randomUUID());
+            return operator;
+        });
+        when(versionRepo.findByOperatorIdAndVersion(any(), anyString()))
+            .thenReturn(Optional.of(new OperatorVersion()));
+
+        assertThat(service.seedBuiltIns()).isEqualTo(66);
+
+        verify(versionRepo, never()).save(any(OperatorVersion.class));
+    }
+
+    @Test
+    void correctedBuiltInsUseNewVersionsAndDeclareAppendProjection() {
+        Map<String, OperatorManifestDTO> manifests = BuiltInOperatorCatalog.manifests().stream()
+            .collect(java.util.stream.Collectors.toMap(
+                OperatorManifestDTO::operatorRef, manifest -> manifest));
+
+        assertThat(manifests.get("govern.trim_whitespace").version()).isEqualTo("1.0.1");
+        assertThat(manifests.get("govern.drop_null").version()).isEqualTo("1.0.1");
+        assertThat(manifests.get("output.incremental_merge").version()).isEqualTo("1.0.1");
+        assertThat(manifests.get("transform.concat_columns").template())
+            .containsEntry("selectMode", "APPEND");
+        assertThat(manifests.get("transform.concat_columns").version()).isEqualTo("1.0.1");
+        assertThat(manifests.get("transform.select_columns").template())
+            .doesNotContainKey("selectMode");
     }
 
     @Test
@@ -557,6 +591,32 @@ class OperatorServiceTest {
 
         assertThat(result.ok()).isTrue();
         assertThat(result.errors()).isEmpty();
+    }
+
+    @Test
+    void getManifestResolvesOnlyTheExplicitlyLockedVersion() {
+        Operator operator = customOperator("custom.clean_phone", "GOVERN");
+        operator.setLatestVersion("2.0.0");
+        OperatorManifestDTO lockedManifest = customManifest("custom.clean_phone", "1.2.3");
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
+                eq(TENANT_ID), eq("custom.clean_phone"), any()))
+                .thenReturn(Optional.of(operator));
+        when(versionRepo.findByOperatorIdAndVersion(operator.getId(), "1.2.3"))
+                .thenReturn(Optional.of(version(operator.getId(), lockedManifest)));
+
+        OperatorManifestDTO resolved = service.getManifest(
+                TENANT_ID, "custom.clean_phone", "1.2.3");
+
+        assertThat(resolved.version()).isEqualTo("1.2.3");
+        verify(versionRepo).findByOperatorIdAndVersion(operator.getId(), "1.2.3");
+    }
+
+    @Test
+    void getManifestRejectsMissingLockedVersionInsteadOfUsingLatest() {
+        assertThatThrownBy(() -> service.getManifest(
+                TENANT_ID, "custom.clean_phone", null))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("operatorVersion 不能为空");
     }
 
     private Operator builtinOperator(String ref) {

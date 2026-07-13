@@ -8,6 +8,7 @@ import com.onelake.common.system.repository.TenantRepository;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineVersion;
+import com.onelake.orchestration.config.BuiltInOperatorCatalog;
 import com.onelake.orchestration.dto.PipelineValidationResult;
 import com.onelake.orchestration.dto.PipelineTaskRequest;
 import com.onelake.orchestration.repository.DagRepository;
@@ -61,6 +62,7 @@ class PipelineStatusMachineTest {
     @Mock private ObjectProvider<OutboxPublisher> outboxProvider;
     @Mock private OutboxPublisher outboxPublisher;
     @Mock private TenantRepository tenantRepo;
+    @Mock private OperatorService operatorService;
 
     private PipelineService service;
     private UUID tenantId;
@@ -69,7 +71,7 @@ class PipelineStatusMachineTest {
     @BeforeEach
     void setup() {
         service = new PipelineService(dagRepo, taskRepo, edgeRepo, paramRepo, taskRunRepo,
-                runRepo, compileService, snapshotService, outboxProvider, tenantRepo);
+                runRepo, compileService, operatorService, snapshotService, outboxProvider, tenantRepo);
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -331,6 +333,64 @@ class PipelineStatusMachineTest {
                 .isEqualTo(com.onelake.orchestration.domain.enums.TaskCategory.EXEC);
         assertThat(created.engine()).isEqualTo("TRINO");
         verify(dagRepo).markPublishedDagChanged(dagId, tenantId);
+    }
+
+    @Test
+    void createsOperatorTaskWithLockedReferenceAndVersion() {
+        Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "select_fields")).thenReturn(Optional.empty());
+        when(operatorService.getManifest(tenantId, "transform.select_columns", "1.0.0"))
+                .thenReturn(BuiltInOperatorCatalog.manifests().stream()
+                        .filter(manifest -> manifest.operatorRef().equals("transform.select_columns"))
+                        .findFirst().orElseThrow());
+        when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> {
+            PipelineTask task = inv.getArgument(0);
+            task.setId(UUID.randomUUID());
+            return task;
+        });
+
+        var created = service.createTask(dagId, new PipelineTaskRequest(
+                "select_fields", "SPARK_SQL", "选择字段", "SPARK_SQL",
+                "onelake.dwd.selected_orders", null, null,
+                "transform.select_columns", "1.0.0",
+                java.util.Map.of("columns", List.of("order_id")), null, null));
+
+        assertThat(created.operatorRef()).isEqualTo("transform.select_columns");
+        assertThat(created.operatorVersion()).isEqualTo("1.0.0");
+    }
+
+    @Test
+    void rejectsOperatorTaskWithoutLockedVersion() {
+        Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+
+        assertThatThrownBy(() -> service.createTask(dagId, new PipelineTaskRequest(
+                "select_fields", "SPARK_SQL", "选择字段", "SPARK_SQL",
+                "onelake.dwd.selected_orders", null, null,
+                "transform.select_columns", null,
+                java.util.Map.of("columns", List.of("order_id")), null, null)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("必须成对提交");
+    }
+
+    @Test
+    void rejectsOperatorTemplateOutsideG1AtTaskCreation() {
+        Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        var unsupported = BuiltInOperatorCatalog.manifests().stream()
+                .filter(manifest -> manifest.operatorRef().equals("join.inner"))
+                .findFirst().orElseThrow();
+        when(operatorService.getManifest(
+                tenantId, unsupported.operatorRef(), unsupported.version())).thenReturn(unsupported);
+
+        assertThatThrownBy(() -> service.createTask(dagId, new PipelineTaskRequest(
+                "join_orders", "SPARK_SQL", "关联", "SPARK_SQL",
+                "onelake.dwd.joined_orders", null, null,
+                unsupported.operatorRef(), unsupported.version(),
+                java.util.Map.of("on", "left.id = right.id"), null, null)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("不在 G1 Spark SQL 支持范围");
     }
 
     @Test

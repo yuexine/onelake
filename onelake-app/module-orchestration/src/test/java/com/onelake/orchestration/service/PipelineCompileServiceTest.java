@@ -41,6 +41,7 @@ class PipelineCompileServiceTest {
     @Mock private DagRepository dagRepo;
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
+    @Mock private OperatorService operatorService;
 
     private PipelineCompileService service;
 
@@ -50,7 +51,8 @@ class PipelineCompileServiceTest {
     @BeforeEach
     void setup() {
         service = new PipelineCompileService(
-                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"));
+                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"),
+                operatorService, new OperatorSqlGenerator());
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -453,7 +455,8 @@ class PipelineCompileServiceTest {
     void scriptTaskRejectsTenantWithoutSandboxCapability() {
         PipelineCompileService denied = new PipelineCompileService(
                 dagRepo, taskRepo, edgeRepo,
-                new ScriptSandboxPolicy(true, UUID.randomUUID().toString()));
+                new ScriptSandboxPolicy(true, UUID.randomUUID().toString()),
+                operatorService, new OperatorSqlGenerator());
         PipelineTask task = extensionTask("python_denied", TaskType.PYTHON);
 
         PipelineCompileResult result = denied.compile(

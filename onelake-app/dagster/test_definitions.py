@@ -906,6 +906,7 @@ def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
     callbacks = _install_callback_collector(monkeypatch)
     task = _node("spark_a")
     task.pop("max_retries")
+    task["engine"] = "SPARK"
 
     monkeypatch.setattr(definitions, "_build_spark_submit", lambda *args: _command(
         0, 'ONELAKE_OUTPUTS_JSON={"rowsWritten":5,"partition":"20260711"}'
@@ -923,6 +924,21 @@ def test_legacy_spark_task_callbacks_log_ref(monkeypatch):
     assert success_payload["artifactPath"] == "table:onelake.dwd.spark_a"
     assert success_payload["rowsWritten"] == 5
     assert success_payload["outputs"] == {"rowsWritten": 5, "partition": "20260711"}
+
+
+def test_split_spark_sql_statements_preserves_semicolons_inside_literals_and_comments():
+    sql = (
+        "SELECT 'O\\'Reilly;safe' AS note, `semi;column` FROM source; "
+        "-- comment; stays with statement\n"
+        "UPDATE target SET note = 'a;b'; "
+        "/* block; comment */ SELECT 1"
+    )
+
+    assert definitions._split_spark_sql_statements(sql) == [
+        "SELECT 'O\\'Reilly;safe' AS note, `semi;column` FROM source",
+        "-- comment; stays with statement\nUPDATE target SET note = 'a;b'",
+        "/* block; comment */ SELECT 1",
+    ]
 
 
 def test_native_pipeline_job_exposes_per_task_steps_and_native_dependencies(monkeypatch):

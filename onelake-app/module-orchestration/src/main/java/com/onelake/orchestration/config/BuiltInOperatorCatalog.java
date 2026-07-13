@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static com.onelake.orchestration.domain.enums.OperatorCategory.AGG;
 import static com.onelake.orchestration.domain.enums.OperatorCategory.ENCRYPT;
@@ -34,15 +35,26 @@ public final class BuiltInOperatorCatalog {
     /** 生成完整 Manifest 所需的最小内置算子规格。 */
     private record BuiltinSpec(
         String ref,
+        String version,
         OperatorCategory category,
         String displayName,
         String description,
         String outputMode,
         String templateKind,
         String sql,
+        String selectMode,
         List<String> params
     ) {
     }
+
+    /** SELECT_EXPR 中会保留上游全部字段并追加生成列的内置算子。 */
+    private static final Set<String> APPEND_SELECT_REFS = Set.of(
+        "transform.derive_column",
+        "transform.constant_column",
+        "transform.concat_columns",
+        "transform.case_when",
+        "agg.window_function"
+    );
 
     /** 固定顺序保证种子写入和测试结果可重复。 */
     private static final List<BuiltinSpec> SPECS = List.of(
@@ -51,23 +63,23 @@ public final class BuiltInOperatorCatalog {
         spec("input.sql_query", INPUT, "SQL 查询输入", "读取经只读校验的 SQL 子查询", "DERIVE", "RAW_SQL", "({{ sql }})", "sql"),
         spec("output.iceberg_table", OUTPUT, "Iceberg 表输出", "将结果物化为 Iceberg 表", "PASSTHROUGH", "SPARK_SINK", "write_iceberg({{ targetFqn }})", "targetFqn", "partitionBy"),
         spec("output.view", OUTPUT, "视图输出", "将结果物化为视图", "PASSTHROUGH", "SPARK_SINK", "create_or_replace_view({{ targetFqn }})", "targetFqn"),
-        spec("output.incremental_merge", OUTPUT, "增量合并输出", "按唯一键和增量字段合并写入", "PASSTHROUGH", "SPARK_SINK", "merge_into({{ targetFqn }}, {{ uniqueKey }})", "uniqueKey", "incrementalColumn", "strategy"),
+        versionedSpec("1.0.1", "output.incremental_merge", OUTPUT, "增量合并输出", "按唯一键和增量字段合并写入", "PASSTHROUGH", "SPARK_SINK", "merge_into({{ targetFqn }}, {{ uniqueKey }})", "targetFqn", "uniqueKey", "incrementalColumn", "strategy"),
 
         spec("transform.select_columns", TRANSFORM, "选择字段", "保留指定字段集合", "DERIVE", "SELECT_EXPR", "{{ columns | join(', ') }}", "columns"),
         spec("transform.rename_columns", TRANSFORM, "重命名字段", "按映射关系重命名字段", "DERIVE", "SELECT_EXPR", "{{ mapping }}", "mapping"),
         spec("transform.cast_type", TRANSFORM, "类型转换", "将字段转换为目标类型", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "CAST({{ column }} AS {{ targetType }})", "column", "targetType"),
-        spec("transform.derive_column", TRANSFORM, "派生字段", "用受控表达式生成新字段", "DERIVE", "SELECT_EXPR", "{{ expr }} AS {{ name }}", "name", "expr"),
-        spec("transform.constant_column", TRANSFORM, "常量字段", "追加固定值字段", "DERIVE", "SELECT_EXPR", "CAST({{ value }} AS {{ type }}) AS {{ name }}", "name", "value", "type"),
-        spec("transform.concat_columns", TRANSFORM, "字段拼接", "按分隔符拼接多个字段", "DERIVE", "SELECT_EXPR", "concat_ws({{ sep }}, {{ columns | join(', ') }}) AS {{ as }}", "columns", "sep", "as"),
+        versionedSpec("1.0.1", "transform.derive_column", TRANSFORM, "派生字段", "用受控表达式生成新字段", "DERIVE", "SELECT_EXPR", "{{ expr }} AS {{ name }}", "name", "expr"),
+        versionedSpec("1.0.1", "transform.constant_column", TRANSFORM, "常量字段", "追加固定值字段", "DERIVE", "SELECT_EXPR", "CAST({{ value }} AS {{ type }}) AS {{ name }}", "name", "value", "type"),
+        versionedSpec("1.0.1", "transform.concat_columns", TRANSFORM, "字段拼接", "按分隔符拼接多个字段", "DERIVE", "SELECT_EXPR", "concat_ws({{ sep }}, {{ columns | join(', ') }}) AS {{ as }}", "columns", "sep", "as"),
         spec("transform.split_column", TRANSFORM, "字段拆分", "按分隔符拆分字段", "DERIVE", "SELECT_EXPR", "split_part({{ column }}, {{ delimiter }}, n)", "column", "delimiter", "outputs"),
-        spec("transform.case_when", TRANSFORM, "条件分支", "按 CASE WHEN 规则派生字段", "DERIVE", "SELECT_EXPR", "CASE {{ cases }} ELSE {{ else }} END AS {{ as }}", "cases", "else", "as"),
+        versionedSpec("1.0.1", "transform.case_when", TRANSFORM, "条件分支", "按 CASE WHEN 规则派生字段", "DERIVE", "SELECT_EXPR", "CASE {{ cases }} ELSE {{ else }} END AS {{ as }}", "cases", "else", "as"),
         spec("transform.rename_by_standard", TRANSFORM, "按标准命名", "按数据标准映射字段名", "DERIVE", "SELECT_EXPR", "{{ standardId }}", "standardId"),
         spec("transform.reorder_columns", TRANSFORM, "字段排序", "调整字段输出顺序", "DERIVE", "SELECT_EXPR", "{{ order | join(', ') }}", "order"),
         spec("transform.spark_sql", TRANSFORM, "Spark SQL 执行", "执行编译后的 Spark SQL 并产出中间表", "DERIVE", "SPARK_SQL", "{{ sql }}", "sql"),
 
-        spec("govern.trim_whitespace", GOVERN, "去除空白", "去除字段首尾空白字符", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "trim({{ column }})", "columns"),
+        versionedSpec("1.0.1", "govern.trim_whitespace", GOVERN, "去除空白", "去除字段首尾空白字符", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "trim({{ column }})", "column"),
         spec("govern.fillna", GOVERN, "空值填充", "用默认值填充空值", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "coalesce({{ column }}, {{ fillValue }})", "column", "fillValue"),
-        spec("govern.drop_null", GOVERN, "过滤空值", "过滤指定字段为空的行", "PASSTHROUGH", "FILTER", "{{ column }} IS NOT NULL", "columns"),
+        versionedSpec("1.0.1", "govern.drop_null", GOVERN, "过滤空值", "过滤指定字段为空的行", "PASSTHROUGH", "FILTER", "{{ column }} IS NOT NULL", "column"),
         spec("govern.dedup", GOVERN, "去重", "按主键和排序字段保留一条记录", "PASSTHROUGH", "FILTER", "row_number() over(partition by {{ keys }} order by {{ orderBy }}) = 1", "keys", "orderBy"),
         spec("govern.filter_rows", GOVERN, "行过滤", "按受控谓词过滤行", "PASSTHROUGH", "FILTER", "{{ predicate }}", "predicate"),
         spec("govern.drop_required_missing", GOVERN, "必填缺失过滤", "过滤必填字段缺失记录", "PASSTHROUGH", "FILTER", "{{ requiredColumns }} IS NOT NULL", "requiredColumns"),
@@ -99,7 +111,7 @@ public final class BuiltInOperatorCatalog {
         spec("encrypt.tokenize", ENCRYPT, "令牌化", "通过映射表生成可查令牌", "PASSTHROUGH_MODIFY", "COLUMN_EXPR", "tokenize({{ column }}, {{ tokenTable }})", "column", "tokenTable"),
 
         spec("agg.group_aggregate", AGG, "分组聚合", "按维度和指标聚合", "AGGREGATE", "AGG", "GROUP BY {{ groupBy }}", "groupBy", "aggregations"),
-        spec("agg.window_function", AGG, "窗口函数", "按分区和排序派生窗口指标", "DERIVE", "SELECT_EXPR", "{{ fn }} over(partition by {{ partitionBy }} order by {{ orderBy }})", "partitionBy", "orderBy", "fn"),
+        versionedSpec("1.0.1", "agg.window_function", AGG, "窗口函数", "按分区和排序派生窗口指标", "DERIVE", "SELECT_EXPR", "{{ fn }} over(partition by {{ partitionBy }} order by {{ orderBy }})", "partitionBy", "orderBy", "fn"),
         spec("agg.pivot", AGG, "行转列", "按 key/value 将行转为列", "AGGREGATE", "AGG", "sum(case when {{ key }} then {{ value }} end)", "key", "value", "columns"),
         spec("agg.unpivot", AGG, "列转行", "将多列展开为 key/value 行", "DERIVE", "SELECT_EXPR", "UNNEST({{ columns }})", "columns", "keyName", "valueName"),
         spec("agg.distinct_count", AGG, "去重计数", "计算指定字段去重数", "AGGREGATE", "AGG", "count(distinct {{ column }})", "groupBy", "column"),
@@ -135,8 +147,22 @@ public final class BuiltInOperatorCatalog {
     private static BuiltinSpec spec(String ref, OperatorCategory category, String displayName,
                                     String description, String outputMode, String templateKind,
                                     String sql, String... params) {
-        return new BuiltinSpec(ref, category, displayName, description, outputMode,
-            templateKind, sql, List.of(params));
+        return versionedSpec("1.0.0", ref, category, displayName, description,
+            outputMode, templateKind, sql, params);
+    }
+
+    private static BuiltinSpec versionedSpec(String version,
+                                             String ref,
+                                             OperatorCategory category,
+                                             String displayName,
+                                             String description,
+                                             String outputMode,
+                                             String templateKind,
+                                             String sql,
+                                             String... params) {
+        String selectMode = APPEND_SELECT_REFS.contains(ref) ? "APPEND" : null;
+        return new BuiltinSpec(ref, version, category, displayName, description, outputMode,
+            templateKind, sql, selectMode, List.of(params));
     }
 
     /** 把紧凑规格展开为对外统一 Manifest 契约。 */
@@ -150,6 +176,9 @@ public final class BuiltInOperatorCatalog {
         Map<String, Object> template = new LinkedHashMap<>();
         template.put("kind", spec.templateKind());
         template.put("sql", spec.sql());
+        if (spec.selectMode() != null) {
+            template.put("selectMode", spec.selectMode());
+        }
 
         Map<String, Object> lineageRule = new LinkedHashMap<>();
         lineageRule.put("type", spec.category() == OperatorCategory.AGG ? "AGGREGATE" : "ONE_TO_ONE");
@@ -172,7 +201,7 @@ public final class BuiltInOperatorCatalog {
 
         return new OperatorManifestDTO(
             spec.ref(),
-            "1.0.0",
+            spec.version(),
             spec.category().name(),
             "BUILTIN",
             spec.displayName(),

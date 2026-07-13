@@ -107,6 +107,66 @@ def _default_resource_profile():
     }
 
 
+def _split_spark_sql_statements(sql_text):
+    """Split Spark SQL on top-level semicolons without breaking quoted values or comments."""
+    statements = []
+    current = []
+    quote_char = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = 0
+    text = str(sql_text or "")
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if line_comment:
+            current.append(char)
+            if char in "\r\n":
+                line_comment = False
+        elif block_comment:
+            current.append(char)
+            if char == "*" and next_char == "/":
+                current.append(next_char)
+                index += 1
+                block_comment = False
+        elif quote_char is not None:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote_char:
+                if next_char == quote_char:
+                    current.append(next_char)
+                    index += 1
+                else:
+                    quote_char = None
+        elif char in ("'", '"', "`"):
+            quote_char = char
+            current.append(char)
+        elif char == "-" and next_char == "-":
+            current.extend((char, next_char))
+            index += 1
+            line_comment = True
+        elif char == "/" and next_char == "*":
+            current.extend((char, next_char))
+            index += 1
+            block_comment = True
+        elif char == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    statement = "".join(current).strip()
+    if statement:
+        statements.append(statement)
+    return statements
+
+
 def _build_spark_submit(node, iceberg_catalog, spark_master):
     # 旧单 op 路径和新图执行路径共用同一段 spark-submit 组装，避免 Iceberg/S3/资源参数漂移。
     import tempfile
@@ -121,8 +181,8 @@ def _build_spark_submit(node, iceberg_catalog, spark_master):
         temp_paths.append(script_path)
         app_args = []
     else:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as sql_file:
-            sql_file.write(node["sql_or_script"])
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as sql_file:
+            json.dump(_split_spark_sql_statements(node["sql_or_script"]), sql_file)
             sql_path = sql_file.name
         temp_paths.append(sql_path)
         wrapper = f"""
@@ -133,9 +193,8 @@ from pyspark.sql import SparkSession
 
 spark = SparkSession.builder.appName("onelake-spark-sql").getOrCreate()
 with open(sys.argv[1], "r", encoding="utf-8") as f:
-    sql_text = f.read()
+    statements = json.load(f)
 target_fqn = sys.argv[2].strip() if len(sys.argv) > 2 else ""
-statements = [s.strip() for s in sql_text.split(";") if s.strip()]
 
 for statement in statements:
     df = spark.sql(statement)
@@ -1539,6 +1598,7 @@ def _node_with_runtime_params(node, params):
             Array(Shape({
                 "task_key": Field(String),
                 "task_type": Field(String, description="SPARK_SQL | PYSPARK | QUALITY_GATE"),
+                "engine": Field(String, default_value="SPARK"),
                 "sql_or_script": Field(String, description="Spark SQL string or PySpark script content"),
                 "target_fqn": Field(String, default_value=""),
                 "from_tables": Field(Array(String), default_value=[]),

@@ -37,6 +37,7 @@ import {
   CheckCircleOutlined,
   CheckOutlined,
   CalendarOutlined,
+  CodeOutlined,
   ControlOutlined,
   CloseCircleOutlined,
   CloseOutlined,
@@ -60,8 +61,17 @@ import { DagCanvasSimple } from './DagCanvasSimple';
 import { InspectorRouter, type InspectorProps } from './InspectorRouter';
 import { validateInspectorTask } from './inspectorValidation';
 import type { TaskTypeMeta } from './taskTypes';
-import { PipelineAPI, PipelineVersionAPI } from '../../../api';
-import type { PipelineKind, PipelineTask, PipelineTaskEdgeRequest, PipelineTaskRequest, PipelineTaskType, PipelineValidationResult } from '../../../types';
+import { OperatorAPI, PipelineAPI, PipelineVersionAPI } from '../../../api';
+import type {
+  Operator,
+  PipelineCompilePreview,
+  PipelineKind,
+  PipelineTask,
+  PipelineTaskEdgeRequest,
+  PipelineTaskRequest,
+  PipelineTaskType,
+  PipelineValidationResult,
+} from '../../../types';
 import { BackfillWizard } from './BackfillWizard';
 import { PipelineSchedulingDrawer } from './PipelineSchedulingDrawer';
 import { PipelineParamDrawer } from './PipelineParamDrawer';
@@ -69,6 +79,29 @@ import { PipelineVersionDrawer } from './PipelineVersionDrawer';
 import { PipelineAutomationDrawer } from './PipelineAutomationDrawer';
 
 const { Text } = Typography;
+
+const G1_OPERATOR_TEMPLATE_KINDS = new Set([
+  'SELECT_EXPR', 'COLUMN_EXPR', 'FILTER', 'SPARK_SQL', 'SPARK_SINK', 'RAW_SQL',
+]);
+
+const isG1SparkSqlOperator = (operator: Operator) => {
+  const template = operator.manifest?.template;
+  const rawKind = template?.kind ?? template?.templateKind;
+  return operator.status === 'ACTIVE'
+    && operator.manifest?.compileTarget?.toUpperCase() === 'SPARK'
+    && typeof rawKind === 'string'
+    && G1_OPERATOR_TEMPLATE_KINDS.has(rawKind.toUpperCase());
+};
+
+interface CreateTaskFormValues {
+  taskKey: string;
+  name: string;
+  modelId?: string;
+  targetFqn?: string;
+  operatorRef?: string;
+  operatorVersion?: string;
+  operatorConfig?: string;
+}
 
 const defaultFreshnessPolicy = (targetInput?: string) =>
   targetInput === 'left' || targetInput === 'right' ? 'SAME_FRESHNESS_WINDOW' : 'LATEST';
@@ -433,7 +466,10 @@ export default function UnifiedPipelineEditor() {
   const [creatingPipeline, setCreatingPipeline] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createMeta, setCreateMeta] = useState<TaskTypeMeta | undefined>(undefined);
-  const [createForm] = Form.useForm<{ taskKey: string; name: string; modelId?: string; targetFqn?: string }>();
+  const [createForm] = Form.useForm<CreateTaskFormValues>();
+  const [operators, setOperators] = useState<Operator[]>([]);
+  const [operatorsLoading, setOperatorsLoading] = useState(false);
+  const [selectedCreateOperator, setSelectedCreateOperator] = useState<Operator | undefined>(undefined);
   const [edgeOpen, setEdgeOpen] = useState(false);
   const [edgeForm] = Form.useForm<PipelineTaskEdgeRequest>();
   const [draftPatch, setDraftPatch] = useState<Partial<PipelineTaskRequest> & { taskType: PipelineTaskType } | undefined>(undefined);
@@ -448,6 +484,10 @@ export default function UnifiedPipelineEditor() {
   const [validationActiveStep, setValidationActiveStep] = useState(0);
   const [validationResult, setValidationResult] = useState<PipelineValidationResult | undefined>(undefined);
   const [validationRequestError, setValidationRequestError] = useState<string | undefined>(undefined);
+  const [compilePreviewOpen, setCompilePreviewOpen] = useState(false);
+  const [compilePreviewLoading, setCompilePreviewLoading] = useState(false);
+  const [compilePreview, setCompilePreview] = useState<PipelineCompilePreview | undefined>(undefined);
+  const [compilePreviewError, setCompilePreviewError] = useState<string | undefined>(undefined);
   const [backfillOpen, setBackfillOpen] = useState(false);
   const [schedulingOpen, setSchedulingOpen] = useState(false);
   const [paramDrawerOpen, setParamDrawerOpen] = useState(false);
@@ -455,9 +495,26 @@ export default function UnifiedPipelineEditor() {
   const [automationDrawerOpen, setAutomationDrawerOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    setOperatorsLoading(true);
+    OperatorAPI.listOperators()
+      .then((items) => {
+        if (!cancelled) setOperators(items.filter(isG1SparkSqlOperator));
+      })
+      .catch(() => {
+        if (!cancelled) setOperators([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOperatorsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   const openCreate = useCallback((type: PipelineTaskType, meta: TaskTypeMeta, position?: { x: number; y: number }) => {
     setCreateMeta(meta);
     setCreatePosition(position);
+    setSelectedCreateOperator(undefined);
     createForm.resetFields();
     createForm.setFieldsValue({
       taskKey: `${(meta.preset ?? type).toLowerCase()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -465,6 +522,36 @@ export default function UnifiedPipelineEditor() {
     });
     setCreateOpen(true);
   }, [createForm]);
+
+  const selectCreateOperator = useCallback(async (operatorRef?: string) => {
+    if (!operatorRef) {
+      setSelectedCreateOperator(undefined);
+      createForm.setFieldsValue({
+        operatorRef: undefined,
+        operatorVersion: undefined,
+        operatorConfig: undefined,
+      });
+      return;
+    }
+    setOperatorsLoading(true);
+    try {
+      const operator = await OperatorAPI.getOperator(operatorRef);
+      setSelectedCreateOperator(operator);
+      const version = operator.pinnedVersion || operator.latestVersion;
+      const exampleParams = operator.manifest?.examples?.[0]?.params ?? {};
+      createForm.setFieldsValue({
+        name: operator.displayName,
+        operatorRef,
+        operatorVersion: version,
+        operatorConfig: JSON.stringify(exampleParams, null, 2),
+      });
+    } catch (err) {
+      message.error(`算子加载失败: ${(err as Error).message}`);
+      setSelectedCreateOperator(undefined);
+    } finally {
+      setOperatorsLoading(false);
+    }
+  }, [createForm, message]);
 
   const updateInspectorValidation = useCallback((taskKey: string, field: string, error?: string) => {
     setExternalInspectorValidation((current) => {
@@ -547,9 +634,40 @@ export default function UnifiedPipelineEditor() {
     }
   }, [editor]);
 
+  const showCompilePreview = useCallback(async () => {
+    if (!dagId) return;
+    setCompilePreviewOpen(true);
+    setCompilePreviewLoading(true);
+    setCompilePreview(undefined);
+    setCompilePreviewError(undefined);
+    try {
+      setCompilePreview(await PipelineAPI.compilePreview(dagId));
+    } catch (err) {
+      setCompilePreviewError((err as Error).message || '编译预览加载失败');
+    } finally {
+      setCompilePreviewLoading(false);
+    }
+  }, [dagId]);
+
   const submitCreate = useCallback(async () => {
     if (!createMeta || !dagId) return;
     const values = await createForm.validateFields();
+    let config = createMeta.requiresModel ? {} : defaultConfigFor(createMeta);
+    if (values.operatorRef) {
+      try {
+        const parsed = JSON.parse(values.operatorConfig || '{}');
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+          throw new Error('算子参数必须是 JSON 对象');
+        }
+        config = parsed as Record<string, unknown>;
+      } catch (err) {
+        message.error((err as Error).message || '算子参数 JSON 不合法');
+        return;
+      }
+      if (values.targetFqn && selectedCreateOperator?.manifest?.template?.kind === 'SPARK_SINK') {
+        config = { ...config, targetFqn: values.targetFqn };
+      }
+    }
     const payload: PipelineTaskRequest = {
       taskKey: values.taskKey,
       taskType: createMeta.type,
@@ -557,7 +675,9 @@ export default function UnifiedPipelineEditor() {
       engine: createMeta.engine,
       targetFqn: values.targetFqn,
       modelId: createMeta.requiresModel ? values.modelId : undefined,
-      config: createMeta.requiresModel ? {} : defaultConfigFor(createMeta),
+      operatorRef: values.operatorRef,
+      operatorVersion: values.operatorVersion,
+      config,
       positionX: createPosition?.x,
       positionY: createPosition?.y,
     };
@@ -568,7 +688,7 @@ export default function UnifiedPipelineEditor() {
     } catch {
       // error already toasted
     }
-  }, [createMeta, dagId, createForm, createPosition, defaultConfigFor, editor]);
+  }, [createMeta, dagId, createForm, createPosition, defaultConfigFor, editor, message, selectedCreateOperator]);
 
   const openCreateEdge = useCallback(() => {
     edgeForm.resetFields();
@@ -950,6 +1070,14 @@ export default function UnifiedPipelineEditor() {
             >
               校验
             </Button>
+            <Button
+              icon={<CodeOutlined />}
+              onClick={showCompilePreview}
+              loading={compilePreviewLoading}
+              disabled={editor.tasks.length === 0}
+            >
+              编译预览
+            </Button>
             {['PUBLISHED', 'VALIDATED'].includes(editor.pipeline.status ?? '') && (
               <Button icon={<CalendarOutlined />} onClick={() => setBackfillOpen(true)}>
                 回填
@@ -1026,6 +1154,63 @@ export default function UnifiedPipelineEditor() {
         onClose={() => setValidationOpen(false)}
         onValidate={runValidation}
       />
+
+      <Modal
+        title="Spark SQL 编译预览"
+        open={compilePreviewOpen}
+        onCancel={() => setCompilePreviewOpen(false)}
+        width={960}
+        footer={<Button onClick={() => setCompilePreviewOpen(false)}>关闭</Button>}
+      >
+        {compilePreviewLoading && (
+          <Alert type="info" showIcon message="正在生成节点 SQL" />
+        )}
+        {compilePreviewError && (
+          <Alert type="error" showIcon message="编译预览失败" description={compilePreviewError} />
+        )}
+        {compilePreview && (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              type={compilePreview.allValidated ? 'success' : 'warning'}
+              showIcon
+              message={compilePreview.allValidated ? '全部节点已通过编译' : '部分节点编译未通过'}
+              description={`${compilePreview.nodes.length} 个节点 · ${compilePreview.graphErrors.length} 个图错误`}
+            />
+            {compilePreview.nodes.map((node) => (
+              <div
+                key={node.taskId}
+                style={{ border: '1px solid var(--ol-border, #e4e7eb)', borderRadius: 8, padding: 12 }}
+              >
+                <Space wrap style={{ marginBottom: 8 }}>
+                  <Text strong>{node.taskKey}</Text>
+                  <Tag color={node.valid ? 'success' : 'error'}>{node.valid ? 'VALID' : 'FAILED'}</Tag>
+                  {node.operatorRef && <Tag>{node.operatorRef}@{node.operatorVersion}</Tag>}
+                  {node.templateKind && <Tag color="blue">{node.templateKind}</Tag>}
+                  {node.generated && <Tag color="processing">GENERATED</Tag>}
+                </Space>
+                {node.sqlOrScript ? (
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: 12,
+                      maxHeight: 280,
+                      overflow: 'auto',
+                      borderRadius: 6,
+                      background: 'var(--ol-fill-soft, #f6f8fa)',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {node.sqlOrScript}
+                  </pre>
+                ) : (
+                  <Alert type="warning" showIcon message={node.errorMessage || '该节点没有可预览 SQL'} />
+                )}
+              </div>
+            ))}
+          </Space>
+        )}
+      </Modal>
 
       <BackfillWizard
         dagId={dagId}
@@ -1260,6 +1445,62 @@ export default function UnifiedPipelineEditor() {
             <Form.Item name="targetFqn" label="目标表 FQN">
               <Input placeholder="iceberg.<schema>.<table>" />
             </Form.Item>
+          )}
+          {createMeta?.type === 'SPARK_SQL' && (
+            <>
+              <Form.Item
+                name="operatorRef"
+                label="绑定算子（可选）"
+                tooltip="选择后将锁定明确版本，并由 Manifest 生成 Spark SQL。"
+              >
+                <Select
+                  allowClear
+                  showSearch
+                  loading={operatorsLoading}
+                  optionFilterProp="label"
+                  placeholder="选择字段 / 派生字段 / Iceberg 输出…"
+                  options={operators.map((operator) => ({
+                    value: operator.operatorRef,
+                    label: `${operator.displayName} · ${operator.operatorRef}`,
+                  }))}
+                  onChange={selectCreateOperator}
+                />
+              </Form.Item>
+              {selectedCreateOperator && (
+                <>
+                  <Form.Item
+                    name="operatorVersion"
+                    label="锁定版本"
+                    rules={[{ required: true, message: '算子节点必须锁定版本' }]}
+                  >
+                    <Select
+                      options={(selectedCreateOperator.versions?.length
+                        ? selectedCreateOperator.versions.map((version) => version.version)
+                        : [selectedCreateOperator.latestVersion]
+                      ).map((version) => ({ label: version, value: version }))}
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name="operatorConfig"
+                    label="算子参数 JSON"
+                    rules={[{
+                      validator: async (_, value) => {
+                        try {
+                          const parsed = JSON.parse(value || '{}');
+                          if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+                            throw new Error();
+                          }
+                        } catch {
+                          throw new Error('请输入合法 JSON 对象');
+                        }
+                      },
+                    }]}
+                  >
+                    <Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} />
+                  </Form.Item>
+                </>
+              )}
+            </>
           )}
           <Alert
             type="info"

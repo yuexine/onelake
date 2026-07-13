@@ -1,11 +1,14 @@
 package com.onelake.orchestration.service;
 
 import com.onelake.common.context.TenantContext;
+import com.onelake.orchestration.config.BuiltInOperatorCatalog;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.entity.PipelineTaskEdge;
 import com.onelake.orchestration.domain.enums.EdgeLayer;
 import com.onelake.orchestration.domain.enums.TaskType;
+import com.onelake.orchestration.dto.OperatorManifestDTO;
+import com.onelake.orchestration.dto.PipelineCompilePreview;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.repository.DagRepository;
 import com.onelake.orchestration.repository.PipelineTaskEdgeRepository;
@@ -18,12 +21,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +44,7 @@ class PipelineSparkCompileTest {
     @Mock private DagRepository dagRepo;
     @Mock private PipelineTaskRepository taskRepo;
     @Mock private PipelineTaskEdgeRepository edgeRepo;
+    @Mock private OperatorService operatorService;
 
     private PipelineCompileService service;
     private UUID tenantId;
@@ -47,7 +53,8 @@ class PipelineSparkCompileTest {
     @BeforeEach
     void setup() {
         service = new PipelineCompileService(
-                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"));
+                dagRepo, taskRepo, edgeRepo, new ScriptSandboxPolicy(true, "*"),
+                operatorService, new OperatorSqlGenerator());
         tenantId = UUID.randomUUID();
         dagId = UUID.randomUUID();
         TenantContext.setTenantId(tenantId);
@@ -425,6 +432,152 @@ class PipelineSparkCompileTest {
         assertThat(result.tasks().get(0).errorMessage()).contains("config.sql");
     }
 
+    @Test
+    void compilesLockedOperatorSqlAlongsideExistingAutomaticSinkAndPreviewsBoth() {
+        Dag dag = pipelineDag();
+        when(dagRepo.findByIdAndTenantId(dagId, tenantId)).thenReturn(Optional.of(dag));
+        PipelineTask source = syncRefTask("source_orders", "onelake.ods.orders");
+        PipelineTask operator = operatorTask(
+                "select_columns", "transform.select_columns", "1.2.3",
+                "onelake.dwd.selected_orders",
+                "{\"columns\":[\"order_id\",\"amount\"]}");
+        PipelineTask sink = new PipelineTask();
+        sink.setId(UUID.randomUUID());
+        sink.setTenantId(tenantId);
+        sink.setDagId(dagId);
+        sink.setTaskKey("automatic_sink");
+        sink.setTaskType(TaskType.SPARK_SQL);
+        sink.setName("automatic_sink");
+        sink.setEngine("SPARK_SQL");
+        sink.setTargetFqn("onelake.dwd.final_orders");
+        sink.setConfig("{\"dataflow\":{\"nodeKind\":\"SINK\",\"mode\":\"OVERWRITE\"}}");
+        List<PipelineTask> tasks = List.of(source, operator, sink);
+        List<PipelineTaskEdge> edges = List.of(
+                edge("source_orders", "select_columns", "in", "src"),
+                edge("select_columns", "automatic_sink", "in", "selected"));
+        when(taskRepo.findByDagIdOrderByCreatedAtAsc(dagId)).thenReturn(tasks);
+        when(edgeRepo.findByDagId(dagId)).thenReturn(edges);
+        when(operatorService.getManifest(tenantId, "transform.select_columns", "1.2.3"))
+                .thenReturn(operatorManifest(
+                        "transform.select_columns", "1.2.3", "SELECT_EXPR",
+                        "{{ columns | join(', ') }}", false));
+
+        PipelineCompileResult result = service.compile(dagId);
+        PipelineCompilePreview preview = service.preview(dagId);
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(operator.getConfig())
+                .contains("\"columns\":[\"order_id\",\"amount\"]")
+                .contains("\"compiled_operator_version\":\"1.2.3\"")
+                .contains("CREATE OR REPLACE TABLE `onelake`.`dwd`.`selected_orders` AS")
+                .contains("SELECT `order_id`, `amount`")
+                .contains("FROM `onelake`.`ods`.`orders` `src`");
+        assertThat(sink.getConfig())
+                .contains("CREATE OR REPLACE TABLE onelake.dwd.final_orders AS")
+                .contains("FROM onelake.dwd.selected_orders selected");
+        assertThat(preview.nodes())
+                .filteredOn(PipelineCompilePreview.NodeSqlPreview::generated)
+                .extracting(PipelineCompilePreview.NodeSqlPreview::taskKey)
+                .containsExactly("select_columns", "automatic_sink");
+        assertThat(preview.nodes()).filteredOn(node -> node.taskKey().equals("select_columns"))
+                .singleElement()
+                .satisfies(node -> {
+                    assertThat(node.operatorVersion()).isEqualTo("1.2.3");
+                    assertThat(node.templateKind()).isEqualTo("SELECT_EXPR");
+                    assertThat(node.sqlOrScript()).contains("SELECT `order_id`, `amount`");
+                });
+        verify(operatorService, times(2))
+                .getManifest(tenantId, "transform.select_columns", "1.2.3");
+        verify(taskRepo, times(1)).saveAll(any());
+    }
+
+    @Test
+    void rejectsOperatorNodeWithoutLockedVersion() {
+        PipelineTask operator = operatorTask(
+                "unlocked_operator", "transform.select_columns", null,
+                "onelake.dwd.unlocked", "{\"columns\":[\"id\"]}");
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(operator), List.of());
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.tasks()).singleElement().satisfies(task ->
+                assertThat(task.errorMessage())
+                        .contains("Operator SQL generation failed")
+                        .contains("operatorVersion is required"));
+        verify(operatorService, never()).getManifest(any(), any(), any());
+    }
+
+    @Test
+    void columnExpressionMaterializesThenReplacesColumnWithoutDuplicateNames() {
+        PipelineTask source = syncRefTask("source_users", "onelake.ods.users");
+        PipelineTask operator = operatorTask(
+                "fill_phone", "clean.fill_null", "1.0.0",
+                "onelake.dwd.users_clean",
+                "{\"column\":\"phone\",\"fillValue\":\"unknown\"}");
+        when(operatorService.getManifest(tenantId, "clean.fill_null", "1.0.0"))
+                .thenReturn(operatorManifest(
+                        "clean.fill_null", "1.0.0", "COLUMN_EXPR",
+                        "coalesce({{ column }}, {{ fillValue }})", false));
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(source, operator),
+                List.of(edge("source_users", "fill_phone", "in", "src")));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(operator.getConfig())
+                .contains("CREATE OR REPLACE TABLE `onelake`.`dwd`.`users_clean` AS")
+                .contains("SELECT * FROM `onelake`.`ods`.`users` `src`;\\nUPDATE")
+                .contains("SET `phone` = coalesce(`phone`, 'unknown')")
+                .doesNotContain(".*, coalesce(");
+    }
+
+    @Test
+    void appendSelectExpressionKeepsUpstreamColumnsBeforeDerivedColumn() {
+        PipelineTask source = syncRefTask("source_users", "onelake.ods.users");
+        OperatorManifestDTO manifest = BuiltInOperatorCatalog.manifests().stream()
+                .filter(item -> item.operatorRef().equals("transform.concat_columns"))
+                .findFirst().orElseThrow();
+        PipelineTask operator = operatorTask(
+                "derive_note", manifest.operatorRef(), manifest.version(),
+                "onelake.dwd.users_with_note",
+                "{\"columns\":[\"name\",\"id\"],\"sep\":\"-\",\"as\":\"note\"}");
+        when(operatorService.getManifest(
+                tenantId, manifest.operatorRef(), manifest.version())).thenReturn(manifest);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(source, operator),
+                List.of(edge("source_users", "derive_note", "in", "src")));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(operator.getConfig())
+                .contains("SELECT `src`.*, concat_ws('-', `name`, `id`) AS `note`")
+                .contains("FROM `onelake`.`ods`.`users` `src`");
+    }
+
+    @Test
+    void icebergSinkHonorsPartitionColumns() {
+        PipelineTask source = syncRefTask("source_orders", "onelake.dwd.orders");
+        OperatorManifestDTO manifest = BuiltInOperatorCatalog.manifests().stream()
+                .filter(item -> item.operatorRef().equals("output.iceberg_table"))
+                .findFirst().orElseThrow();
+        PipelineTask sink = operatorTask(
+                "partitioned_sink", manifest.operatorRef(), manifest.version(),
+                "onelake.dwd.orders_partitioned",
+                "{\"targetFqn\":\"onelake.dwd.orders_partitioned\",\"partitionBy\":[\"bizdate\"]}");
+        when(operatorService.getManifest(
+                tenantId, manifest.operatorRef(), manifest.version())).thenReturn(manifest);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(source, sink),
+                List.of(edge("source_orders", "partitioned_sink", "in", "src")));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(sink.getConfig())
+                .contains("USING iceberg\\nPARTITIONED BY (`bizdate`)\\nAS")
+                .contains("SELECT * FROM `onelake`.`dwd`.`orders` `src`");
+    }
+
     // ---------- 辅助方法 ----------
 
     private Dag pipelineDag() {
@@ -509,6 +662,53 @@ class PipelineSparkCompileTest {
         t.setTargetFqn("iceberg.dwd.spark_" + key);
         t.setConfig("{\"sql\":\"SELECT count(*) FROM " + fromTableFqn + "\",\"from_tables\":[\"" + fromTableFqn + "\"]}");
         return t;
+    }
+
+    private PipelineTask operatorTask(String key,
+                                      String operatorRef,
+                                      String operatorVersion,
+                                      String targetFqn,
+                                      String config) {
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey(key);
+        task.setTaskType(TaskType.SPARK_SQL);
+        task.setName(key);
+        task.setEngine("SPARK_SQL");
+        task.setTargetFqn(targetFqn);
+        task.setOperatorRef(operatorRef);
+        task.setOperatorVersion(operatorVersion);
+        task.setConfig(config);
+        return task;
+    }
+
+    private OperatorManifestDTO operatorManifest(String ref,
+                                                 String version,
+                                                 String kind,
+                                                 String sql,
+                                                 boolean source) {
+        return new OperatorManifestDTO(
+                ref,
+                version,
+                "TRANSFORM",
+                "BUILTIN",
+                ref,
+                null,
+                null,
+                List.of(),
+                source ? List.of() : List.of(Map.of("name", "in", "cardinality", "ONE")),
+                Map.of("mode", "DERIVE"),
+                Map.of("type", "object", "properties", Map.of()),
+                "SPARK",
+                Map.of("kind", kind, "sql", sql),
+                Map.of(),
+                Map.of(),
+                false,
+                Map.of(),
+                Map.of("defaultResourceGroup", "spark-default", "engine", "SPARK"),
+                List.of());
     }
 
     private PipelineTask trinoTask(String key, String targetFqn) {

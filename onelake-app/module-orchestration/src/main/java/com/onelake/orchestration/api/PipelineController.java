@@ -6,6 +6,7 @@ import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TriggerType;
 import com.onelake.orchestration.dto.OdsDwdTemplateRequest;
 import com.onelake.orchestration.dto.OdsDwdTemplateResult;
+import com.onelake.orchestration.dto.PipelineCompilePreview;
 import com.onelake.orchestration.dto.PipelineTaskDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeRequest;
@@ -154,6 +155,13 @@ public class PipelineController {
     @PreAuthorize("hasRole('DE')")
     public ApiResponse<PipelineValidationResult> validate(@PathVariable UUID dagId) {
         return ApiResponse.ok(pipelineService.validate(dagId));
+    }
+
+    /** 返回节点最终生成的 SQL/脚本，供编辑器编译预览。 */
+    @GetMapping("/{dagId}/compile-preview")
+    @PreAuthorize("hasAnyRole('DE','CONSUMER','OPS')")
+    public ApiResponse<PipelineCompilePreview> compilePreview(@PathVariable UUID dagId) {
+        return ApiResponse.ok(pipelineService.compilePreview(dagId));
     }
 
     // ---------- 触发 ----------

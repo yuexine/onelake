@@ -56,6 +56,7 @@ import type {
   PipelineTaskRequest,
   PipelineTaskEdgeRequest,
   PipelineValidationResult,
+  PipelineCompilePreview,
   PipelineKind,
   PipelineStatus,
   PipelineTaskType,
@@ -443,10 +444,14 @@ export const PipelineAPI = {
   // L1 + L2 校验。
   validate: (id: string) =>
     unwrap<PipelineValidationResult>(http.post(`/orchestration/pipelines/${id}/validate`, null)),
+  compilePreview: (id: string) =>
+    unwrap<PipelineCompilePreview>(http.get(`/orchestration/pipelines/${id}/compile-preview`)),
 
   // 触发运行，进入 triggerPipelineRun 链路。
-  trigger: (id: string, trigger = 'MANUAL') =>
-    unwrap<{ runId: string }>(http.post(`/orchestration/pipelines/${id}/trigger`, null, { params: { trigger } })),
+  trigger: (id: string, trigger = 'MANUAL', env: 'DEV' | 'PROD' = 'PROD') =>
+    unwrap<{ runId: string }>(http.post(
+      `/orchestration/pipelines/${id}/trigger`, null, { params: { trigger, env } },
+    )),
 
   // 节点运行记录与节点级操作。
   listTaskRuns: (id: string, runId: string) =>

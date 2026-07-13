@@ -387,6 +387,8 @@ export interface PipelineTaskRequest {
   targetFqn?: string;
   modelId?: UUID;
   syncTaskId?: UUID;
+  operatorRef?: string;
+  operatorVersion?: string;
   config?: Record<string, unknown>;
   positionX?: number;
   positionY?: number;
@@ -426,10 +428,29 @@ export interface PipelineValidationResult {
   }>;
 }
 
+export interface PipelineCompilePreview {
+  pipelineId: UUID;
+  allValidated: boolean;
+  nodes: Array<{
+    taskId: UUID;
+    taskKey: string;
+    taskType: PipelineTaskType | string;
+    operatorRef?: string;
+    operatorVersion?: string;
+    templateKind?: string;
+    sqlOrScript?: string;
+    generated: boolean;
+    valid: boolean;
+    errorMessage?: string;
+  }>;
+  graphErrors: string[];
+}
+
 export interface TaskRun {
   id: UUID;
   jobRunId: UUID;
   taskKey: string;
+  operatorVersion?: string;
   status: TaskRunStatus;
   attempt?: number;
   logRef?: string;

@@ -380,14 +380,15 @@ export function usePipelineEditor(dagId: string | undefined) {
   const trigger = useCallback(async () => {
     if (!dagId) return;
     try {
-      const { runId } = await PipelineAPI.trigger(dagId);
-      message.success(`已触发流水线运行，runId=${runId.slice(0, 8)}…`);
+      const env = pipeline?.status === 'PUBLISHED' && !pipeline.hasUnpublishedChanges ? 'PROD' : 'DEV';
+      const { runId } = await PipelineAPI.trigger(dagId, 'MANUAL', env);
+      message.success(`已触发${env === 'DEV' ? '试跑' : '生产运行'}，runId=${runId.slice(0, 8)}…`);
       // P6-A: start live polling for this run
       setActiveRunId(runId);
     } catch (err) {
       message.error(`触发失败: ${(err as Error).message}`);
     }
-  }, [dagId, message]);
+  }, [dagId, message, pipeline]);
 
   const publish = useCallback(async () => {
     if (!dagId || !pipeline) return;

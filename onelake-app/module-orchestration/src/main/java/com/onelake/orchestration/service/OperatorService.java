@@ -110,6 +110,39 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
+    /**
+     * 按节点锁定的精确版本读取可见算子 Manifest。
+     *
+     * <p>编译与发布快照运行必须显式传入 {@code version}，本方法不会回退到
+     * {@code latestVersion}，避免算子升级改变旧流水线的编译结果。</p>
+     */
+    @Transactional(readOnly = true)
+    public OperatorManifestDTO getManifest(UUID tenantId, String ref, String version) {
+        if (tenantId == null) {
+            throw new BizException(40100, "租户上下文缺失");
+        }
+        if (ref == null || ref.isBlank()) {
+            throw new BizException(40035, "operatorRef 不能为空");
+        }
+        if (version == null || version.isBlank()) {
+            throw new BizException(40036, "operatorVersion 不能为空，算子节点必须锁定版本");
+        }
+        Operator operator = findVisibleOperator(tenantId, ref.trim())
+            .orElseThrow(() -> new BizException(40400, "算子不存在或当前租户不可见: " + ref));
+        OperatorVersion locked = versionRepo
+            .findByOperatorIdAndVersion(operator.getId(), version.trim())
+            .orElseThrow(() -> new BizException(
+                40401, "算子版本不存在: " + ref + "@" + version));
+        OperatorManifestDTO manifest = manifestFromVersion(locked);
+        if (manifest == null
+                || !Objects.equals(ref.trim(), manifest.operatorRef())
+                || !Objects.equals(version.trim(), manifest.version())) {
+            throw new BizException(40037, "算子版本 Manifest 与锁定引用不一致: "
+                + ref + "@" + version);
+        }
+        return manifest;
+    }
+
     /** 仅校验单个 Manifest，不写入数据库。 */
     @Transactional(readOnly = true)
     public OperatorValidationResultDTO validateOperator(OperatorManifestDTO manifest) {
@@ -187,7 +220,7 @@ public class OperatorService {
         operator.setLatestVersion(manifest.version());
         operator.setStatus(OperatorStatus.ACTIVE);
         operator = operatorRepo.save(operator);
-        saveVersion(operator, manifest, "custom operator registered", false);
+        saveVersion(operator, manifest, "custom operator registered");
         audit.auditCreate("operator", operator.getId(),
             Map.of("operatorRef", operator.getOperatorRef(), "scope", operator.getScope().name()));
         return toDTO(operator, null, true);
@@ -211,7 +244,7 @@ public class OperatorService {
         operator.setDescription(manifest.description());
         operator.setLatestVersion(manifest.version());
         operatorRepo.save(operator);
-        saveVersion(operator, manifest, request.changelog(), false);
+        saveVersion(operator, manifest, request.changelog());
         audit.audit("PUBLISH_VERSION", "operator", operator.getId().toString(),
             Map.of("operatorRef", ref, "version", manifest.version()));
         OperatorInstall install = installRepo.findByTenantIdAndOperatorId(tenantId, operator.getId()).orElse(null);
@@ -263,9 +296,7 @@ public class OperatorService {
         return toDTO(operator, install, true);
     }
 
-    /**
-     * 幂等写入代码目录中的平台内置算子；允许覆盖同版本快照以同步代码修订。
-     */
+    /** 幂等写入代码目录中的平台内置算子；已有版本快照保持不可变。 */
     @Transactional
     public int seedBuiltIns() {
         int count = 0;
@@ -287,7 +318,9 @@ public class OperatorService {
             operator.setLatestVersion(manifest.version());
             operator.setStatus(OperatorStatus.ACTIVE);
             operator = operatorRepo.save(operator);
-            saveVersion(operator, manifest, "builtin operator seed", true);
+            if (versionRepo.findByOperatorIdAndVersion(operator.getId(), manifest.version()).isEmpty()) {
+                saveVersion(operator, manifest, "builtin operator seed");
+            }
             count++;
         }
         return count;
@@ -321,12 +354,12 @@ public class OperatorService {
             .orElseThrow(() -> new BizException(40400, "当前租户下可维护算子不存在: " + ref));
     }
 
-    private void saveVersion(Operator operator, OperatorManifestDTO manifest, String changelog, boolean overwrite) {
+    private void saveVersion(Operator operator, OperatorManifestDTO manifest, String changelog) {
         Optional<OperatorVersion> existing = versionRepo.findByOperatorIdAndVersion(operator.getId(), manifest.version());
-        if (existing.isPresent() && !overwrite) {
+        if (existing.isPresent()) {
             throw new BizException(40911, "算子版本已存在: " + manifest.version());
         }
-        OperatorVersion version = existing.orElseGet(OperatorVersion::new);
+        OperatorVersion version = new OperatorVersion();
         version.setOperatorId(operator.getId());
         version.setVersion(manifest.version());
         version.setManifest(JsonUtil.toJson(manifest));
@@ -598,7 +631,8 @@ public class OperatorService {
             errors.add("template 不能为空");
             return;
         }
-        String kind = textValue(template.get("kind"));
+        String kind = firstText(
+            textValue(template.get("kind")), textValue(template.get("templateKind")));
         if (kind == null) {
             errors.add("template.kind 不能为空");
             return;

@@ -43,6 +43,10 @@ public class TaskRun {
     @Column(nullable = false, length = 128)
     private String taskKey;
 
+    /** 本次运行实际使用的不可变算子版本；普通节点为空。 */
+    @Column(length = 32)
+    private String operatorVersion;
+
     /** 节点运行状态。 */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)

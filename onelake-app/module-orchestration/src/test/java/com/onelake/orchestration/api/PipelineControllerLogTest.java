@@ -3,6 +3,7 @@ package com.onelake.orchestration.api;
 import com.onelake.common.exception.GlobalExceptionHandler;
 import com.onelake.orchestration.domain.enums.RunEnvironment;
 import com.onelake.orchestration.domain.enums.TriggerType;
+import com.onelake.orchestration.dto.PipelineCompilePreview;
 import com.onelake.orchestration.service.OrchestrationService;
 import com.onelake.orchestration.service.PipelineService;
 import com.onelake.orchestration.service.RunContext;
@@ -18,6 +19,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.containsString;
@@ -130,5 +132,34 @@ class PipelineControllerLogTest {
         verify(orchestrationService).triggerPipelineRun(
                 eq(DAG_ID), eq(TriggerType.MANUAL), any(RunContext.class),
                 isNull(), eq(RunEnvironment.PROD));
+    }
+
+    @Test
+    void returnsNodeSqlCompilePreview() throws Exception {
+        String sql = "CREATE OR REPLACE TABLE dwd.orders AS SELECT * FROM ods.orders";
+        when(pipelineService.compilePreview(DAG_ID)).thenReturn(new PipelineCompilePreview(
+                DAG_ID,
+                true,
+                List.of(new PipelineCompilePreview.NodeSqlPreview(
+                        UUID.randomUUID(),
+                        TASK_KEY,
+                        "SPARK_SQL",
+                        "transform.spark_sql",
+                        "1.0.0",
+                        "SPARK_SQL",
+                        sql,
+                        true,
+                        true,
+                        null)),
+                List.of()));
+
+        mockMvc.perform(get(
+                        "/api/v1/orchestration/pipelines/{dagId}/compile-preview", DAG_ID))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"taskKey\":\"spark_node\"")))
+                .andExpect(content().string(containsString("\"operatorVersion\":\"1.0.0\"")))
+                .andExpect(content().string(containsString("CREATE OR REPLACE TABLE dwd.orders")));
+
+        verify(pipelineService).compilePreview(DAG_ID);
     }
 }

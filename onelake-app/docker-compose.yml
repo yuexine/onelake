@@ -235,8 +235,10 @@ services:
     # ptrace、BPF、内核模块、跨进程内存访问等高风险 syscall。
     security_opt: ["no-new-privileges:true", "seccomp:./dagster/seccomp-user-code.json"]
     tmpfs:
-      - /tmp:size=512m,mode=1777
-      - /home/onelake:size=512m,uid=10001,gid=10001,mode=700
+      # Spark local 模式会将 Iceberg/AWS 依赖复制到 userFiles，并从临时目录加载
+      # zstd JNI；需要可执行且足够大的临时盘。
+      - /tmp:size=2g,mode=1777,exec
+      - /home/onelake:size=1g,uid=10001,gid=10001,mode=700
       # Dagster step compute logs / default IO manager need a writable runtime area;
       # it is not mounted into the inner Bubblewrap script sandbox.
       - /opt/dagster/dagster_home:size=512m,uid=10001,gid=10001,mode=700

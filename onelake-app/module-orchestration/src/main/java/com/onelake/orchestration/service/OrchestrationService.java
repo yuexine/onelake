@@ -580,6 +580,7 @@ public class OrchestrationService {
             tr.setTenantId(tenantId);
             tr.setJobRunId(run.getId());
             tr.setTaskKey(t.getTaskKey());
+            tr.setOperatorVersion(t.getOperatorVersion());
             tr.setDataIntervalStart(runContext.dataIntervalStart());
             tr.setDataIntervalEnd(runContext.dataIntervalEnd());
             TaskRunStatus initialStatus = dryRun

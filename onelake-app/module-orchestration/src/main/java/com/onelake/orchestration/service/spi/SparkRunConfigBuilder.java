@@ -388,7 +388,9 @@ public class SparkRunConfigBuilder implements EngineRunConfigBuilder {
                     QualityGateScriptRenderer.targetFqn(task, cfg), runContext, params);
             opConfig.put("from_tables", StringUtils.hasText(target) ? List.of(target) : List.of());
         } else {
-            String sql = textOrEmpty(cfg, "sql");
+            String sql = StringUtils.hasText(task.getOperatorRef())
+                    ? textOrEmpty(cfg, "compiled_sql")
+                    : textOrEmpty(cfg, "sql");
             String script = textOrEmpty(cfg, "script");
             opConfig.put("sql_or_script", ParamRenderer.render(
                     StringUtils.hasText(script) ? script : sql, runContext, params));

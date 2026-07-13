@@ -15,6 +15,7 @@ import com.onelake.orchestration.domain.enums.TaskCompileStatus;
 import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.OdsDwdTemplateRequest;
 import com.onelake.orchestration.dto.OdsDwdTemplateResult;
+import com.onelake.orchestration.dto.OperatorManifestDTO;
 import com.onelake.orchestration.dto.PipelineTaskDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeRequest;
@@ -22,6 +23,7 @@ import com.onelake.orchestration.dto.PipelineTaskRequest;
 import com.onelake.orchestration.dto.PipelineValidationResult;
 import com.onelake.orchestration.dto.PipelineValidationResult.GraphError;
 import com.onelake.orchestration.dto.PipelineValidationResult.TaskValidation;
+import com.onelake.orchestration.dto.PipelineCompilePreview;
 import com.onelake.orchestration.dto.PipelineCompileResult;
 import com.onelake.orchestration.dto.TaskRunDTO;
 import com.onelake.orchestration.repository.DagRepository;
@@ -43,6 +45,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -77,6 +80,7 @@ public class PipelineService {
     private final TaskRunRepository taskRunRepo;
     private final JobRunRepository runRepo;
     private final PipelineCompileService compileService;
+    private final OperatorService operatorService;
     private final PipelineSnapshotService snapshotService;
     private final org.springframework.beans.factory.ObjectProvider<OutboxPublisher> outboxPublisher;
     private final TenantRepository tenantRepo;
@@ -315,7 +319,7 @@ public class PipelineService {
     @Transactional
     public PipelineTaskDTO createTask(UUID dagId, PipelineTaskRequest req) {
         Dag dag = getPipelineForUpdate(dagId, requireTenant());
-        validateTaskRequest(req, true);
+        validateTaskRequest(req, true, null);
         if (taskRepo.findByDagIdAndTaskKey(dagId, req.taskKey()).isPresent()) {
             throw new BizException(40901, "task_key 已存在: " + req.taskKey());
         }
@@ -330,6 +334,8 @@ public class PipelineService {
         t.setTargetFqn(req.targetFqn());
         t.setModelId(req.modelId());
         t.setSyncTaskId(req.syncTaskId());
+        t.setOperatorRef(normalizeOptional(req.operatorRef()));
+        t.setOperatorVersion(normalizeOptional(req.operatorVersion()));
         t.setConfig(serializeConfig(req));
         t.setPositionX(req.positionX());
         t.setPositionY(req.positionY());
@@ -345,12 +351,16 @@ public class PipelineService {
         Dag dag = getPipelineForUpdate(dagId, requireTenant());
         PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
-        validateTaskRequest(req, false);
+        validateTaskRequest(req, false, t.getTaskType());
         if (req.name() != null) t.setName(req.name());
         if (StringUtils.hasText(req.engine())) t.setEngine(normalizeTaskEngine(t.getTaskType().name(), req.engine()));
         if (req.targetFqn() != null) t.setTargetFqn(req.targetFqn());
         if (req.modelId() != null) t.setModelId(req.modelId());
         if (req.syncTaskId() != null) t.setSyncTaskId(req.syncTaskId());
+        if (req.operatorRef() != null || req.operatorVersion() != null) {
+            t.setOperatorRef(normalizeOptional(req.operatorRef()));
+            t.setOperatorVersion(normalizeOptional(req.operatorVersion()));
+        }
         if (req.config() != null) t.setConfig(serializeConfig(req));
         if (req.positionX() != null) t.setPositionX(req.positionX());
         if (req.positionY() != null) t.setPositionY(req.positionY());
@@ -467,6 +477,12 @@ public class PipelineService {
                 .toList();
         return new PipelineValidationResult(
                 dagId, compile.allValidated(), tasks, graphErrors);
+    }
+
+    /** 返回与正式编译同源、但不持久化节点状态的 SQL/脚本预览。 */
+    @Transactional(readOnly = true)
+    public PipelineCompilePreview compilePreview(UUID dagId) {
+        return compileService.preview(dagId);
     }
 
     private String inferErrorCode(String message) {
@@ -644,7 +660,9 @@ public class PipelineService {
     }
 
     /** 校验节点请求的必填字段、支持类型和 Spark-only 引擎边界。 */
-    private void validateTaskRequest(PipelineTaskRequest req, boolean forCreate) {
+    private void validateTaskRequest(PipelineTaskRequest req,
+                                     boolean forCreate,
+                                     TaskType existingTaskType) {
         if (forCreate && !StringUtils.hasText(req.taskKey())) {
             throw new BizException(40020, "taskKey 不能为空");
         }
@@ -654,6 +672,39 @@ public class PipelineService {
         if (!forCreate && req.taskType() != null && !VALID_TASK_TYPES.contains(req.taskType())) {
             throw new BizException(40021, "非法 taskType: " + req.taskType());
         }
+        boolean hasOperatorRef = StringUtils.hasText(req.operatorRef());
+        boolean hasOperatorVersion = StringUtils.hasText(req.operatorVersion());
+        if (hasOperatorRef != hasOperatorVersion) {
+            throw new BizException(40022, "operatorRef 与 operatorVersion 必须成对提交并锁定版本");
+        }
+        if (hasOperatorRef) {
+            String effectiveTaskType = forCreate
+                    ? req.taskType()
+                    : existingTaskType == null ? req.taskType() : existingTaskType.name();
+            if (!TaskType.SPARK_SQL.name().equals(effectiveTaskType)) {
+                throw new BizException(40023, "G1 算子绑定仅支持 SPARK_SQL 节点");
+            }
+            OperatorManifestDTO manifest = operatorService.getManifest(
+                    requireTenant(), req.operatorRef().trim(), req.operatorVersion().trim());
+            Object rawKind = manifest.template() == null ? null : manifest.template().get("kind");
+            if (rawKind == null && manifest.template() != null) {
+                rawKind = manifest.template().get("templateKind");
+            }
+            try {
+                if (!"SPARK".equalsIgnoreCase(manifest.compileTarget())) {
+                    throw new IllegalArgumentException("compileTarget");
+                }
+                OperatorSqlGenerator.TemplateKind.valueOf(
+                        String.valueOf(rawKind).trim().toUpperCase(Locale.ROOT));
+            } catch (RuntimeException ex) {
+                throw new BizException(40023, "算子模板不在 G1 Spark SQL 支持范围内: "
+                        + req.operatorRef() + "@" + req.operatorVersion());
+            }
+        }
+    }
+
+    private String normalizeOptional(String value) {
+        return StringUtils.hasText(value) ? value.trim() : null;
     }
 
     private String serializeConfig(PipelineTaskRequest req) {

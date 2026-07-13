@@ -787,6 +787,8 @@ class OrchestrationServiceTest {
         Dag dag = dag();
         dag.setDagsterJob("onelake_pipeline_run");
         PipelineTask task = pipelineTask("spark_node");
+        task.setOperatorRef("transform.select_columns");
+        task.setOperatorVersion("1.0.0");
         when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID)).thenReturn(Optional.of(dag));
         when(pipelineCompileService.compile(DAG_ID)).thenReturn(pipelinePlan(task));
         when(pipelineTaskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID)).thenReturn(List.of(task));
@@ -810,6 +812,9 @@ class OrchestrationServiceTest {
                 any(RunContext.class), anyMap());
         verify(dagster).launch(eq("onelake_pipeline_run"), eq("onelake"), eq("onelake-loc"),
                 anyMap(), anyList());
+        verify(taskRunRepo).save(argThat(taskRun ->
+                "spark_node".equals(taskRun.getTaskKey())
+                        && "1.0.0".equals(taskRun.getOperatorVersion())));
     }
 
     @Test

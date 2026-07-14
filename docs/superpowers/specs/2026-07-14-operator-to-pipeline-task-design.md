@@ -263,3 +263,49 @@ cd onelake-app
 mvn -q -pl module-orchestration -am test
 git diff --check
 ```
+
+## 12. 二轮 Review 修复设计
+
+### 12.1 集中解析已安装算子
+
+`OperatorService` 负责集中解析当前租户实际选中的算子身份、安装关系和有效版本。
+租户自有 `CUSTOM/TENANT_PRIVATE` 候选不再通过可能返回多行的 `Optional` 查询读取，
+而是取得同 ref 的有序列表并按算子 ID 稳定选择。Palette、`getManifest` 和创建命令
+复用相同的可见性优先级与稳定排序，保证同一 ref 始终指向同一条算子记录。
+
+本轮不增加数据库迁移。现有唯一约束允许同一租户分别保存一条 `CUSTOM` 和
+`TENANT_PRIVATE` 同名记录，因此服务层必须兼容历史及并发产生的同层同名数据。
+
+### 12.2 创建命令强制固定版本
+
+创建命令仍要求客户端显式提交 `version`，并把该精确版本写入
+`pipeline_task.operator_version`。如果所选算子存在 `OperatorInstall.pinnedVersion`，
+请求版本必须与固定版本完全一致；不一致时返回业务错误，不静默改写请求，也不读取
+其他版本的 Manifest。未固定版本时继续允许调用方提交该算子的可见历史版本，节点仍
+通过精确版本快照保持可复现。
+
+### 12.3 既有锁定节点可继续编辑
+
+新建算子绑定或把节点改绑到其他 `operatorRef/operatorVersion` 时，仍要求目标算子
+已安装、`ACTIVE`、版本可见且符合 G1 契约。更新请求若携带的 ref/version 与节点当前
+锁定绑定完全相同，则只验证锁定 Manifest 仍可精确读取和编译，不再要求算子保持
+`ACTIVE`。因此算子后续被标记为 `DEPRECATED` 时，既有节点仍可修改名称、配置和
+位置，但不能新建或切换到该废弃绑定。
+
+### 12.4 Manifest example 空值防御
+
+Manifest 注册和发布校验拒绝 `examples` 中的空条目，避免继续写入不可用版本快照。
+节点默认配置提取同时保持空值防御：历史 Manifest 即使含有空首项，也只跳过示例
+参数并继续使用 `paramsSchema.properties.default`，不得因空指针返回 500。
+
+### 12.5 二轮回归测试
+
+至少补充以下测试：
+
+- 固定为旧版本后，请求创建其他版本被拒绝且不保存节点；
+- 同租户同时存在 `CUSTOM`、`TENANT_PRIVATE` 同 ref 时，Palette 和 Manifest 解析
+  都稳定选择相同 ID；
+- 既有节点绑定的算子被废弃后，携带原绑定的完整更新请求仍可保存；
+- 新建或改绑到废弃算子仍被拒绝；
+- `examples: [null]` 在 Manifest 校验阶段产生明确错误，历史异常快照在默认配置读取时
+  不触发空指针。

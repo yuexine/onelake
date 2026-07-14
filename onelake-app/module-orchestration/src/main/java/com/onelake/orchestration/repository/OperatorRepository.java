@@ -24,8 +24,8 @@ public interface OperatorRepository extends JpaRepository<Operator, UUID> {
     Optional<Operator> findByOperatorRefAndScopeAndTenantIdIsNull(String operatorRef, OperatorScope scope);
 
     /** 在允许的租户作用域内按稳定引用查询算子。 */
-    Optional<Operator> findByTenantIdAndOperatorRefAndScopeIn(UUID tenantId, String operatorRef,
-                                                              Collection<OperatorScope> scopes);
+    List<Operator> findByTenantIdAndOperatorRefAndScopeIn(UUID tenantId, String operatorRef,
+                                                          Collection<OperatorScope> scopes);
 
     /** 查询同一 ref 的所有作用域记录，供唯一性和冲突检查。 */
     List<Operator> findByOperatorRef(String operatorRef);

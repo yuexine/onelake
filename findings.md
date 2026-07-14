@@ -1,5 +1,32 @@
 # 发现与决策：数据集成模块后端迭代调研
 
+## 2026-07-14 G2 算子拖入生成可执行节点
+
+### 二轮 Review 事实与修复
+
+- `PipelineService#createTaskFromOperator` 的安装检查只接收 ref；显式安装记录即使固定了旧版本，请求仍可读取并锁定其他版本。
+- `orchestration.operator` 只按 `(operator_ref, scope, tenant_id)` 唯一，同一租户可同时存在 CUSTOM 与 TENANT_PRIVATE 同 ref；返回 `Optional` 的跨 scope 查询会在多行时失败。
+- 通用 `updateTask` 当前对请求中未变化的既有算子绑定也要求 ACTIVE，导致算子废弃后无法继续编辑旧锁定节点。
+- Manifest 校验未拒绝 `examples` 中的 null 条目，默认配置直接读取首项会触发空指针；新写入应拒绝，历史异常快照读取应容错。
+- 已新增 `OperatorService#getInstalledManifest`，统一 ACTIVE/安装/固定版本/精确 Manifest 校验；创建和改绑路径不能再绕过 pinnedVersion。
+- 同层同名 Repository 查询已改为多行返回并按稳定 ID 选择；Palette、`getManifest` 和创建命令保持同一身份解析。
+- 更新请求仅在新增或更换算子绑定时要求 ACTIVE；携带原锁定绑定时继续按精确 Manifest 校验，允许废弃算子的既有节点编辑。
+- Manifest 校验已拒绝 null example，默认配置读取同时防御历史异常快照；相关聚焦与全模块测试均通过。
+- 当前 HEAD `e9b772b` 已完成 G1：`PipelineCompileService` 对带 `operator_ref/operator_version` 的 `SPARK_SQL` 节点按锁定 Manifest 生成 SQL。
+- `OperatorService#getManifest(tenantId, ref, version)` 已提供租户可见性和精确版本校验，可直接作为 `createTaskFromOperator` 的 Manifest 来源。
+- 现有 `GET /api/v1/orchestration/operators` 返回“平台内置 + 租户自有 + 显式安装”的可见集合，并包含 `installed` 标记；Palette 需要独立的已安装过滤语义，避免未安装的租户私有算子混入。
+- `PipelineTask` 已有 `category/operatorRef/operatorVersion/position/config` 字段，节点仍可沿标准 `pipeline_task` 与 G1 编译链运行，无需新表或迁移。
+- Manifest 目前没有独立的 defaultConfig 字段；内置算子在 `paramsSchema.properties` 中未声明 `default`，但 `examples[0].params` 提供确定性示例值。默认 config 取值口径需要在设计阶段明确。
+- 用户确认默认 config 合并规则：优先 `paramsSchema.properties.*.default`，缺失时回退 `examples[0].params`。
+- 用户确认采用独立命令接口方案：Palette 使用专门的已安装算子 GET，拖入使用专门的 from-operator POST，Manifest 到节点的映射权留在 `PipelineService`。
+- G2 后端已实现：`OperatorService#listInstalledOperators/isInstalled` 统一 Palette 与写入判定；`PipelineService#createTaskFromOperator` 生成 `SPARK_SQL/EXEC` 标准节点并保留 `_operator_contract` 快照。
+- 通用 `/tasks` 的 operatorRef 绑定也复用安装判定，不能绕过 Palette 直接绑定未安装算子。
+- 输入算子 `input.ods_table` 已通过单测完成“创建节点 → Schema default/示例合并 → G1 生成 Spark SQL → executable=true”闭环。
+- Review 修复后，Palette 与创建命令共享完整 G1 兼容策略：除模板白名单外，只接受零输入源算子或单个 `ONE` 输入端口，并拒绝需要上游输入的伪源模板。
+- Palette 按 `operatorRef` 和“租户自有 → BUILTIN → 显式安装”优先级选唯一候选；显式安装同名候选使用稳定 ID 顺序，与创建时 Manifest 解析一致。
+- 已安装列表以 `pinnedVersion` 优先加载有效 Manifest；固定版本快照缺失或不兼容时不进入可拖入集合。
+- 编译图端口从 SQL 生成阶段已经读取的锁定 Manifest 构造，自定义端口名可编译，且不信任可编辑的 `_operator_contract` 快照。
+
 ## 需求
 - 用户希望以“后端技术专家”视角，阅读数据集成模块、数据面开发指南文档和前端页面代码。
 - 输出详细的后端迭代开发计划，并研究实施路线可行性。

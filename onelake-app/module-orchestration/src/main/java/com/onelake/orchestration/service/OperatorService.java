@@ -50,6 +50,9 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class OperatorService {
 
+    private static final Comparator<Operator> STABLE_OPERATOR_ID = Comparator.comparing(
+        Operator::getId, Comparator.nullsLast(Comparator.naturalOrder()));
+
     /** 稳定算子引用格式：namespace.name。 */
     private static final Pattern OPERATOR_REF_PATTERN = Pattern.compile("^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$");
     /** 支持预发布后缀的语义版本格式。 */
@@ -100,6 +103,68 @@ public class OperatorService {
             .toList();
     }
 
+    /**
+     * 返回当前租户可直接拖入画布的 ACTIVE 算子。
+     *
+     * <p>平台内置和租户自有算子视为隐式安装，同时合并显式 OperatorInstall；
+     * 与市场可见列表不同，已废弃或不符合 G1 Spark SQL 契约的算子不会进入 Palette。</p>
+     */
+    @Transactional(readOnly = true)
+    public List<OperatorDTO> listInstalledOperators() {
+        UUID tenantId = requireTenant();
+        List<OperatorInstall> installs = installRepo.findByTenantId(tenantId);
+        Map<UUID, OperatorInstall> installMap = installs.stream()
+            .collect(Collectors.toMap(OperatorInstall::getOperatorId, install -> install, (a, b) -> a));
+
+        List<Operator> operators = new ArrayList<>();
+        List<Operator> tenantOwned = new ArrayList<>(operatorRepo.findByTenantIdAndScopeIn(tenantId,
+            List.of(OperatorScope.CUSTOM, OperatorScope.TENANT_PRIVATE)));
+        List<Operator> builtIns = new ArrayList<>(
+            operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN));
+        List<Operator> explicitlyInstalled = new ArrayList<>();
+        addInstalledOperators(explicitlyInstalled, installs);
+        tenantOwned.sort(STABLE_OPERATOR_ID);
+        builtIns.sort(STABLE_OPERATOR_ID);
+        explicitlyInstalled.sort(STABLE_OPERATOR_ID);
+        operators.addAll(tenantOwned);
+        operators.addAll(builtIns);
+        operators.addAll(explicitlyInstalled);
+
+        Set<String> seen = new HashSet<>();
+        return operators.stream()
+            // 必须先按可见性优先级占用 ref，再过滤状态；否则同名废弃租户算子会错误回退到内置算子。
+            .filter(operator -> seen.add(operator.getOperatorRef()))
+            .filter(operator -> operator.getStatus() == OperatorStatus.ACTIVE)
+            .sorted(Comparator.comparing((Operator operator) -> operator.getCategory().ordinal())
+                .thenComparing(Operator::getOperatorRef))
+            .map(operator -> {
+                OperatorInstall install = installMap.get(operator.getId());
+                String effectiveVersion = install != null
+                        && install.getPinnedVersion() != null
+                        && !install.getPinnedVersion().isBlank()
+                    ? install.getPinnedVersion().trim()
+                    : operator.getLatestVersion();
+                return toDTO(operator, install, false, true, effectiveVersion);
+            })
+            .filter(operator -> OperatorG1Compatibility.supports(operator.manifest()))
+            .toList();
+    }
+
+    /** Palette 与创建命令共享的安装判定，避免绕过已安装集合创建节点。 */
+    @Transactional(readOnly = true)
+    public boolean isInstalled(UUID tenantId, String ref) {
+        if (tenantId == null || ref == null || ref.isBlank()) {
+            return false;
+        }
+        Operator operator = findVisibleOperator(tenantId, ref.trim()).orElse(null);
+        if (operator == null || operator.getStatus() != OperatorStatus.ACTIVE) {
+            return false;
+        }
+        OperatorInstall install = installRepo.findByTenantIdAndOperatorId(tenantId, operator.getId())
+            .orElse(null);
+        return isInstalledForTenant(tenantId, operator, install);
+    }
+
     /** 返回可见算子的当前 Manifest、版本历史和安装状态。 */
     @Transactional(readOnly = true)
     public OperatorDTO getOperator(String ref) {
@@ -118,6 +183,43 @@ public class OperatorService {
      */
     @Transactional(readOnly = true)
     public OperatorManifestDTO getManifest(UUID tenantId, String ref, String version) {
+        validateManifestLookup(tenantId, ref, version);
+        String normalizedRef = ref.trim();
+        String normalizedVersion = version.trim();
+        Operator operator = findVisibleOperator(tenantId, normalizedRef)
+            .orElseThrow(() -> new BizException(40400, "算子不存在或当前租户不可见: " + ref));
+        return readManifest(operator, normalizedRef, normalizedVersion);
+    }
+
+    /**
+     * 按 Palette 安装语义读取创建新绑定所需的精确版本 Manifest。
+     *
+     * <p>与 {@link #getManifest(UUID, String, String)} 不同，本方法额外要求算子仍为
+     * ACTIVE 且属于当前租户的已安装集合；存在固定版本时，请求版本必须完全一致。</p>
+     */
+    @Transactional(readOnly = true)
+    public OperatorManifestDTO getInstalledManifest(UUID tenantId, String ref, String version) {
+        validateManifestLookup(tenantId, ref, version);
+        String normalizedRef = ref.trim();
+        String normalizedVersion = version.trim();
+        Operator operator = findVisibleOperator(tenantId, normalizedRef)
+            .orElseThrow(() -> new BizException(40402,
+                "算子未安装、不可见或已废弃: " + normalizedRef));
+        OperatorInstall install = installRepo.findByTenantIdAndOperatorId(tenantId, operator.getId())
+            .orElse(null);
+        if (operator.getStatus() != OperatorStatus.ACTIVE
+                || !isInstalledForTenant(tenantId, operator, install)) {
+            throw new BizException(40402, "算子未安装、不可见或已废弃: " + normalizedRef);
+        }
+        String pinnedVersion = install == null ? null : blankToNull(install.getPinnedVersion());
+        if (pinnedVersion != null && !pinnedVersion.equals(normalizedVersion)) {
+            throw new BizException(40912, "算子已固定版本 " + pinnedVersion
+                + "，不能创建版本 " + normalizedVersion + ": " + normalizedRef);
+        }
+        return readManifest(operator, normalizedRef, normalizedVersion);
+    }
+
+    private void validateManifestLookup(UUID tenantId, String ref, String version) {
         if (tenantId == null) {
             throw new BizException(40100, "租户上下文缺失");
         }
@@ -127,16 +229,17 @@ public class OperatorService {
         if (version == null || version.isBlank()) {
             throw new BizException(40036, "operatorVersion 不能为空，算子节点必须锁定版本");
         }
-        Operator operator = findVisibleOperator(tenantId, ref.trim())
-            .orElseThrow(() -> new BizException(40400, "算子不存在或当前租户不可见: " + ref));
+    }
+
+    private OperatorManifestDTO readManifest(Operator operator, String ref, String version) {
         OperatorVersion locked = versionRepo
-            .findByOperatorIdAndVersion(operator.getId(), version.trim())
+            .findByOperatorIdAndVersion(operator.getId(), version)
             .orElseThrow(() -> new BizException(
                 40401, "算子版本不存在: " + ref + "@" + version));
         OperatorManifestDTO manifest = manifestFromVersion(locked);
         if (manifest == null
-                || !Objects.equals(ref.trim(), manifest.operatorRef())
-                || !Objects.equals(version.trim(), manifest.version())) {
+                || !Objects.equals(ref, manifest.operatorRef())
+                || !Objects.equals(version, manifest.version())) {
             throw new BizException(40037, "算子版本 Manifest 与锁定引用不一致: "
                 + ref + "@" + version);
         }
@@ -205,10 +308,9 @@ public class OperatorService {
         if (scope == OperatorScope.BUILTIN) {
             throw new BizException(40031, "内置算子只能通过系统种子数据注册");
         }
-        operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(tenantId, manifest.operatorRef(),
-            List.of(OperatorScope.CUSTOM, OperatorScope.TENANT_PRIVATE)).ifPresent(op -> {
-                throw new BizException(40910, "当前租户下算子标识已存在: " + manifest.operatorRef());
-            });
+        if (!findTenantOwnedOperators(tenantId, manifest.operatorRef()).isEmpty()) {
+            throw new BizException(40910, "当前租户下算子标识已存在: " + manifest.operatorRef());
+        }
 
         Operator operator = new Operator();
         operator.setTenantId(tenantId);
@@ -333,10 +435,16 @@ public class OperatorService {
     }
 
     private Optional<Operator> findVisibleOperator(UUID tenantId, String ref) {
-        return operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(tenantId, ref,
-                List.of(OperatorScope.CUSTOM, OperatorScope.TENANT_PRIVATE))
+        return findTenantOwnedOperators(tenantId, ref).stream().findFirst()
             .or(() -> operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(ref, OperatorScope.BUILTIN))
             .or(() -> findInstalledOperator(tenantId, ref));
+    }
+
+    private List<Operator> findTenantOwnedOperators(UUID tenantId, String ref) {
+        return operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(tenantId, ref,
+                List.of(OperatorScope.CUSTOM, OperatorScope.TENANT_PRIVATE)).stream()
+            .sorted(STABLE_OPERATOR_ID)
+            .toList();
     }
 
     private Optional<Operator> findInstalledOperator(UUID tenantId, String ref) {
@@ -345,13 +453,27 @@ public class OperatorService {
             .collect(Collectors.toSet());
         return operatorRepo.findByOperatorRef(ref).stream()
             .filter(op -> installedIds.contains(op.getId()))
+            .sorted(STABLE_OPERATOR_ID)
             .findFirst();
     }
 
     private Operator findTenantMutableOperator(UUID tenantId, String ref) {
-        return operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(tenantId, ref,
-                List.of(OperatorScope.CUSTOM, OperatorScope.TENANT_PRIVATE))
+        return findTenantOwnedOperators(tenantId, ref).stream().findFirst()
             .orElseThrow(() -> new BizException(40400, "当前租户下可维护算子不存在: " + ref));
+    }
+
+    private boolean isInstalledForTenant(UUID tenantId,
+                                         Operator operator,
+                                         OperatorInstall install) {
+        if (operator.getScope() == OperatorScope.BUILTIN && operator.getTenantId() == null) {
+            return true;
+        }
+        if (tenantId.equals(operator.getTenantId())
+                && (operator.getScope() == OperatorScope.CUSTOM
+                    || operator.getScope() == OperatorScope.TENANT_PRIVATE)) {
+            return true;
+        }
+        return install != null;
     }
 
     private void saveVersion(Operator operator, OperatorManifestDTO manifest, String changelog) {
@@ -369,7 +491,23 @@ public class OperatorService {
     }
 
     private OperatorDTO toDTO(Operator operator, OperatorInstall install, boolean includeVersions) {
-        OperatorManifestDTO manifest = versionRepo.findByOperatorIdAndVersion(operator.getId(), operator.getLatestVersion())
+        return toDTO(operator, install, includeVersions,
+            operator.getScope() == OperatorScope.BUILTIN || install != null);
+    }
+
+    private OperatorDTO toDTO(Operator operator,
+                              OperatorInstall install,
+                              boolean includeVersions,
+                              boolean installed) {
+        return toDTO(operator, install, includeVersions, installed, operator.getLatestVersion());
+    }
+
+    private OperatorDTO toDTO(Operator operator,
+                              OperatorInstall install,
+                              boolean includeVersions,
+                              boolean installed,
+                              String manifestVersion) {
+        OperatorManifestDTO manifest = versionRepo.findByOperatorIdAndVersion(operator.getId(), manifestVersion)
             .map(this::manifestFromVersion)
             .orElse(null);
         List<OperatorVersionDTO> versions = includeVersions
@@ -377,7 +515,6 @@ public class OperatorService {
                 .map(this::toVersionDTO)
                 .toList()
             : List.of();
-        boolean installed = operator.getScope() == OperatorScope.BUILTIN || install != null;
         return new OperatorDTO(
             operator.getId(),
             operator.getOperatorRef(),
@@ -454,6 +591,13 @@ public class OperatorService {
         }
         if (manifest.inputPorts() == null) {
             errors.add("inputPorts 不能为空；无输入算子请使用空数组");
+        }
+        if (manifest.examples() != null) {
+            for (int i = 0; i < manifest.examples().size(); i++) {
+                if (manifest.examples().get(i) == null) {
+                    errors.add("examples[" + i + "] 不能为空");
+                }
+            }
         }
         return new OperatorValidationResultDTO(errors.isEmpty(), errors, warnings);
     }

@@ -340,7 +340,7 @@ class PipelineStatusMachineTest {
         Dag dag = dag("DRAFT");
         when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
         when(taskRepo.findByDagIdAndTaskKey(dagId, "select_fields")).thenReturn(Optional.empty());
-        when(operatorService.getManifest(tenantId, "transform.select_columns", "1.0.0"))
+        when(operatorService.getInstalledManifest(tenantId, "transform.select_columns", "1.0.0"))
                 .thenReturn(BuiltInOperatorCatalog.manifests().stream()
                         .filter(manifest -> manifest.operatorRef().equals("transform.select_columns"))
                         .findFirst().orElseThrow());
@@ -381,7 +381,7 @@ class PipelineStatusMachineTest {
         var unsupported = BuiltInOperatorCatalog.manifests().stream()
                 .filter(manifest -> manifest.operatorRef().equals("join.inner"))
                 .findFirst().orElseThrow();
-        when(operatorService.getManifest(
+        when(operatorService.getInstalledManifest(
                 tenantId, unsupported.operatorRef(), unsupported.version())).thenReturn(unsupported);
 
         assertThatThrownBy(() -> service.createTask(dagId, new PipelineTaskRequest(
@@ -391,6 +391,67 @@ class PipelineStatusMachineTest {
                 java.util.Map.of("on", "left.id = right.id"), null, null)))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("不在 G1 Spark SQL 支持范围");
+    }
+
+    @Test
+    void rejectsUninstalledOperatorBindingThroughGenericTaskCreation() {
+        Dag dag = dag("DRAFT");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(operatorService.getInstalledManifest(tenantId, "custom.not_installed", "1.0.0"))
+                .thenThrow(new BizException(40402,
+                        "算子未安装、不可见或已废弃: custom.not_installed"));
+
+        assertThatThrownBy(() -> service.createTask(dagId, new PipelineTaskRequest(
+                "not_installed", "SPARK_SQL", "未安装算子", "SPARK_SQL",
+                "onelake.tmp.not_installed", null, null,
+                "custom.not_installed", "1.0.0",
+                java.util.Map.of(), null, null)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("未安装");
+
+        verify(taskRepo, never()).save(any(PipelineTask.class));
+    }
+
+    @Test
+    void existingLockedBindingCanBeUpdatedAfterOperatorDeprecation() {
+        Dag dag = dag("DRAFT");
+        PipelineTask task = operatorTask("transform.select_columns", "1.0.0");
+        var manifest = BuiltInOperatorCatalog.manifests().stream()
+                .filter(item -> item.operatorRef().equals("transform.select_columns"))
+                .findFirst().orElseThrow();
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "select_fields")).thenReturn(Optional.of(task));
+        when(operatorService.getManifest(tenantId, task.getOperatorRef(), task.getOperatorVersion()))
+                .thenReturn(manifest);
+        when(taskRepo.save(any(PipelineTask.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        var updated = service.updateTask(dagId, "select_fields", new PipelineTaskRequest(
+                null, null, "已废弃算子的既有节点", null, null, null, null,
+                task.getOperatorRef(), task.getOperatorVersion(),
+                java.util.Map.of("columns", List.of("order_id")), 100, 200));
+
+        assertThat(updated.name()).isEqualTo("已废弃算子的既有节点");
+        verify(operatorService).getManifest(tenantId, task.getOperatorRef(), task.getOperatorVersion());
+        verify(operatorService, never()).getInstalledManifest(any(), anyString(), anyString());
+    }
+
+    @Test
+    void changingLockedBindingStillRequiresActiveInstalledOperator() {
+        Dag dag = dag("DRAFT");
+        PipelineTask task = operatorTask("transform.select_columns", "1.0.0");
+        when(dagRepo.findByIdForUpdate(dagId)).thenReturn(Optional.of(dag));
+        when(taskRepo.findByDagIdAndTaskKey(dagId, "select_fields")).thenReturn(Optional.of(task));
+        when(operatorService.getInstalledManifest(tenantId, "custom.deprecated", "1.0.0"))
+                .thenThrow(new BizException(40402,
+                        "算子未安装、不可见或已废弃: custom.deprecated"));
+
+        assertThatThrownBy(() -> service.updateTask(dagId, "select_fields", new PipelineTaskRequest(
+                null, null, "改绑", null, null, null, null,
+                "custom.deprecated", "1.0.0", java.util.Map.of(), null, null)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("已废弃");
+
+        verify(taskRepo, never()).save(any(PipelineTask.class));
     }
 
     @Test
@@ -453,6 +514,21 @@ class PipelineStatusMachineTest {
         d.setPipelineKind("BLANK");
         d.setEngine("SPARK");
         return d;
+    }
+
+    private PipelineTask operatorTask(String operatorRef, String operatorVersion) {
+        PipelineTask task = new PipelineTask();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey("select_fields");
+        task.setTaskType(com.onelake.orchestration.domain.enums.TaskType.SPARK_SQL);
+        task.setName("选择字段");
+        task.setEngine("SPARK_SQL");
+        task.setOperatorRef(operatorRef);
+        task.setOperatorVersion(operatorVersion);
+        task.setConfig("{\"columns\":[\"order_id\"]}");
+        return task;
     }
 
     private com.onelake.orchestration.dto.PipelineCompileResult validCompileResult() {

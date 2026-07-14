@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.PipelineTask;
 import com.onelake.orchestration.domain.enums.TaskType;
+import com.onelake.orchestration.dto.OperatorManifestDTO;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
@@ -98,6 +99,32 @@ final class PipelineNodePortRegistry {
             );
             default -> NodeContract.empty(type.name(), engine);
         };
+    }
+
+    /** 算子节点使用锁定 Manifest 的端口名；普通节点继续走静态类型契约。 */
+    static NodeContract contractFor(PipelineTask task, OperatorManifestDTO operatorManifest) {
+        if (task == null || !StringUtils.hasText(task.getOperatorRef())) {
+            return contractFor(task);
+        }
+        TaskType type = task.getTaskType();
+        String taskType = type == null ? "UNKNOWN" : type.name();
+        String engine = type == null
+                ? "UNKNOWN"
+                : StringUtils.hasText(task.getEngine()) ? task.getEngine() : defaultEngine(type);
+        if (!OperatorG1Compatibility.supports(operatorManifest)) {
+            return NodeContract.empty(taskType, engine);
+        }
+        if (operatorManifest.inputPorts().isEmpty()) {
+            return new NodeContract(taskType, engine, Map.of(),
+                    Map.of("out", new OutputPort("out")), Set.of());
+        }
+        String name = String.valueOf(operatorManifest.inputPorts().get(0).get("name")).trim();
+        return new NodeContract(
+                taskType,
+                engine,
+                Map.of(name, new InputPort(name, true, 1, 1)),
+                Map.of("out", new OutputPort("out")),
+                Set.of());
     }
 
     private static String defaultEngine(TaskType type) {

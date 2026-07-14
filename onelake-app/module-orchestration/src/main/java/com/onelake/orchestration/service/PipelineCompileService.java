@@ -211,7 +211,8 @@ public class PipelineCompileService {
 
         // 数据流边是下游输入的事实来源。Spark 节点从入边资产推导输入表，
         // 用户只需要在画布连线一次，不必在每个节点 config 中重复维护 from_tables。
-        Map<String, String> generationErrors = applyDataflowInputs(tasks, edges, tenantId);
+        DataflowPreparation preparation = applyDataflowInputs(tasks, edges, tenantId);
+        Map<String, String> generationErrors = preparation.generationErrors();
 
         // 1. 节点级校验。
         Map<UUID, TaskCompileResult> resultsById = new LinkedHashMap<>();
@@ -227,7 +228,8 @@ public class PipelineCompileService {
         }
 
         // 2. 图级校验：环路、悬空边、反向跨引擎边等。
-        List<String> graphErrors = new ArrayList<>(validateGraph(tasks, edges, taskByKey));
+        List<String> graphErrors = new ArrayList<>(validateGraph(
+                tasks, edges, taskByKey, preparation.operatorManifests()));
         graphErrors.addAll(validateBranchMappings(tasks, edges, taskByKey));
         graphErrors.addAll(validateUpstreamReferences(tasks, edges));
 
@@ -908,12 +910,14 @@ public class PipelineCompileService {
      */
     private List<String> validateGraph(List<PipelineTask> tasks,
                                        List<PipelineTaskEdge> edges,
-                                       Map<String, PipelineTask> taskByKey) {
+                                       Map<String, PipelineTask> taskByKey,
+                                       Map<String, OperatorManifestDTO> operatorManifests) {
         List<String> errors = new ArrayList<>();
         Set<String> knownKeys = taskByKey.keySet();
         Map<String, PipelineNodePortRegistry.NodeContract> contractByKey = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
-            contractByKey.put(task.getTaskKey(), PipelineNodePortRegistry.contractFor(task));
+            contractByKey.put(task.getTaskKey(), PipelineNodePortRegistry.contractFor(
+                    task, operatorManifests.get(task.getTaskKey())));
         }
         Map<String, Map<String, Integer>> inputCounts = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
@@ -1064,7 +1068,7 @@ public class PipelineCompileService {
      * <p>边是输入资产、别名、端口和新鲜度策略的单一事实来源；编译器据此生成 SQL，
      * 避免画布边和节点 from_tables 配置发生双写漂移。
      */
-    private Map<String, String> applyDataflowInputs(List<PipelineTask> tasks,
+    private DataflowPreparation applyDataflowInputs(List<PipelineTask> tasks,
                                                     List<PipelineTaskEdge> edges,
                                                     UUID tenantId) {
         Map<String, PipelineTask> taskByKey = new LinkedHashMap<>();
@@ -1097,6 +1101,7 @@ public class PipelineCompileService {
         }
 
         Map<String, String> generationErrors = new LinkedHashMap<>();
+        Map<String, OperatorManifestDTO> operatorManifests = new LinkedHashMap<>();
         for (PipelineTask task : tasks) {
             if (!isSparkTask(task)) {
                 continue;
@@ -1120,6 +1125,7 @@ public class PipelineCompileService {
                     }
                     OperatorManifestDTO manifest = operatorService.getManifest(
                             tenantId, task.getOperatorRef(), task.getOperatorVersion());
+                    operatorManifests.put(task.getTaskKey(), manifest);
                     String fragment = operatorSqlGenerator.generate(manifest, cfg);
                     String sql = composeOperatorSql(task, manifest, cfg, fragment, inputs);
                     cfg.put("compiled_sql", sql);
@@ -1167,7 +1173,7 @@ public class PipelineCompileService {
             }
             task.setConfig(cfg.toString());
         }
-        return generationErrors;
+        return new DataflowPreparation(generationErrors, operatorManifests);
     }
 
     private void applyInputMetadata(ObjectNode cfg, List<DataflowInput> inputs) {
@@ -1541,6 +1547,12 @@ public class PipelineCompileService {
             String joinRole,
             String triggerPolicy,
             String freshnessPolicy
+    ) {}
+
+    /** SQL 生成阶段产生的错误及已经读取的锁定 Manifest，供后续图契约复用。 */
+    private record DataflowPreparation(
+            Map<String, String> generationErrors,
+            Map<String, OperatorManifestDTO> operatorManifests
     ) {}
 
     /** 派生字段名和受控表达式。 */

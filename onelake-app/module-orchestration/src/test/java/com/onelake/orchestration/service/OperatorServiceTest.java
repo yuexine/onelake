@@ -25,6 +25,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -253,7 +254,7 @@ class OperatorServiceTest {
     void registerCustomOperatorPersistsVersionAndAudits() {
         OperatorManifestDTO manifest = customManifest("custom.clean_phone", "1.0.0");
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq("custom.clean_phone"), any()))
-            .thenReturn(Optional.empty());
+            .thenReturn(List.of());
         when(operatorRepo.save(any(Operator.class))).thenAnswer(invocation -> {
             Operator operator = invocation.getArgument(0);
             operator.setId(UUID.fromString("22222222-2222-2222-2222-222222222222"));
@@ -277,7 +278,7 @@ class OperatorServiceTest {
     void installRejectsUnknownPinnedVersion() {
         Operator operator = builtinOperator("mask.partial");
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq("mask.partial"), any()))
-            .thenReturn(Optional.empty());
+            .thenReturn(List.of());
         when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull("mask.partial", OperatorScope.BUILTIN))
             .thenReturn(Optional.of(operator));
         when(versionRepo.findByOperatorIdAndVersion(operator.getId(), "9.9.9")).thenReturn(Optional.empty());
@@ -328,11 +329,230 @@ class OperatorServiceTest {
     }
 
     @Test
+    void listInstalledOperatorsReturnsOnlyActivePaletteOperators() {
+        Operator builtin = builtinOperator("mask.partial");
+        Operator deprecated = builtinOperator("transform.rename_columns", "TRANSFORM");
+        deprecated.setStatus(OperatorStatus.DEPRECATED);
+        Operator custom = customOperator("custom.clean_phone", "GOVERN");
+        Operator installedPrivate = customOperator("private.enrich_customer", "TRANSFORM");
+        installedPrivate.setTenantId(UUID.fromString("33333333-3333-3333-3333-333333333333"));
+        installedPrivate.setScope(OperatorScope.TENANT_PRIVATE);
+
+        OperatorInstall install = new OperatorInstall();
+        install.setTenantId(TENANT_ID);
+        install.setOperatorId(installedPrivate.getId());
+        install.setPinnedVersion("1.0.0");
+
+        OperatorManifestDTO builtinManifest = BuiltInOperatorCatalog.manifests().stream()
+            .filter(manifest -> manifest.operatorRef().equals("mask.partial"))
+            .findFirst().orElseThrow();
+        OperatorManifestDTO customManifest = customManifest("custom.clean_phone", "1.0.0");
+        OperatorManifestDTO privateManifest = new OperatorManifestDTO(
+            "private.enrich_customer", "1.0.0", "TRANSFORM", "TENANT_PRIVATE",
+            "客户补全", "补全客户字段", "AppstoreOutlined", List.of("转换"), List.of(port()),
+            Map.of("mode", "PASSTHROUGH_MODIFY"), paramsSchema(), "SPARK",
+            Map.of("kind", "COLUMN_EXPR", "sql", "trim({{ column }})"),
+            Map.of("type", "ONE_TO_ONE"), Map.of("effect", "INHERIT"), false,
+            new LinkedHashMap<>(), Map.of("defaultResourceGroup", "spark-default", "engine", "SPARK"),
+            List.of(Map.of("params", Map.of("column", "customer_name"))));
+
+        when(installRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(install));
+        when(operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN))
+            .thenReturn(List.of(builtin, deprecated));
+        when(operatorRepo.findByTenantIdAndScopeIn(eq(TENANT_ID), any()))
+            .thenReturn(List.of(custom));
+        when(operatorRepo.findById(installedPrivate.getId())).thenReturn(Optional.of(installedPrivate));
+        when(versionRepo.findByOperatorIdAndVersion(builtin.getId(), builtin.getLatestVersion()))
+            .thenReturn(Optional.of(version(builtin.getId(), builtinManifest)));
+        when(versionRepo.findByOperatorIdAndVersion(custom.getId(), custom.getLatestVersion()))
+            .thenReturn(Optional.of(version(custom.getId(), customManifest)));
+        when(versionRepo.findByOperatorIdAndVersion(installedPrivate.getId(), installedPrivate.getLatestVersion()))
+            .thenReturn(Optional.of(version(installedPrivate.getId(), privateManifest)));
+
+        List<OperatorDTO> result = service.listInstalledOperators();
+
+        assertThat(result).extracting(OperatorDTO::operatorRef)
+            .containsExactly("private.enrich_customer", "custom.clean_phone", "mask.partial");
+        assertThat(result).allMatch(OperatorDTO::installed);
+        assertThat(result).noneMatch(operator -> operator.operatorRef().equals("transform.rename_columns"));
+        assertThat(result.stream()
+            .filter(operator -> operator.operatorRef().equals("private.enrich_customer"))
+            .findFirst().orElseThrow().pinnedVersion()).isEqualTo("1.0.0");
+    }
+
+    @Test
+    void listInstalledOperatorsExcludesActiveOperatorsOutsideG1Contract() {
+        Operator supported = builtinOperator("mask.partial");
+        Operator unsupported = builtinOperator("join.inner", "JOIN");
+        OperatorManifestDTO supportedManifest = BuiltInOperatorCatalog.manifests().stream()
+            .filter(manifest -> manifest.operatorRef().equals("mask.partial"))
+            .findFirst().orElseThrow();
+        OperatorManifestDTO unsupportedManifest = BuiltInOperatorCatalog.manifests().stream()
+            .filter(manifest -> manifest.operatorRef().equals("join.inner"))
+            .findFirst().orElseThrow();
+
+        when(installRepo.findByTenantId(TENANT_ID)).thenReturn(List.of());
+        when(operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN))
+            .thenReturn(List.of(supported, unsupported));
+        when(operatorRepo.findByTenantIdAndScopeIn(eq(TENANT_ID), any())).thenReturn(List.of());
+        when(versionRepo.findByOperatorIdAndVersion(supported.getId(), supported.getLatestVersion()))
+            .thenReturn(Optional.of(version(supported.getId(), supportedManifest)));
+        when(versionRepo.findByOperatorIdAndVersion(unsupported.getId(), unsupported.getLatestVersion()))
+            .thenReturn(Optional.of(version(unsupported.getId(), unsupportedManifest)));
+
+        assertThat(service.listInstalledOperators())
+            .extracting(OperatorDTO::operatorRef)
+            .containsExactly("mask.partial");
+    }
+
+    @Test
+    void listInstalledOperatorsUsesSameRefPrecedenceAsManifestResolution() {
+        Operator builtin = builtinOperator("transform.select_columns", "TRANSFORM");
+        Operator custom = customOperator("transform.select_columns", "TRANSFORM");
+        custom.setId(UUID.fromString("44444444-4444-4444-4444-444444444444"));
+        OperatorManifestDTO customManifest = new OperatorManifestDTO(
+            "transform.select_columns", "1.0.0", "TRANSFORM", "CUSTOM",
+            "租户字段选择", "租户覆盖实现", "AppstoreOutlined", List.of("转换"), List.of(port()),
+            Map.of("mode", "DERIVE"), paramsSchema(), "SPARK",
+            Map.of("kind", "SELECT_EXPR", "sql", "{{ columns | join(', ') }}"),
+            Map.of("type", "ONE_TO_ONE"), Map.of("effect", "INHERIT"), false,
+            new LinkedHashMap<>(), Map.of("defaultResourceGroup", "spark-default", "engine", "SPARK"),
+            List.of(Map.of("params", Map.of("columns", List.of("tenant_id")))));
+
+        when(installRepo.findByTenantId(TENANT_ID)).thenReturn(List.of());
+        when(operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN)).thenReturn(List.of(builtin));
+        when(operatorRepo.findByTenantIdAndScopeIn(eq(TENANT_ID), any())).thenReturn(List.of(custom));
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
+            eq(TENANT_ID), eq("transform.select_columns"), any())).thenReturn(List.of(custom));
+        when(versionRepo.findByOperatorIdAndVersion(custom.getId(), "1.0.0"))
+            .thenReturn(Optional.of(version(custom.getId(), customManifest)));
+
+        List<OperatorDTO> palette = service.listInstalledOperators();
+        OperatorManifestDTO resolved = service.getManifest(TENANT_ID, "transform.select_columns", "1.0.0");
+
+        assertThat(palette).singleElement().satisfies(operator -> {
+            assertThat(operator.id()).isEqualTo(custom.getId());
+            assertThat(operator.manifest().displayName()).isEqualTo("租户字段选择");
+        });
+        assertThat(resolved.displayName()).isEqualTo("租户字段选择");
+    }
+
+    @Test
+    void listInstalledOperatorsReturnsManifestForPinnedVersion() {
+        Operator installed = customOperator("private.clean_phone", "GOVERN");
+        installed.setId(UUID.fromString("55555555-5555-5555-5555-555555555555"));
+        installed.setTenantId(UUID.fromString("33333333-3333-3333-3333-333333333333"));
+        installed.setScope(OperatorScope.TENANT_PRIVATE);
+        installed.setLatestVersion("2.0.0");
+        OperatorInstall install = new OperatorInstall();
+        install.setTenantId(TENANT_ID);
+        install.setOperatorId(installed.getId());
+        install.setPinnedVersion("1.0.0");
+        OperatorManifestDTO pinnedManifest = customManifest("private.clean_phone", "1.0.0");
+
+        when(installRepo.findByTenantId(TENANT_ID)).thenReturn(List.of(install));
+        when(operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN)).thenReturn(List.of());
+        when(operatorRepo.findByTenantIdAndScopeIn(eq(TENANT_ID), any())).thenReturn(List.of());
+        when(operatorRepo.findById(installed.getId())).thenReturn(Optional.of(installed));
+        when(versionRepo.findByOperatorIdAndVersion(installed.getId(), "1.0.0"))
+            .thenReturn(Optional.of(version(installed.getId(), pinnedManifest)));
+
+        assertThat(service.listInstalledOperators()).singleElement().satisfies(operator -> {
+            assertThat(operator.latestVersion()).isEqualTo("2.0.0");
+            assertThat(operator.pinnedVersion()).isEqualTo("1.0.0");
+            assertThat(operator.manifest().version()).isEqualTo("1.0.0");
+        });
+    }
+
+    @Test
+    void getInstalledManifestRejectsVersionDifferentFromPinnedVersion() {
+        Operator builtin = builtinOperator("mask.partial");
+        OperatorInstall install = new OperatorInstall();
+        install.setTenantId(TENANT_ID);
+        install.setOperatorId(builtin.getId());
+        install.setPinnedVersion("1.0.0");
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
+            eq(TENANT_ID), eq("mask.partial"), any())).thenReturn(List.of());
+        when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(
+            "mask.partial", OperatorScope.BUILTIN)).thenReturn(Optional.of(builtin));
+        when(installRepo.findByTenantIdAndOperatorId(TENANT_ID, builtin.getId()))
+            .thenReturn(Optional.of(install));
+
+        assertThatThrownBy(() -> service.getInstalledManifest(TENANT_ID, "mask.partial", "2.0.0"))
+            .isInstanceOf(BizException.class)
+            .hasMessageContaining("已固定版本").hasMessageContaining("1.0.0");
+
+        verify(versionRepo, never()).findByOperatorIdAndVersion(any(), anyString());
+    }
+
+    @Test
+    void sameRefTenantCandidatesUseStableIdForPaletteAndManifestResolution() {
+        String ref = "custom.clean_phone";
+        Operator laterCustom = customOperator(ref, "GOVERN");
+        laterCustom.setId(UUID.fromString("44444444-4444-4444-4444-444444444444"));
+        Operator earlierPrivate = customOperator(ref, "GOVERN");
+        earlierPrivate.setId(UUID.fromString("11111111-1111-1111-1111-111111111112"));
+        earlierPrivate.setScope(OperatorScope.TENANT_PRIVATE);
+        OperatorManifestDTO manifest = customManifest(ref, "1.0.0");
+
+        when(installRepo.findByTenantId(TENANT_ID)).thenReturn(List.of());
+        when(operatorRepo.findByScopeAndTenantIdIsNull(OperatorScope.BUILTIN)).thenReturn(List.of());
+        when(operatorRepo.findByTenantIdAndScopeIn(eq(TENANT_ID), any()))
+            .thenReturn(List.of(laterCustom, earlierPrivate));
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq(ref), any()))
+            .thenReturn(List.of(laterCustom, earlierPrivate));
+        when(versionRepo.findByOperatorIdAndVersion(earlierPrivate.getId(), "1.0.0"))
+            .thenReturn(Optional.of(version(earlierPrivate.getId(), manifest)));
+
+        List<OperatorDTO> palette = service.listInstalledOperators();
+        OperatorManifestDTO resolved = service.getManifest(TENANT_ID, ref, "1.0.0");
+
+        assertThat(palette).singleElement().extracting(OperatorDTO::id)
+            .isEqualTo(earlierPrivate.getId());
+        assertThat(resolved.operatorRef()).isEqualTo(ref);
+        verify(versionRepo, never()).findByOperatorIdAndVersion(laterCustom.getId(), "1.0.0");
+    }
+
+    @Test
+    void validateRejectsNullExampleEntry() {
+        OperatorManifestDTO base = customManifest("custom.clean_phone", "1.0.0");
+        List<Map<String, Object>> examples = new ArrayList<>();
+        examples.add(null);
+        OperatorManifestDTO invalid = new OperatorManifestDTO(
+            base.operatorRef(), base.version(), base.category(), base.scope(),
+            base.displayName(), base.description(), base.icon(), base.tags(),
+            base.inputPorts(), base.outputSchema(), base.paramsSchema(), base.compileTarget(),
+            base.template(), base.lineageRule(), base.securityRule(), base.qualityEmit(),
+            base.policy(), base.resourceHint(), examples);
+
+        OperatorValidationResultDTO result = service.validateOperator(invalid);
+
+        assertThat(result.ok()).isFalse();
+        assertThat(result.errors()).contains("examples[0] 不能为空");
+    }
+
+    @Test
+    void installedCheckTreatsTenantOwnedOperatorAsInstalledAndRejectsDeprecatedOperator() {
+        Operator custom = customOperator("custom.clean_phone", "GOVERN");
+        Operator deprecated = builtinOperator("mask.partial");
+        deprecated.setStatus(OperatorStatus.DEPRECATED);
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
+            eq(TENANT_ID), eq("custom.clean_phone"), any())).thenReturn(List.of(custom));
+        when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
+            eq(TENANT_ID), eq("mask.partial"), any())).thenReturn(List.of());
+        when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull("mask.partial", OperatorScope.BUILTIN))
+            .thenReturn(Optional.of(deprecated));
+
+        assertThat(service.isInstalled(TENANT_ID, "custom.clean_phone")).isTrue();
+        assertThat(service.isInstalled(TENANT_ID, "mask.partial")).isFalse();
+    }
+
+    @Test
     void installRejectsDeprecatedOperator() {
         Operator operator = builtinOperator("mask.partial");
         operator.setStatus(OperatorStatus.DEPRECATED);
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq("mask.partial"), any()))
-            .thenReturn(Optional.empty());
+            .thenReturn(List.of());
         when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull("mask.partial", OperatorScope.BUILTIN))
             .thenReturn(Optional.of(operator));
 
@@ -578,7 +798,7 @@ class OperatorServiceTest {
         OperatorManifestDTO manifest = sparkManifest("custom.spark_dedupe", true);
         Operator operator = customOperator("custom.spark_dedupe", "TRANSFORM");
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq("custom.spark_dedupe"), any()))
-            .thenReturn(Optional.of(operator));
+            .thenReturn(List.of(operator));
         when(versionRepo.findByOperatorIdAndVersion(operator.getId(), "1.0.0"))
             .thenReturn(Optional.of(version(operator.getId(), manifest)));
         Map<String, Object> graph = new LinkedHashMap<>();
@@ -600,7 +820,7 @@ class OperatorServiceTest {
         OperatorManifestDTO lockedManifest = customManifest("custom.clean_phone", "1.2.3");
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(
                 eq(TENANT_ID), eq("custom.clean_phone"), any()))
-                .thenReturn(Optional.of(operator));
+                .thenReturn(List.of(operator));
         when(versionRepo.findByOperatorIdAndVersion(operator.getId(), "1.2.3"))
                 .thenReturn(Optional.of(version(operator.getId(), lockedManifest)));
 
@@ -662,7 +882,7 @@ class OperatorServiceTest {
             .orElseThrow();
         Operator operator = builtinOperator(ref, manifest.category());
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq(ref), any()))
-            .thenReturn(Optional.empty());
+            .thenReturn(List.of());
         when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(ref, OperatorScope.BUILTIN))
             .thenReturn(Optional.of(operator));
         when(versionRepo.findByOperatorIdAndVersion(operator.getId(), "1.0.0"))
@@ -677,7 +897,7 @@ class OperatorServiceTest {
         Operator operator = builtinOperator(ref, manifest.category());
         operator.setStatus(OperatorStatus.DEPRECATED);
         when(operatorRepo.findByTenantIdAndOperatorRefAndScopeIn(eq(TENANT_ID), eq(ref), any()))
-            .thenReturn(Optional.empty());
+            .thenReturn(List.of());
         when(operatorRepo.findByOperatorRefAndScopeAndTenantIdIsNull(ref, OperatorScope.BUILTIN))
             .thenReturn(Optional.of(operator));
     }

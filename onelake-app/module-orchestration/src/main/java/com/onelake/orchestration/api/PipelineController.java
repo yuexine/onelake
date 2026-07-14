@@ -8,6 +8,7 @@ import com.onelake.orchestration.dto.OdsDwdTemplateRequest;
 import com.onelake.orchestration.dto.OdsDwdTemplateResult;
 import com.onelake.orchestration.dto.PipelineCompilePreview;
 import com.onelake.orchestration.dto.PipelineTaskDTO;
+import com.onelake.orchestration.dto.OperatorTaskCreateRequest;
 import com.onelake.orchestration.dto.PipelineTaskEdgeDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeRequest;
 import com.onelake.orchestration.dto.PipelineTaskRequest;
@@ -101,6 +102,16 @@ public class PipelineController {
     public ApiResponse<PipelineTaskDTO> createTask(@PathVariable UUID dagId,
                                                     @RequestBody PipelineTaskRequest req) {
         return ApiResponse.ok(pipelineService.createTask(dagId, req));
+    }
+
+    /** 根据锁定版本 Manifest 生成标准 SPARK_SQL 节点。 */
+    @PostMapping("/{dagId}/tasks/from-operator")
+    @PreAuthorize("hasRole('DE')")
+    public ApiResponse<PipelineTaskDTO> createTaskFromOperator(
+            @PathVariable UUID dagId,
+            @RequestBody OperatorTaskCreateRequest request) {
+        return ApiResponse.ok(pipelineService.createTaskFromOperator(
+                dagId, request.operatorRef(), request.version(), request.position()));
     }
 
     /** 按稳定 taskKey 更新节点配置。 */

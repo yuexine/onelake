@@ -16,6 +16,7 @@ import com.onelake.orchestration.domain.enums.TaskType;
 import com.onelake.orchestration.dto.OdsDwdTemplateRequest;
 import com.onelake.orchestration.dto.OdsDwdTemplateResult;
 import com.onelake.orchestration.dto.OperatorManifestDTO;
+import com.onelake.orchestration.dto.OperatorTaskCreateRequest;
 import com.onelake.orchestration.dto.PipelineTaskDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeDTO;
 import com.onelake.orchestration.dto.PipelineTaskEdgeRequest;
@@ -47,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -345,13 +347,65 @@ public class PipelineService {
         return PipelineTaskDTO.of(t);
     }
 
+    /**
+     * 按锁定版本 Manifest 创建标准可编译节点。
+     *
+     * <p>该命令只接受 Palette 已安装的 ACTIVE 算子，服务端拥有 taskType、执行分类、
+     * 引擎、默认参数和端口快照的映射权，客户端不能通过通用任务请求覆盖这些字段。</p>
+     */
+    @Transactional
+    public PipelineTaskDTO createTaskFromOperator(UUID dagId,
+                                                  String operatorRef,
+                                                  String version,
+                                                  OperatorTaskCreateRequest.Position position) {
+        UUID tenantId = requireTenant();
+        Dag dag = getPipelineForUpdate(dagId, tenantId);
+        String normalizedRef = normalizeOptional(operatorRef);
+        String normalizedVersion = normalizeOptional(version);
+        if (normalizedRef == null) {
+            throw new BizException(40035, "operatorRef 不能为空");
+        }
+        if (normalizedVersion == null) {
+            throw new BizException(40036, "operatorVersion 不能为空，算子节点必须锁定版本");
+        }
+        if (position == null || position.x() == null || position.y() == null) {
+            throw new BizException(40038, "算子节点 position.x/position.y 不能为空");
+        }
+        OperatorManifestDTO manifest = operatorService.getInstalledManifest(
+                tenantId, normalizedRef, normalizedVersion);
+        validateG1OperatorManifest(manifest, normalizedRef, normalizedVersion);
+        String taskKey = nextOperatorTaskKey(dagId, normalizedRef);
+        Map<String, Object> config = defaultOperatorConfig(manifest);
+
+        PipelineTask task = new PipelineTask();
+        task.setTenantId(tenantId);
+        task.setDagId(dagId);
+        task.setTaskKey(taskKey);
+        task.setTaskType(TaskType.SPARK_SQL);
+        task.setCategory(TaskType.SPARK_SQL.category());
+        task.setName(StringUtils.hasText(manifest.displayName())
+                ? manifest.displayName().trim() : normalizedRef);
+        task.setEngine(SPARK_SQL_ENGINE);
+        task.setTargetFqn(defaultOperatorTargetFqn(config, taskKey));
+        task.setOperatorRef(normalizedRef);
+        task.setOperatorVersion(normalizedVersion);
+        task.setConfig(JsonUtil.toJson(config));
+        task.setPositionX(position.x());
+        task.setPositionY(position.y());
+        task = taskRepo.save(task);
+        markUnpublishedChanges(dag);
+        log.info("流水线 {} 已从算子创建节点：key={} operator={}@{}",
+                dagId, taskKey, normalizedRef, normalizedVersion);
+        return PipelineTaskDTO.of(task);
+    }
+
     /** 更新节点可编辑字段，并重置编译状态等待重新校验。 */
     @Transactional
     public PipelineTaskDTO updateTask(UUID dagId, String taskKey, PipelineTaskRequest req) {
         Dag dag = getPipelineForUpdate(dagId, requireTenant());
         PipelineTask t = taskRepo.findByDagIdAndTaskKey(dagId, taskKey)
                 .orElseThrow(() -> new BizException(40400, "task 不存在: " + taskKey));
-        validateTaskRequest(req, false, t.getTaskType());
+        validateTaskRequest(req, false, t);
         if (req.name() != null) t.setName(req.name());
         if (StringUtils.hasText(req.engine())) t.setEngine(normalizeTaskEngine(t.getTaskType().name(), req.engine()));
         if (req.targetFqn() != null) t.setTargetFqn(req.targetFqn());
@@ -662,7 +716,7 @@ public class PipelineService {
     /** 校验节点请求的必填字段、支持类型和 Spark-only 引擎边界。 */
     private void validateTaskRequest(PipelineTaskRequest req,
                                      boolean forCreate,
-                                     TaskType existingTaskType) {
+                                     PipelineTask existingTask) {
         if (forCreate && !StringUtils.hasText(req.taskKey())) {
             throw new BizException(40020, "taskKey 不能为空");
         }
@@ -678,29 +732,91 @@ public class PipelineService {
             throw new BizException(40022, "operatorRef 与 operatorVersion 必须成对提交并锁定版本");
         }
         if (hasOperatorRef) {
+            UUID tenantId = requireTenant();
             String effectiveTaskType = forCreate
                     ? req.taskType()
-                    : existingTaskType == null ? req.taskType() : existingTaskType.name();
+                    : existingTask == null ? req.taskType() : existingTask.getTaskType().name();
             if (!TaskType.SPARK_SQL.name().equals(effectiveTaskType)) {
                 throw new BizException(40023, "G1 算子绑定仅支持 SPARK_SQL 节点");
             }
-            OperatorManifestDTO manifest = operatorService.getManifest(
-                    requireTenant(), req.operatorRef().trim(), req.operatorVersion().trim());
-            Object rawKind = manifest.template() == null ? null : manifest.template().get("kind");
-            if (rawKind == null && manifest.template() != null) {
-                rawKind = manifest.template().get("templateKind");
-            }
-            try {
-                if (!"SPARK".equalsIgnoreCase(manifest.compileTarget())) {
-                    throw new IllegalArgumentException("compileTarget");
+            String operatorRef = req.operatorRef().trim();
+            String operatorVersion = req.operatorVersion().trim();
+            boolean keepsLockedBinding = !forCreate
+                    && existingTask != null
+                    && Objects.equals(operatorRef, existingTask.getOperatorRef())
+                    && Objects.equals(operatorVersion, existingTask.getOperatorVersion());
+            OperatorManifestDTO manifest = keepsLockedBinding
+                    ? operatorService.getManifest(tenantId, operatorRef, operatorVersion)
+                    : operatorService.getInstalledManifest(tenantId, operatorRef, operatorVersion);
+            validateG1OperatorManifest(manifest, req.operatorRef(), req.operatorVersion());
+        }
+    }
+
+    private void validateG1OperatorManifest(OperatorManifestDTO manifest,
+                                            String operatorRef,
+                                            String version) {
+        if (!OperatorG1Compatibility.supports(manifest)) {
+            throw new BizException(40023, "算子模板不在 G1 Spark SQL 支持范围内: "
+                    + operatorRef + "@" + version);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> defaultOperatorConfig(OperatorManifestDTO manifest) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        if (manifest.examples() != null && !manifest.examples().isEmpty()) {
+            Map<String, Object> example = manifest.examples().get(0);
+            if (example != null) {
+                Object params = example.get("params");
+                if (params instanceof Map<?, ?> values) {
+                    values.forEach((key, value) -> config.put(String.valueOf(key), value));
                 }
-                OperatorSqlGenerator.TemplateKind.valueOf(
-                        String.valueOf(rawKind).trim().toUpperCase(Locale.ROOT));
-            } catch (RuntimeException ex) {
-                throw new BizException(40023, "算子模板不在 G1 Spark SQL 支持范围内: "
-                        + req.operatorRef() + "@" + req.operatorVersion());
             }
         }
+        if (manifest.paramsSchema() != null
+                && manifest.paramsSchema().get("properties") instanceof Map<?, ?> properties) {
+            properties.forEach((key, schema) -> {
+                if (schema instanceof Map<?, ?> property && property.containsKey("default")) {
+                    config.put(String.valueOf(key), property.get("default"));
+                }
+            });
+        }
+
+        Map<String, Object> contract = new LinkedHashMap<>();
+        contract.put("category", manifest.category());
+        contract.put("inputPorts", manifest.inputPorts() == null ? List.of() : manifest.inputPorts());
+        contract.put("outputSchema", manifest.outputSchema() == null ? Map.of() : manifest.outputSchema());
+        config.put("_operator_contract", contract);
+        return config;
+    }
+
+    private String nextOperatorTaskKey(UUID dagId, String operatorRef) {
+        String base = operatorRef.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+|_+$", "");
+        if (!StringUtils.hasText(base)) {
+            base = "operator";
+        }
+        base = truncateTaskKey(base, 128);
+        String candidate = base;
+        int suffix = 2;
+        while (taskRepo.findByDagIdAndTaskKey(dagId, candidate).isPresent()) {
+            String suffixText = "_" + suffix++;
+            candidate = truncateTaskKey(base, 128 - suffixText.length()) + suffixText;
+        }
+        return candidate;
+    }
+
+    private String truncateTaskKey(String value, int maxLength) {
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    private String defaultOperatorTargetFqn(Map<String, Object> config, String taskKey) {
+        Object configured = config.get("targetFqn");
+        if (configured instanceof String value && StringUtils.hasText(value)) {
+            return value.trim();
+        }
+        return "onelake.tmp." + taskKey;
     }
 
     private String normalizeOptional(String value) {

@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-流水线模块重设计：Spark-only 统一编辑器 + 任务一等实体 + 数据流边契约闭环（阶段 110 已完成；后续扩展 Union/Lookup/Branch 与水位持久化）
+流水线与算子市场 G2 后端闭环：已安装 Palette + Manifest 创建标准 pipeline_task + 二轮 Review 契约修复（阶段 112 已完成；前端拖拽与 Inspector 进入 9.4）
 
 ## 各阶段
 
@@ -881,6 +881,35 @@
 - [x] 删除未接入 Spark 主链路的旧 dbt 质量门禁编译器
 - **状态：** complete
 
+### 阶段 111：G2 算子拖入生成可执行节点
+- [x] 读取 RTK、M4 9.2 任务卡、当前 G1 实现和近期提交
+- [x] 确认 manifest 默认 config 的取值口径
+- [x] 比较方案并确认最小设计
+- [x] 审阅并确认已提交的设计规格
+- [x] TDD：补已安装算子集合与安装判定测试
+- [x] TDD：补从 Manifest 创建 pipeline_task 字段/默认配置/失败语义测试
+- [x] 实现 `GET /operators/installed` 与 OperatorService 安装集合能力
+- [x] 实现 `POST /pipelines/{dagId}/tasks/from-operator` 与专用请求 DTO
+- [x] 补从输入算子创建节点后进入 9.1 的编译闭环测试
+- [x] Review 修复：Palette 过滤到 G1 可执行集合并与创建命令共享兼容策略
+- [x] Review 修复：按 ref 可见性优先级去重并返回 pinnedVersion 对应 Manifest
+- [x] Review 修复：编译图从锁定 Manifest 读取自定义输入端口契约
+- [x] Review 修复：补同名、固定版本、自定义端口、源端口和多输入回归测试
+- [x] 运行聚焦测试、module-orchestration 全量测试与 `git diff --check`
+- **状态：** complete
+
+### 阶段 112：G2 二轮 Review 修复与提交
+- [x] 核对 pinnedVersion、同层同名解析、既有废弃节点更新和空 example 四项问题
+- [x] 确认固定版本冲突返回业务错误，不静默改写请求
+- [x] 更新并提交 G2 二轮修复设计规格
+- [x] TDD：补四项问题的失败回归测试
+- [x] 集中 OperatorService 已安装算子解析并统一稳定 ID 选择
+- [x] 区分创建/改绑与保持既有锁定绑定的校验语义
+- [x] 加固 Manifest example 校验和历史快照默认配置提取
+- [x] 运行聚焦测试、module-orchestration 全量测试和 diff 检查
+- [x] 按 G2 范围暂存并提交本轮代码
+- **状态：** complete
+
 ## 关键问题
 1. 当前 `module-integration` 已落库和暴露的能力边界是什么？
 2. 前端数据集成页面实际需要哪些后端接口和异步状态？
@@ -901,6 +930,12 @@
 ## 遇到的错误
 | 错误 | 尝试次数 | 解决方案 |
 |------|---------|---------|
+| 首次新增 G2 设计规格的 patch 有一行缺少新增标记，校验拒绝应用 | 1 | 修正 patch 格式后重新应用，规格文件已完整写入并通过占位符与空白检查 |
+| G2 首次聚焦测试未带 `-am`，module-orchestration 编译时找不到 reactor 内 `InternalApiTokenFilter` | 1 | 改用 `-pl module-orchestration -am` 并关闭上游模块指定测试缺失失败，先构建依赖模块再进入 G2 红灯测试 |
+| G2 首轮绿灯测试有两处预期偏差：Spark SQL FQN 会安全加反引号，Palette 按 OperatorCategory 枚举排序 | 1 | 保持现有安全生成与排序契约，修正测试断言为带引号 SQL 和真实分类顺序 |
+| G2 二轮失败测试首次 testCompile 找不到 `getInstalledManifest`，且同名查询仍返回 Optional | 1 | 按确认设计新增集中安装 Manifest 解析，并将同层查询改为 List 后稳定排序 |
+| G2 二轮首轮绿灯测试：同名夹具 UUID 高位导致自然序与字面序不同，编译 mock 缺少 getManifest | 1 | 使用无符号高位歧义的固定 UUID，并为 9.1 编译阶段单独提供锁定 Manifest mock |
+| 测试汇总读取命令在 `onelake-app/` 下重复拼接 `onelake-app/` 路径 | 1 | 改用相对模块路径并以 XML 解析汇总 Surefire 结果 |
 | 运行中的后端将 `/api/v1/integration/datasources/{id}/schemas` 当作静态资源处理并返回 500 | 1 | 执行 `mvn -q install -DskipTests -Djacoco.skip=true` 刷新本地 SNAPSHOT，并重启 `onelake-backend` |
 | 刷新模块后启动失败：`alertRepository` Bean 命名冲突 | 1 | 将质量模块仓储重命名为 `QualityAlertRepository` |
 | 刷新模块后启动失败：两个 `Alert` Entity 默认实体名冲突 | 1 | 为通用告警和质量告警实体分别指定 `CommonAlert`、`QualityAlert` |

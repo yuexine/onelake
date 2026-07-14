@@ -49,6 +49,15 @@ public class OperatorController {
     }
 
     @Operation(
+        summary = "查询已安装算子",
+        description = "用途：返回可直接拖入流水线 Palette 的 ACTIVE 内置、租户自定义和显式安装算子。"
+    )
+    @GetMapping("/installed")
+    public ApiResponse<List<OperatorDTO>> installed() {
+        return ApiResponse.ok(service.listInstalledOperators());
+    }
+
+    @Operation(
         summary = "获取算子详情",
         description = "用途：返回算子当前 Manifest 和版本列表，供市场详情与画布属性面板使用。"
     )

@@ -1,5 +1,47 @@
 # 进度日志
 
+## 会话：2026-07-14（G2 算子拖入生成可执行节点）
+
+### 阶段 111：设计前上下文核对
+- **状态：** in_progress
+- 读取 `RTK.md`、M4 9.1/9.2 任务卡、现有规划文件和相关历史实现记录。
+- 检查当前 HEAD 与工作区，确认只有既有未跟踪运行产物，不触碰这些文件。
+- 定位 `PipelineService`、`OperatorService`、`OperatorController`、`PipelineController`、`PipelineTask`、`OperatorManifestDTO` 与现有测试。
+- 确认 G1 编译链、精确版本 Manifest 查询和标准 `pipeline_task` 字段已经就绪；业务代码尚未修改，等待设计确认。
+- 用户确认默认 config 使用 Schema default 优先、首个示例参数兜底的规则；进入方案比较。
+- 用户确认独立命令接口方案；开始分段确认架构、数据流、错误处理和测试设计。
+- 用户已确认架构/API、节点生成数据流、错误处理与测试设计。
+- 新增并自检 `docs/superpowers/specs/2026-07-14-operator-to-pipeline-task-design.md`；占位符扫描和 `git diff --check` 通过。
+- 首次新增规格的 patch 因一行缺少 `+` 被拒绝，修正格式后成功，未产生残缺文件。
+- 设计规格已单独提交为 `1a9b0ca docs(orchestration): design operator task creation`，等待用户最终审阅后进入实现。
+- 用户已确认书面规格；`writing-plans` 技能不可用，已将阶段 111 展开为 TDD、服务/API 实现、编译闭环和全量验证步骤作为回退计划。
+- 已新增 G2 失败测试；首次聚焦命令未带 `-am`，被 reactor 内 `InternalApiTokenFilter` 依赖缺失提前截断，下一次改用联动构建命令。
+- G2 服务/API 最小实现已写入；聚焦测试进入运行后发现两处测试预期偏差（FQN 安全反引号、分类排序），保留生产契约并修正测试。
+- 聚焦测试 `OperatorServiceTest,PipelineOperatorTaskCreationTest,PipelineStatusMachineTest` 已通过。
+- 用户要求的 `mvn -q -pl module-orchestration -am test` 已通过；日志中的 receipt failure、Netty native DNS 等为既有测试场景/环境日志，Maven exit code 为 0。
+- 已同步编排 V2 升级计划和 M4 9.2 任务卡，明确 G2 后端已实现、9.4 前端仍未实施。
+- Surefire 汇总：`module-common` 20 个测试、`module-orchestration` 467 个测试，failure/error/skipped 均为 0。
+- `git diff --check` 通过；既有未跟踪 `onelake-app/dagster/__pycache__/` 保持不动。
+- Code review 发现并修复四项契约漂移：G1 不支持算子进入 Palette、同 ref 身份歧义、pinnedVersion 与 Manifest 不一致、Manifest 端口未参与图校验。
+- 新增共享 `OperatorG1Compatibility`；Palette 和创建命令统一模板、端口基数及源模板组合判定。
+- 编译阶段复用锁定 Manifest 构造端口契约；补自定义端口、源端口、多输入拒绝等回归测试。
+- Review 修复后的聚焦测试与 `mvn -q -pl module-orchestration -am test` 再次通过。
+- 阶段 111 完成。
+
+### 阶段 112：G2 二轮 Review 修复与提交
+- **状态：** complete
+- 复核未提交实现、现有 G2 规格、Operator 表唯一约束和创建/更新调用链，确认四项 Review 问题均可由当前代码路径触发。
+- 用户确认固定版本冲突必须返回业务错误，不允许服务端静默改写版本。
+- 二轮修复设计已写入现有规格并提交为 `5637111 docs(orchestration): specify operator review fixes`。
+- `writing-plans` 技能不可用，继续使用阶段 112 的 TDD、实现、全量验证和提交清单作为回退实施计划。
+- 已新增四类失败测试；首次聚焦测试按预期在 testCompile 红灯，错误集中为尚未实现的 `getInstalledManifest` 和 Repository 多行返回契约。
+- 已开始实现集中安装解析、稳定 ID 选择、创建/改绑校验分流和 example 空值防御。
+- 首轮绿灯测试暴露两处测试夹具问题：UUID 自然序对高位按有符号值比较，且编译阶段仍应单独 mock 锁定 Manifest 读取；均不改变生产契约。
+- 聚焦测试通过：`OperatorServiceTest`、`PipelineOperatorTaskCreationTest`、`PipelineStatusMachineTest` 合计 64 个测试，失败/错误为 0。
+- 用户要求的 `mvn -q -pl module-orchestration -am test` 通过；Surefire 汇总为 501 个测试，失败/错误/跳过均为 0。
+- 一次测试汇总读取误在 `onelake-app/` 工作目录下重复拼接路径，修正相对路径后成功读取报告；未影响代码或测试结果。
+- 完成提交前复核与 `git diff --check`；无关湖仓/建模文档和 `dagster/__pycache__` 明确排除在 G2 提交之外。
+
 ## 会话：2026-06-15
 
 ### 阶段 1：上下文定位与范围确认

@@ -533,6 +533,50 @@ class PipelineSparkCompileTest {
     }
 
     @Test
+    void operatorGraphUsesInputPortNameFromLockedManifest() {
+        PipelineTask source = syncRefTask("source_users", "onelake.ods.users");
+        PipelineTask operator = operatorTask(
+                "clean_phone", "custom.clean_phone", "1.0.0",
+                "onelake.dwd.users_clean", "{\"column\":\"phone\"}");
+        OperatorManifestDTO manifest = operatorManifest(
+                "custom.clean_phone", "1.0.0", "COLUMN_EXPR",
+                "trim({{ column }})", List.of(Map.of("name", "source", "cardinality", "ONE")));
+        when(operatorService.getManifest(tenantId, "custom.clean_phone", "1.0.0"))
+                .thenReturn(manifest);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(source, operator),
+                List.of(edge("source_users", "clean_phone", "source", "src")));
+
+        assertThat(result.allValidated()).isTrue();
+        assertThat(result.graphErrors()).isEmpty();
+        assertThat(operator.getConfig())
+                .contains("CREATE OR REPLACE TABLE `onelake`.`dwd`.`users_clean` AS")
+                .contains("FROM `onelake`.`ods`.`users` `src`");
+    }
+
+    @Test
+    void sourceOperatorRejectsInputEdgeUsingLockedManifest() {
+        PipelineTask upstream = syncRefTask("unexpected_upstream", "onelake.ods.users");
+        OperatorManifestDTO manifest = BuiltInOperatorCatalog.manifests().stream()
+                .filter(item -> item.operatorRef().equals("input.ods_table"))
+                .findFirst().orElseThrow();
+        PipelineTask sourceOperator = operatorTask(
+                "ods_source", manifest.operatorRef(), manifest.version(),
+                "onelake.tmp.ods_source", "{\"sourceFqn\":\"ods.orders\"}");
+        when(operatorService.getManifest(tenantId, manifest.operatorRef(), manifest.version()))
+                .thenReturn(manifest);
+
+        PipelineCompileResult result = service.compile(
+                dagId, tenantId, List.of(upstream, sourceOperator),
+                List.of(edge("unexpected_upstream", "ods_source", "in", "src")));
+
+        assertThat(result.allValidated()).isFalse();
+        assertThat(result.graphErrors())
+                .anyMatch(error -> error.contains("does not accept input port 'in'"));
+    }
+
+    @Test
     void appendSelectExpressionKeepsUpstreamColumnsBeforeDerivedColumn() {
         PipelineTask source = syncRefTask("source_users", "onelake.ods.users");
         OperatorManifestDTO manifest = BuiltInOperatorCatalog.manifests().stream()
@@ -689,6 +733,15 @@ class PipelineSparkCompileTest {
                                                  String kind,
                                                  String sql,
                                                  boolean source) {
+        return operatorManifest(ref, version, kind, sql,
+                source ? List.of() : List.of(Map.of("name", "in", "cardinality", "ONE")));
+    }
+
+    private OperatorManifestDTO operatorManifest(String ref,
+                                                 String version,
+                                                 String kind,
+                                                 String sql,
+                                                 List<Map<String, Object>> inputPorts) {
         return new OperatorManifestDTO(
                 ref,
                 version,
@@ -698,7 +751,7 @@ class PipelineSparkCompileTest {
                 null,
                 null,
                 List.of(),
-                source ? List.of() : List.of(Map.of("name", "in", "cardinality", "ONE")),
+                inputPorts,
                 Map.of("mode", "DERIVE"),
                 Map.of("type", "object", "properties", Map.of()),
                 "SPARK",

@@ -190,3 +190,76 @@ git diff --check
 - 不改变 G1 模板渲染规则；
 - 不实现算子版本升级和发布快照迁移，该能力属于 G3；
 - 不把 Manifest 业务分类扩展成新的 TaskCategory，G2 生成节点仍属于 EXEC。
+
+## 11. Review 修复设计
+
+### 11.1 Palette 与创建命令共享可执行集合
+
+已安装不等于当前 G1 可执行。Palette 在合并安装来源后，还必须使用与
+`PipelineService#createTaskFromOperator` 相同的兼容性规则过滤有效 Manifest：
+
+- `compileTarget=SPARK`；
+- template kind 属于 `SELECT_EXPR`、`COLUMN_EXPR`、`FILTER`、`SPARK_SQL`、
+  `SPARK_SINK`、`RAW_SQL`；
+- `inputPorts` 要么为空（源算子），要么只包含一个 `cardinality=ONE` 的命名端口，
+  与 G1 非源模板“恰好一条上游输入”的现有约束一致。
+
+兼容性判断抽成编排模块内的单一策略，列表过滤和创建前校验共同调用，避免
+`JOIN`、`AGG`、`QUALITY_ASSERT` 等算子在 Palette 可见但拖入后失败。
+
+### 11.2 operatorRef 唯一解析语义
+
+创建命令继续保持已确认的 `operatorRef + version` 契约，不增加 `operatorId`，也不在
+本阶段引入数据库迁移。Palette 按创建命令的可见性优先级，为每个 `operatorRef`
+只返回一个候选：
+
+1. 当前租户自有 `CUSTOM/TENANT_PRIVATE`；
+2. 平台 `BUILTIN`；
+3. 当前租户显式安装的其他算子。
+
+同一层级存在历史同名数据时使用稳定 ID 顺序选择，创建时的可见算子解析使用同一
+排序规则。这样 Palette 展示项与 `getManifest(tenantId, ref, version)` 最终读取的算子
+身份一致，不会把用户选择的一个算子静默替换为另一个算子。
+
+### 11.3 pinnedVersion 与 Manifest 一致
+
+`OperatorDTO.latestVersion` 继续表达算子最新发布版本，`pinnedVersion` 继续表达租户
+固定版本；但响应中的 `manifest` 必须使用当前租户的有效版本：有 pinnedVersion 时
+读取固定版本，否则读取 latestVersion。已安装列表基于该有效 Manifest 执行 G1
+兼容性过滤，前端也使用同一份 Manifest 渲染参数与端口。
+
+若固定版本快照缺失，安装记录已经违反服务端写入约束，列表不回退 latest，避免以
+错误版本悄悄替代；该条目不进入可拖入 Palette。
+
+### 11.4 编译端口使用锁定 Manifest
+
+`_operator_contract` 继续作为 9.4 的展示快照，但不能成为编译校验的可信来源，因为
+节点 config 可编辑。`PipelineCompileService` 在构造节点端口契约时，对携带
+`operatorRef/operatorVersion` 的任务读取锁定版本 Manifest，并将已经通过 G1
+兼容性校验的 `inputPorts` 转换为编译端口：
+
+- 空数组表示源算子，不接受输入；
+- 单个 `ONE` 端口保留 Manifest 中的任意合法端口名，并要求恰好一条入边；
+- 输出端口沿用 G1 标准 `out`。
+
+普通 SPARK_SQL/PYSPARK 节点继续使用现有静态 `in/out` 契约。Manifest 读取失败作为
+对应节点的编译错误返回，不信任或回退 `_operator_contract`。
+
+### 11.5 回归测试
+
+新增失败测试后再实现，至少覆盖：
+
+- ACTIVE 但 template kind 不受 G1 支持的已安装算子不进入 Palette；
+- 租户自有算子与 BUILTIN 同 ref 时，Palette 与创建命令均选择租户自有算子；
+- 安装固定旧版本时，DTO 的 pinnedVersion 和 manifest.version 一致；
+- 自定义 G1 算子声明非 `in` 输入端口时，使用该端口连边可通过图校验和 SQL 编译；
+- 声明多输入端口或 `MANY` 的算子不进入 Palette，创建命令也按相同规则拒绝；
+- 源算子仍拒绝输入边，普通 SPARK_SQL 节点的历史 `in/out` 行为保持不变。
+
+最终继续执行：
+
+```bash
+cd onelake-app
+mvn -q -pl module-orchestration -am test
+git diff --check
+```

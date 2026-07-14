@@ -2,6 +2,7 @@ package com.onelake.orchestration.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.onelake.common.context.TenantContext;
+import com.onelake.common.exception.BizException;
 import com.onelake.common.util.JsonUtil;
 import com.onelake.orchestration.domain.entity.Dag;
 import com.onelake.orchestration.domain.entity.PipelineParam;
@@ -30,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -61,6 +63,8 @@ class PipelineSnapshotServiceTest {
         service = new PipelineSnapshotService(dagRepo, taskRepo, edgeRepo, paramRepo, versionRepo);
         dag = dag();
         task = task("transform", "{\"z\":1,\"sql\":\"SELECT 1\",\"a\":2}");
+        task.setOperatorRef("transform.select_columns");
+        task.setOperatorVersion("1.0.0");
         org.mockito.Mockito.lenient().when(dagRepo.findByIdAndTenantId(DAG_ID, TENANT_ID))
                 .thenReturn(Optional.of(dag));
         org.mockito.Mockito.lenient().when(taskRepo.findByDagIdOrderByCreatedAtAsc(DAG_ID))
@@ -94,6 +98,10 @@ class PipelineSnapshotServiceTest {
         JsonNode root = JsonUtil.mapper().readTree(first.json());
         assertThat(root.has("dag")).isTrue();
         assertThat(root.path("tasks").get(0).path("taskKey").asText()).isEqualTo("transform");
+        assertThat(root.path("tasks").get(0).path("operatorRef").asText())
+                .isEqualTo("transform.select_columns");
+        assertThat(root.path("tasks").get(0).path("operatorVersion").asText())
+                .isEqualTo("1.0.0");
         assertThat(root.path("edges")).hasSize(2);
         assertThat(root.path("edges").get(0).path("edgeLayer").asText()).isEqualTo("CROSS_ENGINE");
         assertThat(root.path("pipeline_params")).hasSize(2);
@@ -169,15 +177,40 @@ class PipelineSnapshotServiceTest {
 
         PipelineVersion published = service.publishSnapshot(DAG_ID);
         task.setConfig("{\"sql\":\"SELECT 999\"}");
+        task.setOperatorVersion("2.0.0");
         when(versionRepo.findById(published.getId())).thenAnswer(inv -> Optional.of(stored.get()));
 
         PipelineSnapshotService.ExecutionSnapshot execution =
                 service.loadExecutionSnapshot(published.getId(), DAG_ID);
 
         assertThat(execution.tasks()).singleElement()
-                .satisfies(snapshotTask -> assertThat(snapshotTask.getConfig()).contains("SELECT 1"));
+                .satisfies(snapshotTask -> {
+                    assertThat(snapshotTask.getConfig()).contains("SELECT 1");
+                    assertThat(snapshotTask.getOperatorRef()).isEqualTo("transform.select_columns");
+                    assertThat(snapshotTask.getOperatorVersion()).isEqualTo("1.0.0");
+                });
         assertThat(execution.params()).extracting(PipelineParam::getParamKey)
                 .containsExactly("region", "limit");
+    }
+
+    @Test
+    void rejectsSnapshotWhenOperatorReferenceAndVersionAreNotLockedTogether() {
+        task.setOperatorVersion(null);
+
+        assertThatThrownBy(() -> service.snapshot(DAG_ID))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("transform")
+                .hasMessageContaining("operatorRef")
+                .hasMessageContaining("operatorVersion");
+
+        task.setOperatorRef(null);
+        task.setOperatorVersion("1.0.0");
+
+        assertThatThrownBy(() -> service.snapshot(DAG_ID))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("transform")
+                .hasMessageContaining("operatorRef")
+                .hasMessageContaining("operatorVersion");
     }
 
     @Test

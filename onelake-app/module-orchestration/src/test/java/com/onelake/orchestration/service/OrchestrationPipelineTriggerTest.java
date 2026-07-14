@@ -248,6 +248,8 @@ class OrchestrationPipelineTriggerTest {
         Dag snapshotDag = pipelineDag();
         PipelineTask snapshotTask = task("published_task", true);
         snapshotTask.setConfig("{\"sql\":\"SELECT 'published'\"}");
+        snapshotTask.setOperatorRef("transform.customer_projection");
+        snapshotTask.setOperatorVersion("1.0.0");
         PipelineVersion version = new PipelineVersion();
         version.setId(versionId);
         version.setDagId(DAG_ID);
@@ -273,6 +275,9 @@ class OrchestrationPipelineTriggerTest {
         assertThat(taskCaptor.getValue()).extracting(PipelineTask::getTaskKey)
                 .containsExactly("published_task");
         assertThat(taskCaptor.getValue().get(0).getConfig()).contains("published");
+        ArgumentCaptor<TaskRun> taskRunCaptor = ArgumentCaptor.forClass(TaskRun.class);
+        verify(taskRunRepo).save(taskRunCaptor.capture());
+        assertThat(taskRunCaptor.getValue().getOperatorVersion()).isEqualTo("1.0.0");
         verify(compileService, never()).compile(DAG_ID);
         verify(taskRepo, never()).findByDagIdOrderByCreatedAtAsc(DAG_ID);
     }

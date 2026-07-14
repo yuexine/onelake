@@ -509,6 +509,56 @@ class PipelineSparkCompileTest {
     }
 
     @Test
+    void operatorUpgradeDoesNotChangeLockedSnapshotUntilTaskVersionIsRepublished() {
+        String operatorRef = "transform.customer_projection";
+        PipelineTask source = syncRefTask("source_customers", "onelake.ods.customers");
+        PipelineTask firstV1Snapshot = operatorTask(
+                "project_customer", operatorRef, "1.0.0",
+                "onelake.dwd.customer_projection", "{}");
+        PipelineTask replayedV1Snapshot = operatorTask(
+                "project_customer", operatorRef, "1.0.0",
+                "onelake.dwd.customer_projection", "{}");
+        PipelineTask republishedV2Snapshot = operatorTask(
+                "project_customer", operatorRef, "2.0.0",
+                "onelake.dwd.customer_projection", "{}");
+        List<PipelineTaskEdge> edges = List.of(
+                edge("source_customers", "project_customer", "in", "src"));
+        OperatorManifestDTO v1 = operatorManifest(
+                operatorRef, "1.0.0", "SELECT_EXPR",
+                "`customer_id` AS `customer_id`", false);
+        OperatorManifestDTO v2 = operatorManifest(
+                operatorRef, "2.0.0", "SELECT_EXPR",
+                "`customer_id` AS `customer_id`, upper(`segment`) AS `segment`", false);
+        when(operatorService.getManifest(tenantId, operatorRef, "1.0.0")).thenReturn(v1);
+        when(operatorService.getManifest(tenantId, operatorRef, "2.0.0")).thenReturn(v2);
+
+        PipelineCompileResult first = service.compile(
+                dagId, tenantId, List.of(source, firstV1Snapshot), edges);
+        String firstV1Sql = firstV1Snapshot.getConfig();
+
+        // 算子 latest 已升级到 v2，但旧发布快照仍携带 v1，必须可以完全复现。
+        PipelineCompileResult replayed = service.compile(
+                dagId, tenantId, List.of(source, replayedV1Snapshot), edges);
+        PipelineCompileResult republished = service.compile(
+                dagId, tenantId, List.of(source, republishedV2Snapshot), edges);
+
+        assertThat(first.allValidated()).isTrue();
+        assertThat(replayed.allValidated()).isTrue();
+        assertThat(republished.allValidated()).isTrue();
+        assertThat(replayedV1Snapshot.getConfig()).isEqualTo(firstV1Sql);
+        assertThat(firstV1Sql)
+                .contains("\"compiled_operator_version\":\"1.0.0\"")
+                .contains("`customer_id` AS `customer_id`")
+                .doesNotContain("upper(`segment`)");
+        assertThat(republishedV2Snapshot.getConfig())
+                .contains("\"compiled_operator_version\":\"2.0.0\"")
+                .contains("upper(`segment`) AS `segment`")
+                .isNotEqualTo(firstV1Sql);
+        verify(operatorService, times(2)).getManifest(tenantId, operatorRef, "1.0.0");
+        verify(operatorService).getManifest(tenantId, operatorRef, "2.0.0");
+    }
+
+    @Test
     void columnExpressionMaterializesThenReplacesColumnWithoutDuplicateNames() {
         PipelineTask source = syncRefTask("source_users", "onelake.ods.users");
         PipelineTask operator = operatorTask(

@@ -217,6 +217,7 @@ public class PipelineSnapshotService {
     private SnapshotPayload snapshot(Dag dag) {
         List<PipelineTask> tasks = new ArrayList<>(taskRepo.findByDagIdOrderByCreatedAtAsc(dag.getId()));
         tasks.sort(Comparator.comparing(PipelineTask::getTaskKey));
+        validateOperatorLocks(tasks);
         List<PipelineTaskEdge> edges = new ArrayList<>(edgeRepo.findByDagId(dag.getId()));
         edges.sort(Comparator.comparing(PipelineTaskEdge::getSourceKey)
                 .thenComparing(PipelineTaskEdge::getTargetKey)
@@ -245,6 +246,18 @@ public class PipelineSnapshotService {
 
         String json = canonicalize(root).toString();
         return new SnapshotPayload(json, sha256(json));
+    }
+
+    /** 发布快照只接受完整的算子引用，避免运行时被迫回退 latest 或生成不可复现版本。 */
+    private void validateOperatorLocks(List<PipelineTask> tasks) {
+        for (PipelineTask task : tasks) {
+            boolean hasOperatorRef = StringUtils.hasText(task.getOperatorRef());
+            boolean hasOperatorVersion = StringUtils.hasText(task.getOperatorVersion());
+            if (hasOperatorRef != hasOperatorVersion) {
+                throw new BizException(40022, "任务 " + value(task.getTaskKey())
+                        + " 的 operatorRef 与 operatorVersion 必须成对提交并锁定版本");
+            }
+        }
     }
 
     private PipelineVersion createVersion(Dag dag, SnapshotPayload payload) {

@@ -1,5 +1,61 @@
 # 发现与决策：数据集成模块后端迭代调研
 
+## 2026-07-14 算子版本锁定真实运行验证
+
+- 待验证关键边界：生产触发应读取 `published_version_id` 对应不可变快照，而不是当前 DEV `pipeline_task`；否则算子 v2 草稿会污染未重新发布的生产运行。
+- 为使“重新发布后采用 v2”可观测，算子发布 v2 后需要把 DEV 节点的 `operatorVersion` 显式升级到 v2；第一次生产复跑发生在流水线重新发布之前，第二次发生在重新发布之后。
+- 当前后端 `8080` 健康为 UP，Postgres/Redis/MinIO/Keycloak/Trino 已运行；Dagster/Spark 容器当前未运行，需要在真实触发前启动。
+- 代码路径已确认：`env=PROD` 触发会选取 DAG 的 `publishedVersionId`，读取 `PipelineSnapshotService.ExecutionSnapshot`，再从冻结的 task/edge 编译运行配置；不会直接读取当前 DEV `pipeline_task`。
+- 测试算子采用零输入 `RAW_SQL`，v1/v2 输出不同的 `version_marker` 和数值，结果表可直接证明实际执行模板版本；目标表选用已有 Iceberg `dwd` namespace，避免把 namespace 创建能力混入本次验证。
+- 流水线已是 `PUBLISHED` 且存在 `hasUnpublishedChanges=true` 时，再次请求 `PUBLISHED` 会先校验当前草稿并生成新快照；因此 v2 场景无需把主状态回退到 DRAFT/VALIDATED。
+- 运行依赖的 compose 服务名已确认：`hive-metastore`、`spark-master`、`spark-worker`、`dagster-postgres`、`dagster-user-code`、`dagster-webserver`、`dagster-daemon`。
+- 从算子拖入节点的实际请求 DTO 是 `OperatorTaskCreateRequest`；节点后续改绑 v2 使用完整 `PipelineTaskRequest`，其中 `operatorRef` 与 `operatorVersion` 成对提交。
+- Dagster 的统一流水线 job 为 `onelake_pipeline_run`，实际 Spark 节点通过公共 `spark-submit` 组装路径执行，可在 run 日志中反查提交命令和生成 SQL。
+- `OperatorTaskCreateRequest` 只接受 `operatorRef`、精确 `version` 和 `position{x,y}`；由服务端读取锁定 Manifest 并生成标准节点，符合本次从 Palette 语义验证。
+- Spark master/worker、Hive Metastore 与 Dagster webserver/daemon/user-code 当前均为 Up，Dagster UI 已监听 `3000`。
+- Keycloak `dev` 账号当前可获取 300 秒访问令牌，发布审批开关实时返回 `enabled=false`，本次发布会直接生成快照，不会停在审批态。
+- Manifest 注册接口直接接收完整 `OperatorManifestDTO`；算子新版本接口接收 `{manifest, changelog}`。
+- `RAW_SQL` 被编译器强制限制为单条 `SELECT/WITH` 查询，并物化为 `CREATE OR REPLACE TABLE <target> AS ...`；这正好让 v1/v2 常量差异落到同一结果表。
+- 内置目录实际位于 `orchestration/config/BuiltInOperatorCatalog.java`，先前 service 包路径是旧假设。
+- 本地后端不是由仓库日志文件托管，而是 detached screen 会话；运行态故障证据需要从 screen scrollback 或数据库查取。
+- 更正：Java 进程的 fd 1/2 实际都指向 `.run-logs/backend.log`；该文件只是被 `rg --files` 的 ignore 规则隐藏，可直接 tail 获取异常栈。
+- 后端日志持续显示本地库缺少 `orchestration.pipeline_subscription`，说明运行库存在 orchestration 迁移漂移；高频调度异常淹没了 HTTP 请求栈，需要直接核对数据库表/迁移而不能把 500 归因于本次 Manifest。
+- 数据库实证：v1 算子 `verify.version_lock_135715` 已成功注册；但 `orchestration.dag` 仅 14 列，缺少 V12+ 调度字段及 V24 的 `published_version_id/has_unpublished_changes`，创建流水线 500 的根因是本地迁移严重滞后。
+- 缺失的订阅表来自 V26；版本锁定验证本身依赖 V24 pipeline_version，因此必须先把 orchestration migration 补齐，否则无法形成发布快照证据。
+- `orchestration.flyway_schema_history` 只记录 baseline + V2..V5，确认不是单表误删；仓库当前迁移已到至少 V29。
+- 项目 canonical 入口是 `onelake-app/make migrate`，它按 schema 顺序调用 Flyway；先执行该入口验证 checksum/依赖，再决定是否需要项目已有的迁移恢复手段。
+- 为恢复本轮所需 schema，最终只对 orchestration 运行 Flyway 且关闭 migrate 前校验；待执行迁移成功，历史 checksum 未 repair。此环境修复应在报告中说明，不把它混同为版本锁定功能结果。
+- 补迁移后 orchestration history 到 V32，`pipeline_version`、`pipeline_subscription` 和 DAG 的发布指针/未发布变更字段均存在；后端健康仍为 UP。
+- v1 夹具已核对：operator id `297916dc-0366-4e4c-ae07-0a2dd505610c`，ref `verify.version_lock_135715`，目标表 `onelake.dwd.codex_operator_version_lock_135715`，模板输出 `v1/101`。
+- 流水线 `209e108d-e90a-4c21-bec7-4cef684edd0f` 已创建，拖入节点 key `verify_version_lock_135715`；标准字段实证为 `taskType=SPARK_SQL`、`engine=SPARK_SQL`、`category=EXEC`、`operatorVersion=1.0.0`，默认 config 带目标表及空输入契约。
+- v1 校验 `valid=true`，编译预览为 `CREATE OR REPLACE TABLE onelake.dwd.codex_operator_version_lock_135715 AS SELECT 'v1'..., 101...`。
+- 首次发布版本为 pipeline version `1`，version id `3c466f65-ab75-4ed5-a640-8f2a5dcff820`，checksum `ef84233e...faaef86f7`；快照 task 同时冻结 `operatorVersion=1.0.0` 和 `compiled_operator_version=1.0.0`。
+- 项目 `make dagster-up` 明确带 `--build` 重建 postgres/user-code/webserver/daemon，适合修复当前旧镜像契约漂移。
+- 本地没有 Python base image tag，只有 2026-06-26 的 `onelake-dagster-user-code:latest`；Dockerfile 对运行代码只做一次 `COPY definitions.py`，因此可在不联网的前提下基于现有镜像替换当前 definitions，保留原依赖层。
+- 离线刷新后的 user-code 镜像 id 为 `sha256:68d0748b...`；webserver/daemon 已重启，下一次触发将验证新 definitions 的 config schema 是否生效。
+- 失败 run `b2e45050-...` 已绑定 pipeline version id `3c466f65-...`，task_run 也持久化 `operator_version=1.0.0`，证明生产触发读取的是发布版本；但 Spark 尚未执行成功，不能据此报告结果复现。
+- 实际失败点是旧镜像以 root 在 read-only rootfs 上运行：Dagster telemetry 写 `/root/.dagster`、Ivy 写 `/root/.ivy2` 均失败；生成的 v1 spark-submit 和目标表/SQL已进入执行日志。需让进程使用 compose 已准备的可写 `/home/onelake` 和 `/opt/dagster/dagster_home`。
+- 容器实证：旧镜像 `Config.User` 为空、进程 uid=0、HOME=/root、DAGSTER_HOME 未设置；compose 已为 uid 10001 准备可写 tmpfs，但旧镜像没有应用当前 Dockerfile 的 `USER onelake`。离线镜像只需补 `USER 10001:10001`、HOME 与 DAGSTER_HOME 配置。
+- 修正后容器 uid/gid=10001，`/home/onelake` 与 `/opt/dagster/dagster_home` 写入测试通过，user-code healthy；后续失败若有将不再由 read-only root home 引起。
+- 第二次 Spark stderr 为 `basedir must be absolute: ?/.ivy2/local`：仅设置数字 USER/HOME 不足，JVM 仍需 `/etc/passwd` 中 uid 10001 对应的 home；当前 Dockerfile 的 `useradd` 正是缺失层。
+- 补用户后 `getent passwd` 与 JVM `user.home` 均返回 `/home/onelake`，Ivy 缓存路径前置问题已消除。
+- v1 成功 run `3e53af7f-249e-40e0-9467-562eaf6970e3`：pipeline_version_id=`3c466f65-ab75-4ed5-a640-8f2a5dcff820`，task `operator_version=1.0.0`，rows_written=1，artifact=`table:onelake.dwd.codex_operator_version_lock_135715`。
+- Trino 实际查询结果为 `{"version_marker":"v1","payload_value":101}`；这作为后两阶段“结果不变/升级变化”的基线。
+- 算子 v2 发布成功，最新版本/Manifest 均为 `2.0.0`，模板输出 `v2/202`；DEV 节点已显式改绑 v2，DEV compile-preview 也生成 v2 SQL。
+- 未重新发布时，DAG 仍为 PUBLISHED、`publishedVersionId=3c466f65-...`、版本列表仍只有 version 1/checksum `ef84233e...`，同时 `hasUnpublishedChanges=true`；这是第二次生产运行的关键前置状态。
+- 未重发生产 run `68673a21-f3a5-48e2-b756-ab4d8787b1d4` 成功，绑定的 pipeline_version_id 仍为 version 1 的 `3c466f65-...`，task_run `operator_version=1.0.0`、rows_written=1。
+- 该 run 后 Trino 结果仍是 `v1/101`，与首个成功 run 完全一致；DEV 已是 v2 但未污染生产执行，版本锁定与可复现性得到真实数据面证明。
+- 重新发布生成 pipeline version 2，id=`785f1922-ee1e-4737-99ea-e75ff9e89d0b`，checksum=`d9a83aed...ba1564`，发布指针已切换且 `hasUnpublishedChanges=false`。
+- version 2 快照冻结 `operatorVersion=2.0.0`、`compiled_operator_version=2.0.0` 和 v2/202 SQL；1→2 diff 只显示该节点 config 与 operatorVersion 从 v1 变为 v2，图结构无变化。
+- 重发后 run `14cbc940-4dfe-45e9-851b-b312f18de64d` 成功，绑定新 pipeline_version_id `785f1922-...`，task_run `operator_version=2.0.0`、rows_written=1。
+- 最终 Trino 结果切换为 `v2/202`；只有重新发布后生产结果才升级，符合预期。
+- 汇总数据库审计显示三个成功 run 依次绑定 pipeline/operator `1/1.0.0`、`1/1.0.0`、`2/2.0.0`，每次写入 1 行同一 artifact 表；两个发布快照 checksum 不同且均保留。
+- 测试夹具暂时保留用于复现：operator `verify.version_lock_135715`、pipeline `209e108d-...`、结果表 `iceberg.dwd.codex_operator_version_lock_135715` 及运行历史。
+- 最终环境复核：Hive Metastore、Spark master/worker、Dagster webserver/daemon 均 Up，Dagster Postgres 与 user-code healthy；本轮验证未修改业务代码，只更新文件规划日志。
+- 运行中的 OpenAPI 已包含 operator register/version、from-operator、validate/status/trigger 等 G2 接口，说明后端进程已加载本轮实现。
+- `PipelineController#trigger` 的 PROD 路径默认不传 `useVersionId`；`OrchestrationService` 随后选择 `dag.publishedVersionId` 并通过 `PipelineSnapshotService.loadExecutionSnapshot` 构造运行任务，代码边界符合锁定验证前提。
+
+
 ## 2026-07-14 G2 算子拖入生成可执行节点
 
 ### 二轮 Review 事实与修复
@@ -726,6 +782,51 @@
 | 流水线合并为统一编辑器 + 任务一等实体表 | 消除“灵活的跑不了/能跑的不灵活”分裂，任务类型化(SQL模型/字段治理/质量门禁/同步引用/Spark)支持数据开发与治理同图 |
 | 执行层做成引擎可插拔 SPI，dbt-on-Trino 为基线、Spark 为并列真实路径 | 用户要求扩展 Spark；复用唯一真实数据面 dbt-on-Trino 的同时不把 Spark 做成契约态摆设，跨引擎依赖经共享 Iceberg 表级闭合 |
 | 流水线运行 = dbt tag 选择器 + Dagster 单 job 分派 | 让 dbt 负责 Trino 子图 DAG/增量/依赖解析，避免自造执行引擎；Dagster 负责调度、跨引擎顺序与观测 |
+
+## 2026-07-14 湖仓与建模 V2 路线图 Review 修复发现
+- Stage 110 已删除 `DwdModelService.run` 和 `/models/{id}/run`；Modeling 只负责模型定义/校验/编译/发布，真实运行由已发布 Spark Pipeline 和 `onelake_pipeline_run` 承担。
+- G2 之后，算子节点按锁定 `operatorRef/operatorVersion` 读取精确 Manifest，`PipelineCompileService` 逐节点生成 `compiled_sql`；Dagster 仍以聚合 `run_spark_task_op` 顺序遍历任务，不等于每节点独立 op。
+- `CatalogSchemaChangeService.executeApproved` 同时强制 `SCHEMA_CHANGE` 类型和 `APPROVED` 状态，执行 ALTER 后回写 columns/classification；通用 WriteSqlValidator 若允许 ALTER 会绕过该治理边界。
+- `CatalogTableService.upsertAsset` 是私有方法；CTAS 路线图必须先抽取公开的资产注册服务，再让 SQL 工作台复用。
+- `module-modeling` 不依赖 `module-orchestration`，且 `PipelineSchedulerService` 从已发布快照读调度策略；BREAKING drift 需经 Outbox 通知 orchestration，并在读发布快照前先检查 live DAG 紧急 FROZEN 覆盖，才能无需重发布立即停止 cron。
+- Iceberg `ALTER TABLE RENAME` 仅改变表标识，不会将数据/元数据文件迁移到新 S3 prefix；TTL 默认收敛为逻辑 ARCHIVED，物理冷存储必须做复制/重写、校验和 Catalog 原子切换。
+
+## 2026-07-14 湖仓与建模 V2 路线图二轮 Review 修复发现
+- `UNIQUE (tenant_id, code)` 不能保证每租户最多一个默认 Catalog；需要 `WHERE is_default=true` 的 PostgreSQL 部分唯一索引，切换默认值必须在同一事务中完成。
+- Trino Iceberg `OPTIMIZE` 不接受 `order_by/z_order_cols`；M1 只用 `sorted_by` 表属性和 BIN_PACK/SORT 路径。`retain_last` 要按服务端能力探测，不支持且策略要求最小快照数时必须 fail closed；指定快照永久保护应用 Iceberg Tag。
+- 当前编译契约只有 `CompileTarget.SPARK`；`SPARK_SQL` 是 Manifest `template.kind`/任务引擎。`semantic.compile` 必须以 `compileTarget=SPARK` 通过 G1 可见性校验。
+- Branch/Tag 的事实源是 Iceberg table refs；当前 Trino JDBC 不能执行 Spark Branch DDL。控制面应通过与 Spark 数据面版本对齐的 Iceberg Java Catalog/ManageSnapshots API 管理 refs，本地表只作审计投影。
+- Spark 分支写入本轮选定 `<table>.branch_<branch>` 标识符为唯一契约；`FOR VERSION AS OF` 是读语义，`ALTER TABLE WRITE TO BRANCH` 不是可执行写语句，且 branch 写不能用 CTAS 创建新表。
+- 写 API 不应进入 `permitAll`；当前 `anyRequest().authenticated()` 已托底，再加 DE 方法角色即可。DEV/白名单是服务端受信配置，不得由客户端传入；DEV 仅本地 profile 允许并仅跳过 WRITE ACL。
+- Iceberg snapshot ID 不是时间序列，`max(snapshot_id)` 既错误又有并发竞态。写审计应在 asset 级串行边界内记录写前快照和时间窗，以 `$history/$snapshots` 的 `committed_at + parent_id` 唯一关联；歧义时标记 `UNKNOWN` 且禁用回滚。
+- SCD2 的独立 UPDATE + INSERT 会暴露半完成状态；应用单个 Spark MERGE 生成一个 Iceberg 快照，通过 `scd_change_request` 唯一幂等键处理重放，并串行化同 dimension/business key 的并发变更。
+
+## 2026-07-14 湖仓与建模 V2 路线图三轮 Review 修复发现
+- `FROM (SELECT DISTINCT tenant_id ...) t` 只暴露 `t.tenant_id`，默认 Catalog seed 引用 `t.id` 会在 Flyway 执行时直接失败。
+- `module-orchestration` 当前不应为 Catalog 维护引入新 TaskType/executor 或跨域 Service 依赖；维护策略、历史与执行都在 Catalog 域，因此采用域内 scheduler + 独立过期锁。
+- CTAS 的物理表先于 Catalog 资产注册存在；写审计必须以规范化 `target_fqn` 为稳定身份和锁 key，允许 `asset_id` 暂空并在注册后回填。
+- 现有资产授权事实源是 `security.access_grant.permissions` JSONB；`acl_resource` 的单值 `permission` 用于 SavedQuery/QueryTemplate，不能按文档伪造 `permissions` JSONB。
+- SemanticEntity 若只有 JPA 实体而无迁移，首次访问必然缺表；V10 必须先建 `modeling.semantic_entity`，Metric 用 `semantic_entity_id` 作权威外键、`entity_fqn` 仅作快照。
+- ROLE_PLAYING 维度会以 order_date/ship_date 等角色多次关联同一维度；唯一键必须纳入 `role_name`，同时用 fact FK 唯一约束防止单列重复绑定。
+- BREAKING drift 不能把 live DAG `schedule_mode` 当临时覆盖；原因级 `pipeline_freeze_override` 可幂等激活/定向 resolve，不会解除手工 FROZEN 或其他模型的 ACTIVE 覆盖。
+
+## 2026-07-14 G3 算子版本锁定收口发现
+- V31 已为 `pipeline_task` 增加 `operator_ref/operator_version`，并为 `task_run` 增加 `operator_version`；本轮无需数据库迁移。
+- `PipelineSnapshotService` 已序列化和反序列化算子引用与版本，但快照边界尚未主动拒绝 ref/version 只存在一项的不完整节点。
+- PROD 触发已从 `published_version_id` 读取 `ExecutionSnapshot`，再调用 `PipelineCompileService.compile(dagId, tenantId, snapshotTasks, snapshotEdges)`；不会重新读取实时 `pipeline_task`。
+- `PipelineCompileService` 已强制算子节点提供版本，并调用 `OperatorService.getManifest(tenantId, ref, exactVersion)`；该入口不会回退 `latestVersion`。
+- `OrchestrationService` 创建 `TaskRun` 时已经复制执行快照任务的 `operatorVersion`，但缺少明确的发布快照升级回归测试把这些边界串起来。
+- 阶段 113 已有真实 v1/v2 数据面验证证据；本轮重点是把同一不变量固化成快速、离线、可重复的模块单测。
+- G3 收口后，快照边界拒绝半锁定节点；升级复现测试两次只读取 `ref@1.0.0`，显式切换的新快照才读取 `ref@2.0.0`。`module-orchestration` 全量 483 个测试通过。
+
+## 2026-07-14 G3 真实运行复核发现
+- 当前后端健康为 UP；Postgres/Redis/MinIO/Trino、Spark master/worker、Hive Metastore、Dagster webserver/daemon 均为 running，Dagster user-code 与专用 Postgres healthy。
+- 阶段 113 的三次成功 run、两个发布快照、算子 v1/v2 和 Iceberg 结果表均有稳定标识，可直接从当前数据库交叉复核，而不需要伪造一组新结果。
+- 当前数据库仍保留 pipeline version 1/2：v1 快照锁定 `1.0.0` 并生成 `v1/101` SQL，v2 快照锁定 `2.0.0` 并生成 `v2/202` SQL；checksum 和版本 ID 均不同。
+- 三个目标 run 当前仍为 SUCCEEDED，绑定关系依次为 pipeline/operator `1/1.0.0`、`1/1.0.0`、`2/2.0.0`，每次 `rows_written=1` 且 artifact 相同。
+- 当前 Trino 表结果为 `v2/202`，与最终重发布版本一致。
+- Iceberg 时间旅行实时读取三个 snapshot_id，结果依次为 `first_v1=v1/101`、`unrepublished_v1=v1/101`、`republished_v2=v2/202`；结果数据与 pipeline/task version 绑定完全一致。
+- 现有证据同时覆盖 Manifest、发布快照、JobRun、TaskRun、Iceberg snapshot 和表内容，已能证明版本锁定与复现；无需新建第四次运行污染测试历史。
 
 ## 遇到的问题
 | 问题 | 解决方案 |

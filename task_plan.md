@@ -4,7 +4,7 @@
 基于当前数据集成后端、数据面开发指南和前端页面代码，形成可执行的后端迭代开发计划，并评估实施路线可行性。
 
 ## 当前阶段
-流水线与算子市场 G2 后端闭环：已安装 Palette + Manifest 创建标准 pipeline_task + 二轮 Review 契约修复（阶段 112 已完成；前端拖拽与 Inspector 进入 9.4）
+湖仓与建模 V2 路线图二轮 Review 问题修复（阶段 115 已完成）
 
 ## 各阶段
 
@@ -910,6 +910,68 @@
 - [x] 按 G2 范围暂存并提交本轮代码
 - **状态：** complete
 
+### 阶段 113：算子版本锁定与发布快照端到端验证
+- [x] 核对运行环境、API、发布快照和生产触发代码路径
+- [x] 创建可区分 v1/v2 结果的自定义算子、源数据和流水线
+- [x] 发布 v1 流水线并运行，记录版本、编译 SQL、run 与结果表
+- [x] 发布算子 v2 并把 DEV 节点升级到 v2，但不重新发布流水线
+- [x] 再次生产运行，确认仍使用已发布 v1 快照且结果不变
+- [x] 重新校验/发布流水线并运行，确认采用 v2 且结果按模板变化
+- [x] 汇总版本锁定、复现性和升级结论，记录测试数据清理状态
+- **状态：** complete
+
+### 阶段 114：湖仓与建模 V2 路线图 Review 修复
+- [x] 对照当前源码更正 DWD 运行入口、算子逐节点编译和 Spark 运行契约现状
+- [x] 从通用写 SQL 白名单排除 `ALTER TABLE`，明确复用已审批 Schema 变更路径
+- [x] 将 CTAS 资产注册改为先抽取公开服务边界，不再跨 Service 调用私有 `upsertAsset`
+- [x] 将 BREAKING drift 冻结改为 Outbox 跨域命令 + live DAG 运行态紧急覆盖
+- [x] 更正 TTL 归档语义，禁止用 `ALTER TABLE RENAME` 冒充 Iceberg 冷存储迁移
+- [x] 清理 Dagster Python 缓存并补充 `.gitignore`
+- [x] 运行文档一致性、空白和 Git 差异检查
+- **状态：** complete
+
+### 阶段 115：湖仓与建模 V2 路线图二轮 Review 修复
+- [x] 为每租户唯一默认 Catalog 增加数据库约束
+- [x] 收敛 Trino 快照过期和排序能力，移除不存在的 Z-Order/单快照排除语法
+- [x] 修正 `semantic.compile` Manifest 的 `compileTarget/template.kind/resourceHint`
+- [x] 将 Branch/Tag CRUD 改为 Iceberg 原生引用后端，不经 Trino 执行 Spark DDL
+- [x] 将 pipeline 分支写入改为 Spark branch identifier 或 WAP 契约
+- [x] 移除写 API `permitAll` 风险和客户端 DEV/白名单绕权参数
+- [x] 修正写审计 snapshot 关联，禁止使用 `max(snapshot_id)`
+- [x] 将 SCD2 变更改为幂等的单次 Iceberg 提交
+- [x] 运行文档回归、空白、Markdown 围栏和 Git 差异检查
+- **状态：** complete
+
+### 阶段 116：湖仓与建模 V2 路线图三轮 Review 修复
+- [x] 修正默认 Catalog seed 的 `tenant_id` 别名引用
+- [x] 将维护调度收敛到 Catalog 域独立 scheduler/分布式锁，不扩展流水线 TaskType
+- [x] 修正 CTAS 注册前写审计：`target_fqn` 必填、`asset_id` 可空且注册后回填
+- [x] 将 WRITE 授权统一到 `security.access_grant.permissions`
+- [x] 增加 `modeling.semantic_entity` 迁移与 Metric 权威外键
+- [x] 为 ROLE_PLAYING 维度增加 `role_name` 并修正唯一约束
+- [x] 以原因级 `pipeline_freeze_override` 补齐 BREAKING drift 冻结/定向解冻闭环
+- [x] 清理错误注解引号、枚举拼写、通用 DROP 开关与跨系统事务误导
+- [x] 运行文档空白、围栏、冲突标记、旧表述和 Git 差异检查
+- **状态：** complete
+
+### 阶段 117：G3 算子版本锁定单测与快照边界收口
+- [x] 核对 M3 发布快照、9.1 算子 SQL 生成和 `task_run.operator_version` 真实链路
+- [x] 确认节点必须显式切换版本后重新发布，不自动提升 latest
+- [x] 写入并提交 G3 设计规格 `9ebf15f`
+- [x] TDD：补快照字段锁定、缺失版本拒绝和算子升级复现测试
+- [x] 在 `PipelineSnapshotService` 收口 ref/version 成对锁定不变量
+- [x] 补运行创建 `task_run.operator_version` 的显式回归断言
+- [x] 同步 M4 9.3 落地状态并运行模块全量测试与 diff 检查
+- **状态：** complete
+
+### 阶段 118：G3 算子版本锁定真实运行复核
+- [x] 恢复阶段 113 的 v1/v2 流水线、运行记录和结果表证据
+- [x] 检查当前后端、Dagster、Spark、Trino 与测试夹具状态
+- [x] 复核 v1 首次运行、升级不重发运行和 v2 重发运行的快照/TaskRun/结果
+- [x] 评估补充运行必要性：现有 DB 与 Iceberg 时间旅行证据完整，不制造冗余第四次运行
+- [x] 输出数据工程师视角的版本锁定与复现报告
+- **状态：** complete
+
 ## 关键问题
 1. 当前 `module-integration` 已落库和暴露的能力边界是什么？
 2. 前端数据集成页面实际需要哪些后端接口和异步状态？
@@ -936,6 +998,21 @@
 | G2 二轮失败测试首次 testCompile 找不到 `getInstalledManifest`，且同名查询仍返回 Optional | 1 | 按确认设计新增集中安装 Manifest 解析，并将同层查询改为 List 后稳定排序 |
 | G2 二轮首轮绿灯测试：同名夹具 UUID 高位导致自然序与字面序不同，编译 mock 缺少 getManifest | 1 | 使用无符号高位歧义的固定 UUID，并为 9.1 编译阶段单独提供锁定 Manifest mock |
 | 测试汇总读取命令在 `onelake-app/` 下重复拼接 `onelake-app/` 路径 | 1 | 改用相对模块路径并以 XML 解析汇总 Surefire 结果 |
+| 算子版本锁定验证首次在仓库根目录执行 `docker compose config --services`，未找到 compose 文件 | 1 | 后续环境命令切换到 `onelake-app/`，按真实 compose 服务名启动 Spark/Dagster |
+| 版本验证按猜测读取 `OperatorRegisterRequest` / `PipelineTaskFromOperatorRequest` 文件失败 | 1 | 改用类名和控制器方法搜索实际 DTO 文件，避免按文件名推断 API body |
+| 读取 `BuiltInOperatorCatalog` 时使用了旧的 service 包路径 | 1 | 不依赖旧路径；改用 Manifest DTO、校验器和 RAW_SQL 回归测试校准注册体 |
+| 首次用 jq 组装 v1 Manifest 时 SQL 单引号导致 zsh `unmatched quote` | 1 | SQL 作为独立 `jq --arg sql` 参数传入，不再嵌入 shell 单引号程序 |
+| v1 Manifest 校验脚本按 `.data.valid` 判断，实际响应字段为 `.data.ok` | 1 | 保留已通过的校验结论，脚本改用 `.data.ok` 后再执行注册与建图 |
+| v1 注册后创建空白流水线与拖入节点返回 `50000 internal error` | 1 | 暂停后续运行，读取后端日志定位根因并核对已落库算子，修复验证环境后继续 |
+| `make migrate` 在 common V3/V7 checksum 校验失败 | 1 | 不对无关 schema 执行 Flyway repair；改为定向运行 orchestration migration，最小化本次验证的环境变更 |
+| 定向 orchestration Flyway 因已应用 V3/V4/V5 checksum 漂移失败 | 1 | 不 repair 历史；定向设置 `validateOnMigrate=false`，仅应用待执行 V6+ 迁移以恢复当前代码所需 schema |
+| 首次 PROD 触发被 Dagster 旧 user-code schema 拒绝 `callback_base_url/runtime_params` | 1 | 从当前工作树重建 Dagster user-code/webserver 镜像并重启，再确认 config schema 后重触发 |
+| 读取 Dagster 镜像定义时猜测的 `Dockerfile` / `Dockerfile.webserver` 不存在 | 1 | 使用 compose 已声明的 `Dockerfile_dagster` 和 canonical `make dagster-up`，不再猜文件名 |
+| `make dagster-up` 构建拉取 Python base image metadata 超时 | 1 | 检查本地镜像缓存，优先离线重建仅包含当前 definitions 的 dagster-user-code，并保留现有 webserver 镜像 |
+| v1 run 首次执行失败，且诊断 SQL 猜测了不存在的 `env/task_type` 列 | 1 | 使用 information_schema/`select *` 读取真实运行记录，并结合 Dagster run 日志定位数据面失败 |
+| 修正 USER/HOME 后第二次 v1 spark-submit 仍失败 | 1 | 保留发布版本和 task 版本证据，读取第二次 run 的独立 Spark stderr，逐项修复剩余运行环境问题 |
+| 数字 uid 10001 无 passwd 条目，Ivy 将 home 解析为 `?/.ivy2` | 1 | 在离线镜像补 `onelake` 用户（uid 10001, home `/home/onelake`），再重建 user-code 服务 |
+| 最终组合审计在仓库根目录执行 `docker compose ps` 再次未找到 compose 文件 | 1 | Git 检查结果保留；容器状态切换到 `onelake-app/` 单独复核，后续不混用两个工作目录 |
 | 运行中的后端将 `/api/v1/integration/datasources/{id}/schemas` 当作静态资源处理并返回 500 | 1 | 执行 `mvn -q install -DskipTests -Djacoco.skip=true` 刷新本地 SNAPSHOT，并重启 `onelake-backend` |
 | 刷新模块后启动失败：`alertRepository` Bean 命名冲突 | 1 | 将质量模块仓储重命名为 `QualityAlertRepository` |
 | 刷新模块后启动失败：两个 `Alert` Entity 默认实体名冲突 | 1 | 为通用告警和质量告警实体分别指定 `CommonAlert`、`QualityAlert` |
@@ -953,6 +1030,10 @@
 | Airbyte 2.x job 统计位于 `attempt.attempt`，OneLake run 行数回写为 0 | 1 | 修复 `getJobSnapshot` 兼容 nested attempt stats，reconcile 后 `rowsRead=3`、`rowsWritten=3` |
 | 详情页 Tab 点击后仍停留在第一个 tab | 1 | `DetailPageLayout` 增加内部 active tab 状态，未传 `activeTab` 时按非受控模式切换 |
 | 第二轮首次验证事件 payload 缺少 `fieldMapping` | 1 | 发现运行进程未完整加载 module-integration 新 jar，执行进程级后端重启后新事件携带 20 个字段映射 |
+| G3 规划记录首次 patch 误把 `progress.md` 的阶段 116 尾部作为三个文件的共同上下文 | 1 | 分别读取三个规划文件真实尾部，改为按各自稳定标题追加，未覆盖已有内容 |
+| G3 聚焦红灯测试 61 个用例中 1 个失败：快照未拒绝不完整 operatorRef/operatorVersion | 1 | 在 `PipelineSnapshotService` 规范化 JSON 前增加成对锁定校验，其余升级复现和运行建档用例保持通过 |
+| G3 运行复核首次查询 Iceberg `$snapshots` 时 shell 展开表名 | 1 | 查询只读且未改数据；改用单引号保护包含 `$` 的元数据表名后重试 |
+| G3 Iceberg 时间旅行查询的阶段标签单引号被外层 shell 消耗 | 1 | 未执行成功且未改数据；改为无 `$` 的双引号 SQL 参数后重试 |
 
 ## 备注
 - 重要发现写入 `findings.md`，阶段进展写入 `progress.md`。

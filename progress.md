@@ -1,5 +1,59 @@
 # 进度日志
 
+## 会话：2026-07-14（算子版本锁定真实运行验证）
+
+### 阶段 113：v1/v2 发布快照复现
+- **状态：** complete
+- 用户要求以数据工程师视角做三阶段真实运行验证：v1 发布运行；DEV 升级到 v2 但不重发时生产仍复现 v1；重发后采用 v2。
+- 验证将同时记录 operator version、pipeline draft/published snapshot、compiled SQL、job/task run 和结果表，避免仅凭接口状态下结论。
+- 已确认后端健康和 G2 OpenAPI；核心依赖中 Postgres/Redis/MinIO/Keycloak/Trino 正常，Dagster/Spark 尚未启动。
+- 已沿 `OrchestrationService -> PipelineSnapshotService -> PipelineCompileService` 核对：生产运行编译发布快照中的冻结任务，DEV 节点升级不会影响尚未重新发布的生产版本。
+- 首次在仓库根目录执行 `docker compose config --services` 失败，因为 compose 文件位于 `onelake-app/`；后续统一切换到该目录执行环境命令。
+- 已确认 `PUBLISHED -> PUBLISHED` 且草稿有未发布变更时，后端会重新校验并发布新快照，符合第三阶段验证所需状态机路径。
+- 已从 compose 配置确认 Spark、Hive Metastore 与 Dagster 的准确服务名，下一步启动真实运行组件。
+- 已成功启动 `hive-metastore`、Spark master/worker 与 Dagster postgres/user-code/webserver/daemon；compose 健康检查通过后再进入 API 造数。
+- 首次按猜测文件名读取注册/拖入请求 DTO 时，两个文件名与实际代码不符；已记录并改用类名搜索定位，不据此猜请求结构。
+- 已定位真实拖入 DTO `OperatorTaskCreateRequest` 和统一 Dagster job `onelake_pipeline_run`；下一步读取其字段并执行 API 注册/建图。
+- 运行组件启动后复核均为 Up，Dagster user-code 健康；拖入请求精确字段也已从 DTO 确认。
+- 已实时验证 Keycloak 认证可用，发布审批关闭；具备直接执行三阶段 API 流程的前置条件。
+- 搜索内置算子示例时使用了过期路径 `service/BuiltInOperatorCatalog.java`，实际文件不在该路径；本次将以 DTO、校验接口和 RAW_SQL 单测为准。
+- 已确认 RAW_SQL 编译物化语义：安全查询会变为目标 Iceberg 表的 `CREATE OR REPLACE TABLE AS`，可用同一表精确比较三个运行阶段。
+- 首次组装 v1 Manifest 的 shell 命令因 SQL 单引号嵌入 jq 程序导致 zsh 引号未闭合，API 尚未收到请求、未产生测试数据；改为用 `jq --arg sql` 传递模板文本后重试。
+- 修正引号后 Manifest 校验实际通过（`ok=true, errors=[]`），但脚本错误读取为 `.data.valid` 而提前退出；注册/建图仍未执行，改按真实字段 `.data.ok` 判断。
+- v1 注册已进入后端，但随后创建空白流水线和拖入节点均返回 `code=50000 internal error`；先暂停后续步骤，读取后端真实日志定位原因。注册操作可能已落库，定位后将按 ref 查证并复用或明确记录孤立夹具。
+- 仓库 `.run-logs` 当前没有可读日志文件；后端仍运行在 detached screen `onelake-backend`，改从 screen scrollback 抓取异常栈。
+- screen hardcopy 没有捕获历史输出；进一步从 Java 进程文件描述符确认 stdout/stderr 实际写入被 gitignore 的 `.run-logs/backend.log`，此前 `rg --files` 因忽略规则未列出该文件。下一步直接读取该日志。
+- 日志检出本地库缺少 `orchestration.pipeline_subscription` 的持续调度异常，且噪声掩盖创建流水线的 HTTP 栈；下一步直接查询 migration history、DAG 表结构和刚注册算子，定位需要补齐的本地迁移。
+- 数据库确认注册已落库为 `verify.version_lock_135715@1.0.0`，而 DAG 表仍停在早期 14 列，未应用版本快照/自动化等后续迁移；需先校准并执行项目迁移，再继续建图。
+- Flyway history 已确认 orchestration 仅到 V5；准备执行项目 `make migrate`，先让 canonical migration 流程报告真实阻塞。
+- `make migrate` 在第一个 common schema 校验阶段即失败：已应用 V3/V7 checksum 与当前文件不一致，尚未触碰 orchestration。为避免对无关 schema 执行 `repair`，改为单独运行 orchestration Flyway，确认该 schema 自身状态。
+- 定向 orchestration Flyway 也因历史 V3/V4/V5 checksum 漂移拒绝迁移；这与当前文件曾被修改的本地历史一致。不会执行 `repair` 改写旧 checksum，改用 `validateOnMigrate=false` 仅应用待执行 V6+，保留既有历史记录原样。
+- 定向 orchestration Flyway（`validateOnMigrate=false`）已成功应用所有待执行迁移；未执行 repair、未改写 V3/V4/V5 历史 checksum。下一步复核 V24/V26 结构并重试建图。
+- 复核通过：orchestration 已到 V32，发布快照/订阅表和 DAG 新字段完整，后端健康；v1 算子与目标表/SQL 均可通过 API 和数据库交叉查证。
+- 已从 `verify.version_lock_135715@1.0.0` 创建标准 Spark 节点和空白流水线，字段/默认 config/位置正确；准备校验、发布并首次触发。
+- v1 流水线已校验并发布为不可变版本 1，发布指针 `3c466f65-ab75-4ed5-a640-8f2a5dcff820`；编译 SQL 和快照锁定版本均为 v1，准备触发生产运行。
+- 首次 PROD 触发被 Dagster 拒绝：运行中的 user-code config schema 不认识后端发送的 `callback_base_url/runtime_params`，表明刚启动的是旧镜像。该次没有形成可用运行结果；需从当前工作树重建 Dagster 镜像并重启相关服务。
+- 已确认 canonical `make dagster-up` 会 `--build` 当前 Dagster 代码；读取 Dockerfile 时误猜了 `Dockerfile`/`Dockerfile.webserver`，实际 compose 使用 `Dockerfile_dagster`，不影响后续 make 入口。
+- `make dagster-up` 在 Docker BuildKit 拉取 Python base image metadata 时因 registry deadline 超时失败，现有容器未被成功替换。下一步检查本地 base image/cache，并优先只重建包含 definitions 的 user-code 镜像。
+- 本地 base tag 不存在，但旧 user-code 镜像完整且 Dockerfile 的业务变化入口仅是 `definitions.py`；准备通过临时容器替换该文件并 commit 新本地镜像，再强制重建 user-code 服务，不访问 registry。
+- 已离线生成 user-code 镜像 `sha256:68d0748b...`，强制重建 user-code 并重启 webserver/daemon；等待健康后重触发同一 pipeline v1。
+- 新 definitions 已被接受并创建 v1 run `b2e45050-8db1-4a91-ad9d-960e93f736e1`，但运行从 QUEUED 转为 FAILED；诊断查询又误用了不存在的 `job_run.env` / `task_run.task_type` 列。下一步用 `select *`/information_schema 和 Dagster 日志读取真实失败原因。
+- 真实失败已定位为旧镜像用户/可写目录漂移：发布版本和 task_run 均正确锁定 v1，Spark submit 已组装，但 root 的 `.dagster/.ivy2` 在 read-only rootfs 无法写入。下一步修正本地镜像 USER/HOME/DAGSTER_HOME 后重跑。
+- 已确认旧镜像以 root 运行，而当前 Dockerfile 预期 uid 10001；不修改仓库代码，直接给离线本地镜像补正确 USER/HOME/DAGSTER_HOME 配置并重建服务。
+- user-code 镜像已更新为 `sha256:7b4894ab...`，容器实证 uid/gid=10001、HOME 和 DAGSTER_HOME 均可写、健康检查通过；准备再次触发同一 v1 发布版本。
+- 第二次 v1 运行 `324dcb07-...` 仍在 spark-submit 阶段失败，但发布版本 id 与 task `operator_version=1.0.0` 继续正确；read-only 目录问题已排除，读取本次 Dagster/Spark 日志定位新的具体失败点。
+- 第二次失败点已精确定位：数字 uid 10001 在旧镜像 `/etc/passwd` 中没有用户条目，Java 将 `user.home` 解析为 `?`，Ivy 因 `?/.ivy2` 非绝对路径退出。需给离线镜像补当前 Dockerfile 本应创建的 `onelake` 用户条目。
+- 离线镜像 `sha256:116830ec...` 已补 onelake 用户；容器/Java 实证 uid=10001(onelake)、`user.home=/home/onelake`、健康检查通过，准备第三次触发 v1。
+- v1 第三次运行成功：run `3e53af7f-...`、task SUCCEEDED、1 行写入、锁定 operator v1；Trino 读取结果 `v1/101`，首阶段基线完成。
+- 已发布 operator v2 并把 DEV 节点升级到 2.0.0；DEV 预览为 v2/202，但生产发布指针和唯一发布版本仍是 v1 快照，`hasUnpublishedChanges=true`。准备不重发直接触发 PROD。
+- 未重发的第二次 PROD run `68673a21-...` 成功，仍绑定发布版本 1 / operator 1.0.0；Trino 结果保持 `v1/101`，第二阶段通过。
+- 已重新发布 pipeline version 2（`785f1922-...`）；新快照与结构化 diff 均确认节点/compiled SQL 从 v1 切换 v2，准备触发最终 PROD。
+- 重发后 PROD run `14cbc940-...` 成功，绑定 pipeline version 2 / operator 2.0.0；Trino 结果变为 `v2/202`，第三阶段通过。
+- 最终 SQL 审计已并列核对两个发布版本、三个成功 run 和两份算子模板；`git diff --check` 通过。组合状态命令中的 `docker compose ps` 又因在仓库根目录执行而失败，改在 `onelake-app/` 单独复核容器。
+- 收口复核：Spark/Hive Metastore/Dagster 服务均 Up（user-code 与 Dagster Postgres healthy）；测试夹具保留用于复现，不清理 operator/pipeline/run/result table；本轮未修改业务代码，因此不重复运行 Maven 单测。
+- 已定位 PROD 触发读取 `publishedVersionId` 不可变快照的代码路径，下一步核对请求结构、数据面启动命令和结果表方案。
+
+
 ## 会话：2026-07-14（G2 算子拖入生成可执行节点）
 
 ### 阶段 111：设计前上下文核对
@@ -2361,3 +2415,86 @@
 
 ---
 *每个阶段完成后或遇到错误时更新此文件*
+
+### 阶段 114：湖仓与建模 V2 路线图 Review 修复
+- **状态：** complete
+- **开始时间：** 2026-07-14 CST
+- 执行的操作：
+  - 读取 `RTK.md` 和现有文件规划上下文，以当前源码校准 Review 结论。
+  - 修正 V2 总计划中已删除的 DWD 独立运行入口、过期的算子编译描述和 Spark contract-only 判定。
+  - 修正 M1 TTL 方案：默认逻辑归档，物理冷存储要求复制/重写、校验和 Catalog 原子切换。
+  - 修正 M2 通用写 SQL、CTAS 资产注册和 BREAKING drift 紧急冻结的安全/模块边界。
+  - 删除 `onelake-app/dagster/__pycache__/`，并在 `.gitignore` 忽略 `__pycache__/` 与 `*.py[cod]`。
+- 验证：
+  - `git diff --check` 通过。
+  - 三份 V2 新文档的 no-index whitespace check 通过，无尾随空白或冲突标记。
+  - Markdown 代码围栏平衡检查通过：M1=40、M2=54、总计划=6。
+  - 旧错误表述回归检索为 0，`onelake-app/dagster` 下无 `__pycache__`/`*.pyc` 遗留。
+  - 本轮只修改文档与 `.gitignore`，未运行 Maven 测试。
+
+### 阶段 115：湖仓与建模 V2 路线图二轮 Review 修复
+- **状态：** complete
+- **开始时间：** 2026-07-14 CST
+- 执行的操作：
+  - 核对当前 Trino JDBC 477、Spark 3.5.1 + Iceberg 1.5.2、`CompileTarget.SPARK`、`SecurityConfig.anyRequest().authenticated()` 和现有 Spark-only 流水线边界。
+  - 对照 Trino/Iceberg 官方能力确认 8 项 Review 问题为可执行性、安全或数据一致性缺陷。
+  - 为每租户唯一默认 Catalog 补充部分唯一索引，并将默认切换收敛为事务操作。
+  - 将 M1 维护收敛为 Trino 真实支持的 `retain_last` 能力探测、`sorted_by` 和 BIN_PACK/SORT；Z-Order 延后到 Spark executor，快照保护延后到 Iceberg Tag。
+  - 修正 `semantic.compile` 为 `compileTarget=SPARK + template.kind=SPARK_SQL`，与现有 G1 校验和 Spark-only 运行契约一致。
+  - Branch/Tag 改为 Iceberg Java Catalog/ManageSnapshots 事实源；pipeline 分支写选定 Spark branch identifier，禁用不存在或只读的 SQL 语法。
+  - 写 API 保留认证托底并增加 DE 方法角色；DEV 模式、白名单和资源限制改为仅服务端可控。
+  - 写审计改为写前快照 + 提交时间 + 父链唯一关联，歧义时 `UNKNOWN` 且不允许回滚；禁止 `max(snapshot_id)`。
+  - SCD2 改为带幂等回执的单个 Spark MERGE/Iceberg 快照提交，并覆盖失败、重放与并发验收。
+- 验证：
+  - `git diff --check` 通过；三份未跟踪 V2 文档的 `git diff --no-index --check` 均通过。
+  - Markdown 代码围栏成对：总计划 6、M1 40、M2 54。
+  - 冲突标记、尾随空白、旧错误正向表述回归检索均为 0；`onelake-app/dagster` 下无 `__pycache__`/`*.pyc` 遗留。
+  - 本轮仅修改路线图和规划记录，未修改业务代码，因此未运行 Maven/前端测试。
+
+### 阶段 116：湖仓与建模 V2 路线图三轮 Review 修复
+- **状态：** complete
+- **开始时间：** 2026-07-14 CST
+- 执行的操作：
+  - 修正 M1 默认 Catalog seed 的无效 `t.id`，改为子查询实际暴露的 `t.tenant_id`。
+  - 将维护调度收敛为 `module-catalog` 内的 `CatalogMaintenanceScheduler`，新增独立 `maintenance_scheduler_lock` 迁移草案，移除新流水线 TaskType/executor 方案。
+  - 修正 M2 写审计与权限：`target_fqn` 必填、`asset_id` 可空且 CTAS 注册后回填；WRITE 复用 `security.access_grant.permissions`。
+  - 在 modeling V10 增加 `semantic_entity` 建表草案和 Metric 外键；在 `fact_dimension_binding` 增加 `role_name` 与可支持 ROLE_PLAYING 的唯一键。
+  - 在 orchestration V34 增加 `pipeline_freeze_override`，将 BREAKING drift 改为 requested/resolved 双事件和原因级冻结/解冻，不改写手工 `schedule_mode`。
+  - 同步 V2 总计划、M1/M2 详细任务与 Agentic 提示词，并清理错误注解引号、`CONFLAMED` 拼写和通用 DROP/事务回滚误导。
+- 验证：
+  - `git diff --check` 通过；三份未跟踪 V2 文档的 `git diff --no-index --check` 均通过。
+  - Markdown 代码围栏成对；冲突标记、尾随空白和七项旧错误表述回归检索为 0。
+  - 首次 no-index 校验脚本误用 zsh 只读变量 `status`；改为 `rc` 后重跑通过，该脚本失败未修改文件。
+  - 本轮仅修改 Markdown 路线图与规划记录，未修改业务代码，因此未运行 Maven/前端测试。
+
+### 阶段 117：G3 算子版本锁定单测与快照边界收口
+- **状态：** complete
+- **开始时间：** 2026-07-14 CST
+- 执行的操作：
+  - 读取 `RTK.md`、M4 9.3 任务、M3 `PipelineSnapshotService`、9.1 `PipelineCompileService`、`OperatorService` 精确版本读取和 `OrchestrationService` 运行建档路径。
+  - 确认当前生产链路已具备快照执行和精确 Manifest 查询，剩余缺口是快照不完整绑定的边界防御以及跨升级单测覆盖。
+  - 与用户确认版本采用语义：算子升级不自动改写草稿节点；只有显式把节点切换到新版本并重新发布，新运行才采用新版本。
+  - 写入设计规格 `docs/superpowers/specs/2026-07-14-operator-version-lock-design.md`，提交为 `9ebf15f`。
+  - 规划记录首次 patch 因错误复用不同文件的尾部上下文未应用；按三个文件真实结构分别追加后恢复。
+  - TDD 红灯：运行 61 个聚焦测试，新增快照不完整绑定用例按预期失败，其余锁定版本编译、v1/v2 复现和 `task_run.operator_version` 用例通过。
+  - 在 `PipelineSnapshotService` 生成规范化 JSON 前增加 `operatorRef/operatorVersion` 成对锁定校验，不引入 latest 回退或新数据模型。
+  - 聚焦绿灯：`PipelineSnapshotServiceTest,PipelineSparkCompileTest,OrchestrationPipelineTriggerTest` 共 61 个测试全部通过。
+  - 同步 M4 9.3 落地状态，记录发布快照、精确 Manifest 编译、运行版本建档和升级复现覆盖。
+- 验证：
+  - 红灯：聚焦 61 个测试中仅新增快照不完整绑定用例失败，证明缺口位于快照边界。
+  - 绿灯：同一聚焦命令 61/61 通过。
+  - `mvn -q -pl module-orchestration -am test` 通过；`module-orchestration` 483 个测试，0 failure / 0 error / 0 skipped。
+  - `git diff --check` 通过。
+
+### 阶段 118：G3 算子版本锁定真实运行复核
+- **状态：** complete
+- **开始时间：** 2026-07-14 CST
+- 执行的操作：
+  - 恢复阶段 113 的真实验证资产：算子 `verify.version_lock_135715`、v1/v2 发布版本、流水线发布版本 1/2、三次成功运行和结果表 `onelake.dwd.codex_operator_version_lock_135715`。
+  - 本轮只把当前运行时和数据库中仍可核验的事实作为最终结论；旧记录若已被清理会明确标注，不用计划文本冒充实时证据。
+  - 当前态检查通过：后端 `/actuator/health` 为 UP，Trino ACTIVE，Dagster server 可访问；Spark、Hive Metastore、Dagster 和核心存储容器均在运行。
+  - 数据库实时复核两个发布快照与三个 run：版本/算子绑定为 `1/1.0.0`、`1/1.0.0`、`2/2.0.0`，三次均 SUCCEEDED、写入 1 行。
+  - 当前 Trino 结果表返回 `v2/202`；首次读取 Iceberg `$snapshots` 时 shell 展开了 `$snapshots`，实际查询落到基础表并报列不存在，未修改数据。下一步用单引号保护元数据表名。
+  - 正确读取 Iceberg `$snapshots`：保留三次 append 快照，提交时间分别对应三次成功运行；首次时间旅行 UNION 的阶段标签被 shell 引号消耗，查询未成功且未修改数据，已改用双引号 SQL 参数。
+  - Iceberg 时间旅行成功：三个快照内容为 `v1/101`、`v1/101`、`v2/202`，分别对应首次 v1、升级不重发、显式改绑并重发 v2。
+  - 证据闭环后未触发额外运行：避免产生与用户三阶段验收无关的第四条历史记录；本轮所有运行态操作均为只读查询。
